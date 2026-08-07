@@ -1,0 +1,17 @@
+[package]
+name = "rungstar-audio"
+description = "Audio clock, mixing, capture routing and song decoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+
+[dev-dependencies]
+tempfile = "3"

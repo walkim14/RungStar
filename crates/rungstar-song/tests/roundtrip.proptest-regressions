@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e6e0be6c4dd991d77ddd11282d3f803dc851808dd2eceea7da52cfb66c1bbadc # shrinks to text = "#TITLE:a\n#ARTIST: \n#BPM:1\n#GAP:0\n: 3 0 0 \n: 2 0 0 \n: 1 0 0 \nE\n"
+cc 9cb123e9c0feb80ce5715ec852b166b19fddc8e838773d4d6e9f5df9c46be05e # shrinks to text = "#TITLE:0\n#ARTIST:0\n#BPM:1\n#GAP:0\n: 3 0 0 \n: 2 0 0 \n: 1 0 0 \nE\n"
+cc c3775815c0c4a7595d0cb8b9c407300f5833e30141d8494a2431fe03279ad53e # shrinks to text = "#TITLE:0\n#ARTIST:a\n#BPM:1\n#GAP:0\n: 3 0 0 \n: 2 0 0 \n: 1 0 0 \nE\n"
+cc c7145b97174be2e445f125522c65f14c07b1ecd9a404311507bf5e7a19c7e14f # shrinks to text = "#TITLE:a\n#ARTIST:,\n#BPM:1\n#GAP:0\n: 2 0 0 a\n: 1 0 0 A\nE\n"
+cc 5752a056abae18281d156eb02e42037d37bb8e10e012d2376095d622ea742f8d # shrinks to text = "#TITLE:a\n#ARTIST:,\n#BPM:1\n#GAP:0\n: 1 0 0 éA\nE\n"
+cc 4fad8b2cdbd236e656d7235416ded9e59eeca8e0b61ad1d245afe555854bb9c7 # shrinks to text = "#TITLE:ü\n#ARTIST: \n#BPM:1\n#GAP:0\n: 1 0 0 ß\nE\n"
+cc 4ce643918493253f1d46a1749fa3bb320ac88bed1dd9b339806a6aa000b38460 # shrinks to text = "#TITLE:0\n#ARTIST:ö\n#BPM:1\n#GAP:0\n: 1 0 0 ß\nE\n"

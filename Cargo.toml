@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/walkim/rungstar"
+authors = ["RungStar contributors"]
+
+[workspace.dependencies]
+# error handling
+thiserror = "2"
+anyhow = "1"
+# text / encoding
+encoding_rs = "0.8"
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# parallelism
+rayon = "1"
+# hashing
+blake3 = "1"
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+# dev
+proptest = "1"
+criterion = { version = "0.7", features = ["html_reports"] }
+
+# internal
+rungstar-song = { path = "crates/rungstar-song" }
+rungstar-pitch = { path = "crates/rungstar-pitch" }
+rungstar-score = { path = "crates/rungstar-score" }
+rungstar-audio = { path = "crates/rungstar-audio" }
+rungstar-platform = { path = "crates/rungstar-platform" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Parsing a large library is miserable in an unoptimised build, so the hot crates stay
+# optimised even in dev. Further entries get added as those crates land.
+[profile.dev.package.rungstar-song]
+opt-level = 2
+# Pitch detection runs per player per analysis tick; unoptimised it cannot keep up at all.
+[profile.dev.package.rungstar-pitch]
+opt-level = 3

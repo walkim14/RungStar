@@ -1,0 +1,29 @@
+[package]
+name = "rungstar-library"
+description = "Song library scanning, indexing and search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rungstar-song.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+rayon.workspace = true
+blake3.workspace = true
+walkdir = "2"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile = "3"
+
+[[example]]
+name = "scale"
+
+[[bench]]
+name = "library"
+harness = false

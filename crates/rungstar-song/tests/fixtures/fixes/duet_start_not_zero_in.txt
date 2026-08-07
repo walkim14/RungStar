@@ -1,0 +1,59 @@
+#ARTIST:The Barden Bellas
+#TITLE:Pool Mashup [DUET]
+#MP3:The Barden Bellas - Pool Mashup [DUET].m4a
+#EDITION:UAS
+#GENRE:Musical
+#LANGUAGE:English
+#BPM:219,9
+#VIDEO:The Barden Bellas - Pool Mashup.mp4
+#P1:P1
+#P2:P2
+: 619 9 1 Oh
+- 632
+: 634 3 1 Her
+: 639 2 1  eyes,
+: 642 2 -2 ~
+: 646 2 1  her
+: 650 3 1  eyes
+- 655
+: 657 1 1 make
+: 659 1 -2  the
+: 662 5 1  stars
+: 668 2 1  look
+: 671 3 -2  like
+: 676 3 1  they're
+: 681 3 3  not
+: 686 3 -2  shi
+: 690 3 -2 ning
+: 421 6 5 Oh
+: 430 5 8  oh
+: 439 33 6  oh
+: 486 6 5  oh
+: 493 5 8  oh
+: 502 9 6  oh
+: 515 25 1  oh
+: 550 5 -2  oh
+: 558 4 3  oh
+: 565 28 1  oh
+- 607
+: 629 40 6 ah
+: 680 4 5  ah
+: 686 4 8  ah
+: 694 36 6  ah
+: 742 6 5  ah
+: 750 4 8  ah
+: 757 11 6  ah
+: 776 15 1  ah
+: 805 5 -2  ah
+: 814 4 3  ah
+: 822 17 1  ah
+- 849
+F 860 4 1 Oh
+F 866 5 1  oh,
+: 874 1 1  I
+: 876 1 1  was
+: 878 1 1  thin
+: 879 2 1 king
+: 882 3 1  'bout
+: 886 2 1  her
+E

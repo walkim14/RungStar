@@ -1,0 +1,9 @@
+# Source and docs get the platform's line endings on checkout.
+* text=auto
+
+# Song fixtures are byte-exact test data copied from the reference implementation, and two of
+# them deliberately carry CRLF to exercise the reader. Git must not rewrite any of them.
+crates/rungstar-song/tests/fixtures/** -text
+
+# Vendored binaries.
+vendor/sdl3/lib/** binary

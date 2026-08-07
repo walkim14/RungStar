@@ -1,0 +1,26 @@
+[package]
+name = "rungstar-app"
+description = "RungStar executables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rungstar-diagnostics"
+path = "src/diagnostics.rs"
+
+[[bin]]
+name = "rungstar-sing"
+path = "src/sing.rs"
+
+[dependencies]
+rungstar-audio.workspace = true
+rungstar-pitch.workspace = true
+rungstar-platform.workspace = true
+rungstar-song.workspace = true
+rungstar-score.workspace = true
+sdl3 = "0.18"
+anyhow.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "rungstar-platform"
+description = "Window, input and audio devices via SDL3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rungstar-audio.workspace = true
+sdl3 = "0.18"
+thiserror.workspace = true
+tracing.workspace = true

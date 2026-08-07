@@ -1,0 +1,8 @@
+#TITLE:title
+#ARTIST:artist
+#BPM:250
+#GAP:12345
+: 0 1 0 first note 
+- 10 12
+: 12 1 0 two 
+E
