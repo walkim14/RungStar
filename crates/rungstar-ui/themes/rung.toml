@@ -1,0 +1,64 @@
+# The theme shipped with the game. Compiled in, so a missing file cannot stop the game
+# starting, and copied to the user's theme directory on first run as a worked example.
+#
+# A theme sets colours and a few numbers. It does not place anything: layout is computed from
+# the window, which is why this file is the same length whatever screen it runs on.
+
+[meta]
+name = "Rung"
+author = "RungStar"
+default_skin = "dark"
+default_accent = "magenta"
+
+[metrics]
+radius = 10.0
+spacing = 16.0
+text_size = 30.0
+text_scale = 1.0
+outline = 3.0
+
+# Six singers, six colours. The first four match UltraStar Deluxe's so a returning player
+# keeps the colour they are used to.
+players = ["#419dff", "#ff4d4d", "#4dd66b", "#ffd23f", "#c26bff", "#3fe0d8"]
+
+[fonts]
+regular = "fonts/Inter-Regular.ttf"
+bold = "fonts/Inter-Bold.ttf"
+lyrics = "fonts/Inter-Bold.ttf"
+
+[skins.dark]
+background = "#0b0b12"
+surface = "#171722"
+text = "#f2f2f7"
+muted = "#8f8fa6"
+accent = "#ff4d8d"
+scrim = "#000000aa"
+
+[skins.light]
+background = "#f4f4f8"
+surface = "#ffffff"
+text = "#16161c"
+muted = "#61616f"
+accent = "#d6006b"
+scrim = "#ffffffbb"
+
+# For a Steam Deck outdoors, and for anyone who needs the contrast. Deliberately not just
+# "dark with brighter text": the surfaces separate by luminance, not by hue.
+[skins.contrast]
+background = "#000000"
+surface = "#141414"
+text = "#ffffff"
+muted = "#c8c8c8"
+accent = "#ffe800"
+scrim = "#000000dd"
+danger = "#ff5555"
+success = "#55ff88"
+warning = "#ffcc00"
+
+[accents]
+magenta = "#ff4d8d"
+blue = "#419dff"
+green = "#3dd68c"
+amber = "#f5b34a"
+violet = "#a978ff"
+teal = "#2fd3c8"

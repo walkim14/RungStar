@@ -119,6 +119,11 @@ impl Database {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        // Building the full-text index over a large library is the slowest part of a first
+        // scan, and it is dominated by page churn. Sixty-four megabytes of cache and
+        // in-memory temporaries cost nothing on a desktop and save a great deal of it.
+        connection.pragma_update(None, "cache_size", -64_000)?;
+        connection.pragma_update(None, "temp_store", "MEMORY")?;
         let mut database = Self { connection };
         database.migrate()?;
         Ok(database)
@@ -289,7 +294,11 @@ impl Database {
                     |row| row.get(0),
                 )?;
 
-                clear_fts.execute(params![id])?;
+                // On a fresh row there is nothing to clear, and at thirty thousand songs a
+                // statement per song is not free.
+                if !song.is_new {
+                    clear_fts.execute(params![id])?;
+                }
                 insert_fts.execute(params![
                     song.artist,
                     song.title,

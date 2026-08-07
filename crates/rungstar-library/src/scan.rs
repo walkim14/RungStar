@@ -110,6 +110,9 @@ pub struct ParsedSong {
 
     /// All the lyrics as one string, for the full-text index.
     pub lyrics: String,
+    /// Whether this song was absent from the index, so the writer can skip the search-index
+    /// delete that only matters when replacing an existing row.
+    pub is_new: bool,
 }
 
 /// Walk the roots and collect every `.txt` with its size and timestamp.
@@ -252,6 +255,8 @@ fn parse(candidate: &Candidate) -> Option<ParsedSong> {
         usdb_id: usdb_id(headers),
 
         lyrics,
+        // Filled in by the caller, which is what knows.
+        is_new: false,
     })
 }
 
@@ -377,7 +382,8 @@ pub fn scan(database: &mut Database, options: &ScanOptions) -> Result<ScanReport
     let mut songs = Vec::with_capacity(parsed.len());
     for (song, is_new) in parsed {
         match song {
-            Some(song) => {
+            Some(mut song) => {
+                song.is_new = is_new;
                 if is_new {
                     report.added += 1;
                 } else {
