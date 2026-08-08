@@ -105,6 +105,23 @@ fn main() {
             .limit(200),
     );
 
+    // A song with no audio file cannot be sung or previewed, and the failure is silent —
+    // worth counting, because the header naming a file that is not there is the single most
+    // common defect in a real library.
+    let all = database
+        .search(&SearchQuery::all().limit(100_000))
+        .expect("search");
+    let playable = all.iter().filter(|s| s.is_playable()).count();
+    let with_video = all.iter().filter(|s| s.video_file.is_some()).count();
+    let with_cover = all.iter().filter(|s| s.cover_file.is_some()).count();
+    println!();
+    println!("playable   {playable} of {}", all.len());
+    println!("has video  {with_video}");
+    println!("has cover  {with_cover}");
+    for song in all.iter().filter(|s| !s.is_playable()).take(5) {
+        println!("  no audio: {}", song.path.display());
+    }
+
     println!();
     for column in ["language", "genre", "edition"] {
         match database.facet(column) {

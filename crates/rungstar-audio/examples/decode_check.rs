@@ -72,18 +72,28 @@ fn main() {
         let shown = path.file_name().unwrap_or_default().to_string_lossy();
         match AudioClip::open(path) {
             Ok(clip) => {
-                let ready = clip.wait_for(2.0, Duration::from_secs(5));
+                // How fast the decoder runs relative to real time decides whether a preview
+                // can seek into the middle of a song at all: seeking to fifty seconds needs
+                // fifty seconds of audio decoded first.
+                let started = std::time::Instant::now();
+                let ready = clip.wait_for(30.0, Duration::from_secs(10));
+                let elapsed = started.elapsed().as_secs_f64().max(0.0001);
                 match clip.error() {
                     Some(error) => println!(
                         "FAIL  {shown}
         {error}"
                     ),
-                    None if ready => {
-                        ok += 1;
-                        entry.0 += 1;
-                        println!("ok    {:>5.1} s decoded  {shown}", clip.ready_secs());
+                    None => {
+                        ok += usize::from(ready);
+                        entry.0 += usize::from(ready);
+                        println!(
+                            "{}  {:>5.1} s in {:>5.2} s = {:>4.0}x realtime  {shown}",
+                            if ready { "ok  " } else { "SLOW" },
+                            clip.ready_secs(),
+                            elapsed,
+                            clip.ready_secs() / elapsed
+                        );
                     }
-                    None => println!("SLOW  {shown}  (under 2 s decoded in 5 s)"),
                 }
             }
             Err(error) => println!(

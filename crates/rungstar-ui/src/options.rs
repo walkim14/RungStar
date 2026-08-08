@@ -338,13 +338,13 @@ impl Page {
                     Switch,
                     graphics.video_enabled,
                     "Song videos",
-                    "Play the song's video behind the lyrics."
+                    "Play the song's video behind the lyrics. Not implemented yet \u{2014} the \n                     decoder is not wired up, so this currently changes nothing."
                 ),
                 choice_item!(
                     VideoSize,
                     graphics.video_size,
                     "Video size",
-                    "How much of the screen the video fills."
+                    "How much of the screen the video fills. Takes effect once video playback \n                     is implemented."
                 ),
                 choice_item!(
                     Preview,

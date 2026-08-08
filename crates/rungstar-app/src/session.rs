@@ -145,6 +145,11 @@ impl Session {
         &self.notes
     }
 
+    /// Change how loud the song plays, while it is playing.
+    pub fn set_volume(&self, volume: f32) {
+        self.playback.set_volume(volume);
+    }
+
     pub fn is_finished(&self) -> bool {
         self.finished
     }
@@ -400,39 +405,53 @@ pub fn apply_saved(devices: &mut [DeviceConfig], saved: &[rungstar_ui::settings:
     }
 }
 
-/// Choose devices for `players` singers, one channel each.
+/// Choose which channel each singer sings into.
 ///
-/// Channels are filled before devices are, so a stereo microphone pair carries two singers.
-/// That is how the cheap dual-USB sets work, and the only way to reach six singers without
-/// six separate devices.
+/// One singer per *device* first, and only then a second channel of a device that has one.
+/// Nearly every USB microphone reports two channels and is mono on both, so filling channels
+/// first puts player two on a channel that either duplicates player one or is silent — which
+/// is exactly the setup that cannot work.
+///
+/// The case that does want two channels on one device is the cheap dual-USB karaoke set,
+/// where the two microphones genuinely are left and right. That is reached on the second
+/// pass, once every device already has a singer.
 pub fn choose_devices(capture: &SdlCapture, players: usize) -> Vec<DeviceConfig> {
     let Ok(devices) = capture.devices() else {
         return Vec::new();
     };
-    let mut configs = Vec::new();
-    let mut assigned = 0u8;
-    for (index, device) in devices.into_iter().enumerate() {
-        if assigned as usize >= players {
-            break;
-        }
-        if looks_virtual(&device.name) {
-            continue;
-        }
-        let channels = device.channels.max(1);
-        let mut mapping = vec![0u8; channels];
-        for slot in mapping.iter_mut() {
-            if (assigned as usize) < players {
-                assigned += 1;
-                *slot = assigned;
-            }
-        }
-        configs.push(DeviceConfig {
+    let mut configs: Vec<DeviceConfig> = devices
+        .into_iter()
+        .enumerate()
+        .filter(|(_, device)| !looks_virtual(&device.name))
+        .map(|(index, device)| DeviceConfig {
             name: device.name.clone(),
             input_index: index as u32,
             latency_ms: rungstar_audio::capture::LATENCY_AUTODETECT,
-            channel_to_player: mapping,
-        });
+            channel_to_player: vec![0; device.channels.max(1)],
+        })
+        .collect();
+
+    let mut assigned = 0u8;
+    // First pass: the first channel of each device.
+    for config in configs.iter_mut() {
+        if assigned as usize >= players {
+            break;
+        }
+        assigned += 1;
+        config.channel_to_player[0] = assigned;
     }
+    // Second pass: the remaining channels, for a stereo pair carrying two singers.
+    for config in configs.iter_mut() {
+        for channel in 1..config.channel_to_player.len() {
+            if assigned as usize >= players {
+                break;
+            }
+            assigned += 1;
+            config.channel_to_player[channel] = assigned;
+        }
+    }
+    // A device with nothing on it is still worth listing, so the setup screen can show its
+    // meter and let it be chosen.
     configs
 }
 
@@ -443,6 +462,7 @@ pub fn choose_devices(capture: &SdlCapture, players: usize) -> Vec<DeviceConfig>
 /// is for and the one UltraStar's own record screen does not answer.
 pub struct Monitor {
     capture: SdlCapture,
+    players: usize,
     devices: Vec<DeviceConfig>,
     buffers: PlayerBuffers,
     /// Peak level per device per channel.
@@ -459,6 +479,7 @@ impl Monitor {
     pub fn start(capture: SdlCapture, players: usize) -> Self {
         let mut monitor = Self {
             capture,
+            players: players.max(1),
             devices: Vec::new(),
             buffers: PlayerBuffers::new(),
             levels: Vec::new(),
@@ -469,15 +490,15 @@ impl Monitor {
         monitor
     }
 
-    /// Look for devices again, keeping the current assignment where the names still match.
+    /// Look for devices again.
     pub fn rescan(&mut self) {
-        let players = self.devices.len().max(1);
+        let players = self.players;
         self.rescan_with(players);
     }
 
     fn rescan_with(&mut self, players: usize) {
         self.capture.stop();
-        let found = choose_devices(&self.capture, players.max(6));
+        let found = choose_devices(&self.capture, players);
         self.levels = found.iter().map(|d| vec![0.0; d.channels()]).collect();
         self.heard = found.iter().map(|d| vec![false; d.channels()]).collect();
         self.devices = found;

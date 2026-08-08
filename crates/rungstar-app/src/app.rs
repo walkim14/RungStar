@@ -93,6 +93,8 @@ struct App {
     pending_sing: Option<i64>,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
+    /// Set when something changed that the window or the audio has to be told about.
+    settings_dirty: bool,
     /// A scan running on another thread, and the last progress it reported.
     scan: Option<ScanJob>,
     /// The clip playing under the browser cursor.
@@ -108,6 +110,8 @@ struct Preview {
     song: i64,
     playback: Option<Playback>,
     started: Instant,
+    /// Set when opening failed, so it is not attempted again every frame.
+    failed: bool,
 }
 
 /// How long the cursor must rest on a song before its preview starts.
@@ -212,6 +216,7 @@ impl App {
             status: String::new(),
             pending_sing: None,
             pending_mics: false,
+            settings_dirty: true,
             scan: None,
             preview: None,
             running: true,
@@ -349,6 +354,7 @@ impl App {
                 song,
                 playback: None,
                 started: Instant::now(),
+                failed: false,
             });
             return;
         }
@@ -358,14 +364,24 @@ impl App {
 
         // Read before borrowing the preview mutably: both want `self`.
         let volume = self.preview_volume();
-        let due = self
-            .preview
-            .as_ref()
-            .is_some_and(|p| p.playback.is_none() && p.started.elapsed() >= PREVIEW_DELAY);
+        let due = self.preview.as_ref().is_some_and(|p| {
+            p.playback.is_none() && !p.failed && p.started.elapsed() >= PREVIEW_DELAY
+        });
         if due {
-            let opened = self.open_preview(audio, song);
-            if let Some(preview) = &mut self.preview {
-                preview.playback = opened;
+            match self.open_preview(audio, song) {
+                Ok(playback) => {
+                    if let Some(preview) = &mut self.preview {
+                        preview.playback = Some(playback);
+                    }
+                }
+                Err(reason) => {
+                    // Marked as tried, so a song that cannot preview is not retried on every
+                    // frame for as long as the cursor sits on it.
+                    if let Some(preview) = &mut self.preview {
+                        preview.failed = true;
+                    }
+                    tracing::debug!("no preview for song {song}: {reason}");
+                }
             }
             return;
         }
@@ -391,27 +407,48 @@ impl App {
     }
 
     /// Open the clip for a song, starting at its preview point.
-    fn open_preview(&self, audio: &sdl3::AudioSubsystem, id: i64) -> Option<Playback> {
-        let entry = self.library.song(id).ok().flatten()?;
-        let directory = entry.directory()?;
-        let name = entry.audio_file.as_ref()?;
-        let path = resolve_beside(directory, name)?;
+    ///
+    /// Returns the reason on failure rather than an `Option`, because "most songs do not
+    /// preview" is unanswerable when a missing file, a refused device and a bad seek all look
+    /// the same from outside.
+    fn open_preview(&self, audio: &sdl3::AudioSubsystem, id: i64) -> Result<Playback, String> {
+        let entry = self
+            .library
+            .song(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the song is no longer in the library")?;
+        let directory = entry.directory().ok_or("the song has no folder")?;
+        let name = entry
+            .audio_file
+            .as_ref()
+            .ok_or("the song names no audio file")?;
+        let path = resolve_beside(directory, name)
+            .ok_or_else(|| format!("{name} is not beside the song"))?;
 
-        let clip = AudioClip::open(&path).ok()?;
-        // A short wait only: a preview that blocks the browser has already failed at being a
-        // preview.
-        clip.wait_for(0.4, std::time::Duration::from_millis(400));
-        let mut playback = Playback::new(audio, clip).ok()?;
-        // `#PREVIEWSTART` when the song names one, otherwise a quarter in — which is past the
+        let clip = AudioClip::open(&path).map_err(|e| e.to_string())?;
+        clip.wait_for(0.4, std::time::Duration::from_millis(500));
+        if let Some(error) = clip.error() {
+            return Err(error);
+        }
+
+        let mut playback = Playback::new(audio, clip).map_err(|e| e.to_string())?;
+        // `#PREVIEWSTART` when the song names one, otherwise a quarter in, which is past the
         // intro on almost everything and is what UltraStar does.
+        let length = playback.duration().max(entry.duration_secs);
         let start = entry
             .preview_start
-            .filter(|s| *s > 0.0)
-            .unwrap_or(entry.duration_secs * 0.25);
-        let _ = playback.seek(start);
+            .filter(|s| *s > 0.0 && *s < length)
+            .unwrap_or(length * 0.25);
+        // Seeking to a point needs that much audio decoded. Decoding runs around a thousand
+        // times faster than playback, so this is milliseconds — but without it the first pump
+        // reads nothing and the clip appears silent.
+        playback
+            .clip()
+            .wait_for(start + 1.0, std::time::Duration::from_secs(2));
+        playback.seek(start).map_err(|e| e.to_string())?;
         playback.set_volume(self.preview_volume());
-        playback.start().ok()?;
-        Some(playback)
+        playback.start().map_err(|e| e.to_string())?;
+        Ok(playback)
     }
 
     /// Stop any preview, for when a song is about to start.
@@ -498,6 +535,40 @@ impl App {
             &self.settings.appearance.skin,
             &self.settings.appearance.accent,
         );
+    }
+
+    /// Push whatever the settings now say into the window and the audio.
+    ///
+    /// A setting that needs a restart to take effect is a setting the player will conclude is
+    /// broken, so this runs whenever one changes.
+    fn apply_settings(&mut self, window: &mut sdl3::video::Window) {
+        use sdl3::video::FullscreenType;
+        let graphics = self.settings.graphics.clone();
+
+        let fullscreen = match graphics.screen_mode {
+            ScreenMode::Fullscreen => FullscreenType::True,
+            _ => FullscreenType::Off,
+        };
+        let want_fullscreen = fullscreen != FullscreenType::Off;
+        if (window.fullscreen_state() != FullscreenType::Off) != want_fullscreen {
+            let _ = window.set_fullscreen(want_fullscreen);
+        }
+        if !want_fullscreen {
+            let _ = window.set_bordered(graphics.screen_mode != ScreenMode::Borderless);
+            let (width, height) = window.size();
+            if width != graphics.width || height != graphics.height {
+                let _ = window.set_size(graphics.width, graphics.height);
+            }
+        }
+
+        let volume = self.settings.sound.master_volume as f32 / 100.0;
+        if let Some(Screen::Sing(_, session)) = self.stack.last_mut() {
+            session.set_volume(volume);
+        }
+        let preview_volume = self.preview_volume();
+        if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
+            playback.set_volume(preview_volume);
+        }
     }
 
     /// Run whatever query the song screen is asking for.
@@ -594,6 +665,7 @@ impl App {
                     OptionsOutcome::Pop => Transition::Pop,
                     OptionsOutcome::Changed => {
                         self.restyle();
+                        self.settings_dirty = true;
                         self.save_settings();
                         Transition::None
                     }
@@ -1093,6 +1165,10 @@ fn main() -> Result<()> {
             app.sing(id, &audio_subsystem, capture);
         }
 
+        if std::mem::take(&mut app.settings_dirty) {
+            app.apply_settings(renderer.canvas().window_mut());
+            let _ = renderer.resize();
+        }
         app.poll_scan();
         let scanning = app.scanning().then(|| app.status.clone());
         if let Some(Screen::Songs(songs)) = app.stack.last_mut() {
