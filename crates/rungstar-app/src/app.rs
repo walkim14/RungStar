@@ -881,6 +881,9 @@ impl App {
             screen.background = self.covers.get(entry.id);
         }
         screen.video_size = self.settings.graphics.video_size;
+        // A duet names its parts and splits the singers between them, so each gets a staff.
+        screen.parts = session.part_names().to_vec();
+        screen.singer_part = session.singer_parts().to_vec();
         let _ = self.library.record_play(id);
         self.stack
             .push(Screen::Sing(Box::new(screen), Box::new(session)));
@@ -929,9 +932,26 @@ impl App {
             Some(Screen::Options(options)) => options.draw(list, area, &self.style, &self.settings),
             Some(Screen::Sing(screen, session)) => {
                 let beat = session.visual_beat();
-                let (syllables, next) = session.lyrics(beat);
-                let line = session.current_line(beat);
-                screen.draw(list, area, &self.style, &line, &syllables, &next, beat);
+                // One part for an ordinary song, two for a duet. Gathered first because the
+                // screen borrows them all at once.
+                let gathered: Vec<(rungstar_ui::singscreen::NoteLine, Vec<_>, String)> = (0
+                    ..session.part_count())
+                    .map(|part| {
+                        let (syllables, next) = session.lyrics(part, beat);
+                        (session.current_line(part, beat), syllables, next)
+                    })
+                    .collect();
+                let parts: Vec<rungstar_ui::singscreen::PartView<'_>> = gathered
+                    .iter()
+                    .map(
+                        |(line, syllables, next)| rungstar_ui::singscreen::PartView {
+                            line,
+                            syllables,
+                            next_line: next,
+                        },
+                    )
+                    .collect();
+                screen.draw(list, area, &self.style, &parts, beat);
             }
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
@@ -1454,7 +1474,12 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         for overlay in [Overlay::None, Overlay::Paused, Overlay::Results] {
             screen.overlay = overlay;
             list.clear();
-            screen.draw(list, area, &app.style, &line, &syllables, "next line", 20.0);
+            let parts = [rungstar_ui::singscreen::PartView {
+                line: &line,
+                syllables: &syllables,
+                next_line: "next line",
+            }];
+            screen.draw(list, area, &app.style, &parts, 20.0);
             if !list.is_balanced() {
                 anyhow::bail!("the sing screen left a clip pushed");
             }

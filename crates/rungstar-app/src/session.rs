@@ -66,7 +66,12 @@ pub struct Session {
     buffers: PlayerBuffers,
     analysers: Vec<Analyzer>,
     scorers: Vec<Scorer>,
-    lines: Vec<Line>,
+    /// The lines of each part. One entry for an ordinary song, two for a duet.
+    parts: Vec<Vec<Line>>,
+    /// Which part each singer sings.
+    singer_part: Vec<usize>,
+    /// The names the song gives its parts.
+    part_names: Vec<String>,
     /// Next line whose bonus has not been awarded, per singer.
     next_line: Vec<usize>,
     scored_through: f64,
@@ -135,12 +140,42 @@ impl Session {
             }
         }
 
-        let lines = song.tracks.track_1.clone();
-        let track = ScoreTrack::from_lines(&lines);
+        // A duet has two tracks and its singers are split between them: odd-numbered players
+        // take the first part, even the second. That is UltraStar's arrangement, and it means
+        // two people with two microphones each get their own part without configuring
+        // anything.
+        let mut parts = vec![song.tracks.track_1.clone()];
+        if let Some(second) = song.tracks.track_2.clone() {
+            parts.push(second);
+        }
+        let part_names = if parts.len() > 1 {
+            vec![
+                song.headers
+                    .p1
+                    .clone()
+                    .unwrap_or_else(|| "Part 1".to_owned()),
+                song.headers
+                    .p2
+                    .clone()
+                    .unwrap_or_else(|| "Part 2".to_owned()),
+            ]
+        } else {
+            Vec::new()
+        };
+        let singer_part: Vec<usize> = (0..players.max(1)).map(|i| i % parts.len()).collect();
+        let tracks: Vec<ScoreTrack> = parts
+            .iter()
+            .map(|lines| ScoreTrack::from_lines(lines))
+            .collect();
         let mut timing = Timing::new(song.bpm().value(), song.headers.gap as f64);
         timing.mic_delay = mic_delay_ms / 1000.0;
 
-        let notes = collect_notes(&lines);
+        // The pitch scale and the end of the song come from every part, so a duet's two
+        // staves share one scale and a note sits at the same height on both.
+        let notes: Vec<Note> = parts
+            .iter()
+            .flat_map(|lines| collect_notes(lines))
+            .collect();
         let last_note_beat = notes.iter().map(Note::end).fold(0.0, f64::max);
         // `#END` is in milliseconds, unlike `#START` and `#PREVIEWSTART` which are seconds.
         // The format is inconsistent about this and it is an easy place to be wrong.
@@ -180,9 +215,11 @@ impl Session {
             buffers: PlayerBuffers::new(),
             analysers: (0..players).map(|_| Analyzer::new(config)).collect(),
             scorers: (0..players)
-                .map(|_| Scorer::new(track.clone(), difficulty))
+                .map(|player| Scorer::new(tracks[player % tracks.len()].clone(), difficulty))
                 .collect(),
-            lines,
+            parts,
+            singer_part,
+            part_names,
             next_line: vec![0; players],
             scored_through: f64::NEG_INFINITY,
             last_frame: Instant::now(),
@@ -311,8 +348,9 @@ impl Session {
                 }
 
                 // Close any line the beat has now passed the end of.
-                while self.next_line[player] < self.lines.len() {
-                    let line = &self.lines[self.next_line[player]];
+                let lines = &self.parts[self.singer_part[player]];
+                while self.next_line[player] < lines.len() {
+                    let line = &lines[self.next_line[player]];
                     if line.notes.is_empty() || beat < line.end() {
                         break;
                     }
@@ -328,8 +366,8 @@ impl Session {
         // Forget what is behind the line being sung, so a long song does not grow without
         // bound, but never anything still on screen.
         let cutoff = self
-            .line_at(detection_beat)
-            .and_then(|index| self.lines.get(index))
+            .line_at(0, detection_beat)
+            .and_then(|index| self.parts[0].get(index))
             .map(|line| line.start() as f64 - SUNG_KEEP_BEFORE_LINE)
             .unwrap_or(detection_beat - 64.0);
         for history in &mut self.sung {
@@ -416,20 +454,36 @@ impl Session {
     /// so this returns the upcoming line once the previous one has ended. Notes and lyrics
     /// both go through it, because a staff showing one line while the words show another is
     /// worse than either being slightly early.
-    fn line_at(&self, beat: f64) -> Option<usize> {
+    fn line_at(&self, part: usize, beat: f64) -> Option<usize> {
+        let lines = self.parts.get(part)?;
         let whole = beat as i32;
-        self.lines
+        lines
             .iter()
             .position(|line| !line.notes.is_empty() && whole < line.end())
-            .or_else(|| self.lines.iter().rposition(|line| !line.notes.is_empty()))
+            .or_else(|| lines.iter().rposition(|line| !line.notes.is_empty()))
+    }
+
+    /// How many parts the song has: one, or two for a duet.
+    pub fn part_count(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// The names the song gives its parts, empty when it is not a duet.
+    pub fn part_names(&self) -> &[String] {
+        &self.part_names
+    }
+
+    /// Which part each singer is on.
+    pub fn singer_parts(&self) -> &[usize] {
+        &self.singer_part
     }
 
     /// The notes of the line being sung, and the beats it spans.
-    pub fn current_line(&self, beat: f64) -> NoteLine {
-        let Some(index) = self.line_at(beat) else {
+    pub fn current_line(&self, part: usize, beat: f64) -> NoteLine {
+        let Some(index) = self.line_at(part, beat) else {
             return NoteLine::default();
         };
-        let line = &self.lines[index];
+        let line = &self.parts[part][index];
         let notes: Vec<Note> = line.notes.iter().map(convert_note).collect();
         let start = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
         let end = notes.iter().map(Note::end).fold(f64::MIN, f64::max);
@@ -452,11 +506,11 @@ impl Session {
     }
 
     /// The syllables of the line being sung, and the text of the one after it.
-    pub fn lyrics(&self, beat: f64) -> (Vec<Syllable>, String) {
-        let Some(index) = self.line_at(beat) else {
+    pub fn lyrics(&self, part: usize, beat: f64) -> (Vec<Syllable>, String) {
+        let Some(index) = self.line_at(part, beat) else {
             return (Vec::new(), String::new());
         };
-        let syllables = self.lines[index]
+        let syllables = self.parts[part][index]
             .notes
             .iter()
             .map(|note| Syllable {
@@ -466,8 +520,7 @@ impl Session {
                 golden: note.kind.is_golden(),
             })
             .collect();
-        let next = self
-            .lines
+        let next = self.parts[part]
             .get(index + 1)
             .map(|line| line.text())
             .unwrap_or_default();

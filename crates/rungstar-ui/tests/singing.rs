@@ -5,8 +5,8 @@ use rungstar_ui::geom::Rect;
 use rungstar_ui::screen::Transition;
 use rungstar_ui::settings::LyricEffect;
 use rungstar_ui::singscreen::{
-    fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PauseChoice, SingScreen,
-    Singer, Sung, Syllable,
+    fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PartView, PauseChoice,
+    SingScreen, Singer, Sung, Syllable,
 };
 use rungstar_ui::songselect::Input;
 use rungstar_ui::theme::Theme;
@@ -52,13 +52,17 @@ fn syllables() -> Vec<Syllable> {
 fn draw(screen: &mut SingScreen, beat: f64) -> DrawList {
     let theme = Theme::builtin();
     let mut list = DrawList::new();
+    let line = line();
+    let words = syllables();
     screen.draw(
         &mut list,
         area(),
         &theme.resolve_default(),
-        &line(),
-        &syllables(),
-        "the next line",
+        &[PartView {
+            line: &line,
+            syllables: &words,
+            next_line: "the next line",
+        }],
         beat,
     );
     list
@@ -133,7 +137,17 @@ fn the_screen_stays_inside_the_window_at_every_size_and_player_count() {
                 screen.overlay = overlay;
                 screen.show_input_panel = true;
                 let mut list = DrawList::new();
-                screen.draw(&mut list, area, &style, &line(), &syllables(), "next", 20.0);
+                screen.draw(
+                    &mut list,
+                    area,
+                    &style,
+                    &[PartView {
+                        line: &line(),
+                        syllables: &syllables(),
+                        next_line: "next",
+                    }],
+                    20.0,
+                );
 
                 let mut depth = 0;
                 for command in list.commands() {
@@ -372,13 +386,16 @@ fn a_song_with_no_notes_still_draws() {
     let theme = Theme::builtin();
     let mut screen = sing_screen(2);
     let mut list = DrawList::new();
+    let empty = NoteLine::default();
     screen.draw(
         &mut list,
         area(),
         &theme.resolve_default(),
-        &NoteLine::default(),
-        &[],
-        "",
+        &[PartView {
+            line: &empty,
+            syllables: &[],
+            next_line: "",
+        }],
         0.0,
     );
     assert!(list.is_balanced());
@@ -471,7 +488,17 @@ fn a_note_sits_at_the_same_height_whatever_else_is_on_screen() {
         };
         let mut screen = sing_screen(1);
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            9.0,
+        );
         // The first bar drawn is the note at pitch 62.
         bars(&list, &style)
             .first()
@@ -499,7 +526,17 @@ fn the_whole_line_is_on_screen_at_once() {
     let line = line();
 
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line, &syllables(), "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line,
+            syllables: &syllables(),
+            next_line: "",
+        }],
+        10.0,
+    );
     let drawn = bars(&list, &style);
     assert!(
         drawn.len() >= line.notes.len(),
@@ -510,7 +547,17 @@ fn the_whole_line_is_on_screen_at_once() {
 
     // And the same notes are in the same places later in the line: they do not move.
     let mut later = DrawList::new();
-    screen.draw(&mut later, area(), &style, &line, &syllables(), "", 34.0);
+    screen.draw(
+        &mut later,
+        area(),
+        &style,
+        &[PartView {
+            line: &line,
+            syllables: &syllables(),
+            next_line: "",
+        }],
+        34.0,
+    );
     let moved = bars(&later, &style);
     for (before, after) in drawn.iter().zip(moved.iter()) {
         assert!(
@@ -530,7 +577,17 @@ fn the_playhead_sweeps_from_left_to_right_across_the_line() {
     // The playhead is the tall thin accent bar.
     let mut head_x = |beat: f64| -> f32 {
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            beat,
+        );
         list.commands()
             .iter()
             .filter_map(|c| match c {
@@ -569,7 +626,17 @@ fn what_was_sung_stays_put_until_the_line_turns() {
 
     let mut position = |beat: f64| -> Option<Rect> {
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            beat,
+        );
         // The sung bar is drawn in the player's colour, and is the widest thing in it.
         Some(widest(&list, style.player(0)))
     };
@@ -610,7 +677,17 @@ fn a_narrow_line_does_not_fill_the_staff() {
     };
 
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line, &[], "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line,
+            syllables: &[],
+            next_line: "",
+        }],
+        10.0,
+    );
     let drawn = bars(&list, &style);
     let (top, bottom) = drawn.iter().fold((f32::MAX, f32::MIN), |(t, b), r| {
         (t.min(r.y), b.max(r.bottom()))
@@ -691,7 +768,17 @@ fn a_sung_note_an_octave_out_is_drawn_on_the_note_it_scored() {
             hit: true,
         }];
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            9.0,
+        );
         widest(&list, style.player(0)).y
     };
 
@@ -720,7 +807,17 @@ fn the_lyric_bar_arrives_before_the_first_word_and_sweeps_with_it() {
     // The bar is the narrow accent panel in the lyric strip.
     let mut bar_x = |beat: f64| -> Option<f32> {
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line(),
+                syllables: &words,
+                next_line: "",
+            }],
+            beat,
+        );
         list.commands()
             .iter()
             .filter_map(|c| match c {
@@ -777,7 +874,17 @@ fn a_hit_is_drawn_on_the_note_even_when_it_was_a_semitone_off() {
             hit,
         }];
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            9.0,
+        );
         let wanted = if hit { style.player(0) } else { style.danger };
         widest(&list, wanted).y
     };
@@ -809,7 +916,17 @@ fn the_lyric_bar_runs_in_from_the_edge_of_the_screen() {
 
     let mut bar_x = |beat: f64| -> f32 {
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line(),
+                syllables: &words,
+                next_line: "",
+            }],
+            beat,
+        );
         list.commands()
             .iter()
             .filter_map(|c| match c {
@@ -868,7 +985,17 @@ fn a_hit_fills_the_bubble_it_landed_in() {
             hit,
         }];
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line,
+                syllables: &[],
+                next_line: "",
+            }],
+            9.0,
+        );
         let wanted = if hit { style.player(0) } else { style.danger };
         widest(&list, wanted)
     };
@@ -877,7 +1004,17 @@ fn a_hit_fills_the_bubble_it_landed_in() {
         &{
             let mut screen = sing_screen(1);
             let mut list = DrawList::new();
-            screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+            screen.draw(
+                &mut list,
+                area(),
+                &style,
+                &[PartView {
+                    line: &line,
+                    syllables: &[],
+                    next_line: "",
+                }],
+                9.0,
+            );
             list
         },
         &style,
@@ -906,7 +1043,17 @@ fn the_pause_menu_takes_the_mouse() {
     assert_eq!(screen.overlay, Overlay::Paused);
 
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line(),
+            syllables: &[],
+            next_line: "",
+        }],
+        10.0,
+    );
 
     // The rows are the wide panels in the centred card. Probe down the middle of the screen
     // until one of them takes the pointer.
@@ -924,7 +1071,17 @@ fn the_pause_menu_takes_the_mouse() {
 
     // Clicking the row under the pointer chooses it.
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line(),
+            syllables: &[],
+            next_line: "",
+        }],
+        10.0,
+    );
     let (_, choice) = screen.handle(Input::Click(point));
     assert!(choice.is_some(), "a click on a pause row chose nothing");
 }
@@ -936,7 +1093,17 @@ fn a_click_dismisses_the_results() {
     let mut screen = sing_screen(2);
     screen.overlay = Overlay::Results;
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line(),
+            syllables: &[],
+            next_line: "",
+        }],
+        10.0,
+    );
 
     let (transition, _) = screen.handle(Input::Click(area().center()));
     assert_eq!(
@@ -994,13 +1161,33 @@ fn the_outro_says_how_to_skip_it() {
     let mut screen = sing_screen(1);
 
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line(), &syllables(), "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line(),
+            syllables: &syllables(),
+            next_line: "",
+        }],
+        10.0,
+    );
     let quiet = strings(&list).join(" ");
     assert!(!quiet.contains("your score"), "offered mid-song: {quiet}");
 
     screen.outro = true;
     let mut list = DrawList::new();
-    screen.draw(&mut list, area(), &style, &line(), &syllables(), "", 10.0);
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line(),
+            syllables: &syllables(),
+            next_line: "",
+        }],
+        10.0,
+    );
     let offered = strings(&list).join(" ");
     assert!(offered.contains("for your score"), "not offered: {offered}");
 }
@@ -1018,7 +1205,17 @@ fn each_lyric_effect_draws_something_different() {
         screen.effect = effect;
         let mut list = DrawList::new();
         // Part way through the second syllable, so an effect has something to act on.
-        screen.draw(&mut list, area(), &style, &line(), &words, "", 11.0);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line(),
+                syllables: &words,
+                next_line: "",
+            }],
+            11.0,
+        );
         list
     };
 
@@ -1053,7 +1250,17 @@ fn zoom_swells_the_syllable_being_sung() {
         let mut screen = sing_screen(1);
         screen.effect = LyricEffect::Zoom;
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line(),
+                syllables: &words,
+                next_line: "",
+            }],
+            beat,
+        );
         list.commands()
             .iter()
             .filter_map(|c| match c {
@@ -1083,7 +1290,17 @@ fn shift_keeps_the_syllable_being_sung_in_the_middle() {
         let mut screen = sing_screen(1);
         screen.effect = LyricEffect::Shift;
         let mut list = DrawList::new();
-        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        screen.draw(
+            &mut list,
+            area(),
+            &style,
+            &[PartView {
+                line: &line(),
+                syllables: &words,
+                next_line: "",
+            }],
+            beat,
+        );
         list.commands()
             .iter()
             .filter_map(|c| match c {
@@ -1108,4 +1325,108 @@ fn shift_keeps_the_syllable_being_sung_in_the_middle() {
     }
     // And it really is roughly central, not pinned to an edge.
     assert!(anchor > area().w * 0.25 && anchor < area().w * 0.75);
+}
+
+#[test]
+fn a_duet_gets_a_staff_and_words_each() {
+    // Both parts on one staff is unreadable exactly when it matters, which is when the two
+    // singers are on different notes.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(2);
+    screen.parts = vec!["Freddie".to_owned(), "Bowie".to_owned()];
+    screen.singer_part = vec![0, 1];
+    assert!(screen.is_duet());
+
+    let first = line();
+    let second = NoteLine {
+        start: 8.0,
+        end: 40.0,
+        notes: (0..9)
+            .map(|i| Note {
+                start: 8.0 + i as f64 * 4.0,
+                duration: 3.0,
+                pitch: 64 + (i % 3),
+                kind: NoteKind::Normal,
+            })
+            .collect(),
+    };
+    let words_a = syllables();
+    let words_b = syllables();
+
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[
+            PartView {
+                line: &first,
+                syllables: &words_a,
+                next_line: "one",
+            },
+            PartView {
+                line: &second,
+                syllables: &words_b,
+                next_line: "two",
+            },
+        ],
+        11.0,
+    );
+    assert!(list.is_balanced());
+
+    // Each part is named, in a colour, so neither singer watches the wrong staff.
+    let text = strings(&list);
+    assert!(
+        text.iter().any(|t| t == "Freddie"),
+        "part one unlabelled: {text:?}"
+    );
+    assert!(text.iter().any(|t| t == "Bowie"), "part two unlabelled");
+
+    // And the two staves occupy different halves of the screen.
+    let notes = bars(&list, &style);
+    let top = notes
+        .iter()
+        .filter(|r| r.center().y < area().h / 2.0)
+        .count();
+    let bottom = notes
+        .iter()
+        .filter(|r| r.center().y >= area().h / 2.0)
+        .count();
+    assert!(
+        top > 0 && bottom > 0,
+        "the parts did not split: {top} above, {bottom} below"
+    );
+}
+
+#[test]
+fn an_ordinary_song_is_not_split() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(1);
+    assert!(!screen.is_duet());
+
+    let single = line();
+    let words = syllables();
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &single,
+            syllables: &words,
+            next_line: "",
+        }],
+        11.0,
+    );
+    // One staff, using the full height rather than the top half of it.
+    let notes = bars(&list, &style);
+    let (top, bottom) = notes.iter().fold((f32::MAX, f32::MIN), |(t, b), r| {
+        (t.min(r.y), b.max(r.bottom()))
+    });
+    assert!(
+        bottom - top > area().h * 0.15,
+        "a single part was squeezed into a duet's share: {top} to {bottom}"
+    );
 }

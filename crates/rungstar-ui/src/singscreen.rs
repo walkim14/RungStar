@@ -62,6 +62,16 @@ pub struct Sung {
     pub hit: bool,
 }
 
+/// One part's worth of what is being sung right now.
+///
+/// An ordinary song has one of these; a duet has two, and each gets its own staff and its own
+/// lyric line so neither singer has to read the other's part to find their own.
+pub struct PartView<'a> {
+    pub line: &'a NoteLine,
+    pub syllables: &'a [Syllable],
+    pub next_line: &'a str,
+}
+
 /// The notes of one line, and the beats it spans.
 ///
 /// The screen draws a line at a time rather than a scrolling window. UltraStar does the same,
@@ -231,6 +241,14 @@ pub struct SingScreen {
     pub show_input_panel: bool,
     /// How the highlight moves along the line.
     pub effect: LyricEffect,
+    /// The two parts of a duet, named as the song names them.
+    ///
+    /// Empty for an ordinary song, which is the difference the layout keys off: a duet gets a
+    /// staff and a lyric line each, stacked, so both singers can see their own part without
+    /// reading the other's.
+    pub parts: Vec<String>,
+    /// Which part each singer is on, by index into `parts`.
+    pub singer_part: Vec<usize>,
     /// The song's whole pitch range, so a note sits at the same height from first line to
     /// last. Deriving the scale from whatever happens to be on screen makes notes jump
     /// vertically as the window moves, which is the one thing a pitch display must not do.
@@ -283,6 +301,8 @@ impl SingScreen {
             gamepad: false,
             show_input_panel: false,
             effect: LyricEffect::default(),
+            parts: Vec::new(),
+            singer_part: Vec::new(),
             pitch_low: 0,
             pitch_high: 12,
             pause_cursor: 0,
@@ -382,21 +402,40 @@ impl SingScreen {
         }
     }
 
+    /// Whether this song is being sung as a duet.
+    pub fn is_duet(&self) -> bool {
+        self.parts.len() > 1
+    }
+
+    /// The colour of a part, taken from the first singer on it.
+    fn part_colour(&self, part: usize, style: &Style) -> Color {
+        let singer = self
+            .singer_part
+            .iter()
+            .position(|p| *p == part)
+            .unwrap_or(part);
+        style.player(singer)
+    }
+
     /// Draw a frame.
     ///
-    /// `notes` and `syllables` describe the track being sung; `beat` is the drawing clock,
-    /// which runs ahead of the scoring clock by the microphone delay.
-    #[allow(clippy::too_many_arguments)]
+    /// `parts` carries one entry per part being sung — one for an ordinary song, two for a
+    /// duet. `beat` is the drawing clock, which runs ahead of the scoring clock by the
+    /// microphone delay.
     pub fn draw(
         &mut self,
         list: &mut DrawList,
         area: Rect,
         style: &Style,
-        line: &NoteLine,
-        syllables: &[Syllable],
-        next_line: &str,
+        parts: &[PartView<'_>],
         beat: f64,
     ) {
+        let Some(first) = parts.first() else {
+            return;
+        };
+        let line = first.line;
+        let syllables = first.syllables;
+        let next_line = first.next_line;
         // The video wins over the artwork while it is playing; both sit behind a scrim,
         // because the lyrics have to stay readable over any picture, including a white one or
         // a cut to a flashbulb.
@@ -429,9 +468,53 @@ impl SingScreen {
         let (panels, middle) = body.cut_right(panel_w);
         self.draw_panels(list, panels.inset(style.gap(1.0)), style);
 
-        let (lyrics_area, staff_area) = middle.cut_bottom(style.gap(9.0));
-        self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, line, beat);
-        self.draw_lyrics(list, lyrics_area, style, syllables, next_line, beat);
+        // One part fills the middle; two share it, stacked, each with its own staff above its
+        // own words. Splitting rather than overlaying is the point — a duet where both parts
+        // share a staff is unreadable exactly when it matters, which is when the two are
+        // singing different notes.
+        let rows = middle.rows(parts.len().max(1), style.gap(1.0));
+        for (index, (part, row)) in parts.iter().zip(rows).enumerate() {
+            let lyric_height = if parts.len() > 1 {
+                style.gap(5.5)
+            } else {
+                style.gap(9.0)
+            };
+            let (lyrics_area, staff_area) = row.cut_bottom(lyric_height);
+            self.draw_staff(
+                list,
+                staff_area.inset(style.gap(1.5)),
+                style,
+                part.line,
+                beat,
+            );
+            self.draw_lyrics(
+                list,
+                lyrics_area,
+                style,
+                part.syllables,
+                part.next_line,
+                beat,
+            );
+
+            // Whose part this is, in that singer's colour. Without it the two staves are
+            // indistinguishable and each singer watches the wrong one.
+            if let Some(name) = self.parts.get(index) {
+                let label = Rect::new(
+                    staff_area.x + style.gap(2.0),
+                    staff_area.y + style.gap(0.4),
+                    staff_area.w * 0.5,
+                    style.gap(2.0),
+                );
+                list.text(
+                    label,
+                    name,
+                    TextStyle::new(style.scaled_text(0.8), self.part_colour(index, style))
+                        .bold()
+                        .overflow(Overflow::Ellipsis),
+                );
+            }
+        }
+        let _ = (line, syllables, next_line);
 
         if self.outro && self.overlay == Overlay::None {
             let hint = if self.gamepad { "A" } else { "Enter" };

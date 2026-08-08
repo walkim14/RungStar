@@ -31,6 +31,9 @@ cargo run -p rungstar-app --bin rungstar-sing -- <song.txt> [--mic <name>]  # pl
 cargo run --release -p rungstar-app --bin rungstar        # the game
 cargo run --release -p rungstar-app --bin rungstar -- --check   # start, draw every screen, exit
 cargo run --release --example index -p rungstar-library -- <folder>  # scan a real library
+cargo run --release --example decode_check -p rungstar-audio -- <folder>     # audio codecs
+cargo run --release --example preview_check -p rungstar-platform -- <folder> # browser previews
+cargo run --release --example playback_check -p rungstar-video -- <folder>   # song videos
 cargo test --workspace                              # all tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
@@ -85,6 +88,25 @@ Conformance is measured against usdb_syncer's own fixture corpus, copied unmodif
 These pass **byte for byte**. When changing the parser or the repair passes, that must stay
 true; it is the only real compatibility signal available without a song library.
 
+### Measured on the real library
+
+8,134 songs. Numbers worth keeping because each one changed a decision:
+
+| | |
+|---|---|
+| Parse failures | **0** |
+| Playable (audio file resolves) | 7,865 |
+| With a video | 6,233 |
+| Duets | 193 |
+| Audio codec | 99.9% Ogg Vorbis |
+| Video codec | 88.8% AV1, 11.2% H.264 |
+| Audio decode speed | ~1000x realtime |
+| Video decode speed | ~20x realtime (AV1, software) |
+
+The two codec rows are the ones that mattered. The decoder had been built with `mp3, aac,
+isomp4, alac` and no Vorbis, so almost nothing could be decoded and it presented as "previews
+are unreliable" rather than as a missing codec. The video row is why FFmpeg is vendored.
+
 ### Deliberate divergences from the reference
 
 The reference implementations are a specification, not a standard: where they are wrong, we
@@ -130,6 +152,22 @@ fixture output.
 Normalisation is now idempotent, verified by property test over 20k generated songs.
 
 ## Native dependencies
+
+**FFmpeg 7.1** is vendored at `vendor/ffmpeg/` (Windows x64 shared, GPL build), for song video.
+The deciding measurement: sampling 868 videos across a real library found **88.8% AV1** and
+11.2% H.264. Rust has a practical decoder for H.264 alone, so `openh264` — which was tried and
+does work — would have played one video in nine.
+
+The version pairing is fussy and was found by elimination: FFmpeg master with `ffmpeg-next` 7
+fails because FFmpeg 8 removed `avfft.h`; `ffmpeg-next` 8.1 does not match master either.
+**FFmpeg 7.1 with `ffmpeg-next` 9** builds clean. Pinning to a tagged release rather than
+master is also what makes the build reproducible.
+
+`FFMPEG_DIR` lives in `.cargo/config.toml`, not in a build script: a build script cannot hand
+an environment variable to another crate's build script, and `ffmpeg-sys` is the one that needs
+it. Generating its bindings needs **libclang** (`winget install LLVM.LLVM`). Only the five
+libraries the game links are vendored; `avfilter` and `avdevice` are not, which is why the
+crate turns those features off.
 
 SDL3 3.4.14 is vendored at `vendor/sdl3/` as the official prebuilt Windows x64 binaries.
 Building it from source needs a CMake toolchain that can find a C compiler, and the Visual
@@ -246,10 +284,23 @@ with packaging.
   (Symphonia) and the wgpu renderer, both of which land with the sing screen in Phase 5.
 - **Phase 4 — library index and search**: done. Incremental scanner, SQLite + FTS5 index over
   metadata *and* lyrics, fuzzy fallback, facets, sorts, `.upl` playlists.
-- **Phase 5 — the sing screen**: playable. Decode, playback, clock sync, live capture,
-  scoring, note/lyric rendering and a results summary all wired end to end in
-  `rungstar-sing`. Still to come: multiple singers on screen, duet layout, video and image
-  backgrounds, the five lyric effects, pause menu, and the proper results screen.
+- **Phase 5 — the sing screen**: done. Decode, playback, clock sync, live capture, scoring,
+  notes, lyrics, up to six singers, duet layout, song video, all five lyric effects, pause
+  menu and results.
+
+  **The staff draws one line at a time with a sweeping playhead**, not a scrolling window, and
+  the pitch scale is the whole song's. Both were reported as bugs and both came from the same
+  mistake: a window that scrolls recomputes its scale from whatever is inside it, so a note
+  changes height as the view moves and you cannot tell whether you are above or below it.
+
+  **What the display shows has to agree with what scored.** Matching is octave-agnostic and
+  the tolerance is up to two semitones, so a sung pitch is drawn folded into the target's
+  octave, and a hit is drawn *on* the note rather than where the singer actually was. Drawing
+  the truth put the marker beside the bubble it had just awarded points for. Runs merge on the
+  note rather than the pitch for the same reason — a held note wobbles across the band and
+  every beat of it counts.
+
+  `rungstar-sing` survives as a standalone tool for one song without the browser.
 
   Known simplification: `rungstar-sing` scores one singer from one capture device. The routing
   underneath already handles six across several devices — the diagnostics tool proves it — it

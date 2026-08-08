@@ -118,8 +118,12 @@ fn main() {
     println!("playable   {playable} of {}", all.len());
     println!("has video  {with_video}");
     println!("has cover  {with_cover}");
-    for song in all.iter().filter(|s| !s.is_playable()).take(5) {
+    println!("duets      {}", all.iter().filter(|s| s.is_duet).count());
+    for song in all.iter().filter(|s| !s.is_playable()).take(3) {
         println!("  no audio: {}", song.path.display());
+    }
+    for song in all.iter().filter(|s| s.is_duet).take(3) {
+        println!("  duet: {}", song.path.display());
     }
 
     println!();
