@@ -272,8 +272,11 @@ fn the_statistics_views_name_their_own_columns() {
     assert_eq!(View::Scores.previous(), View::Artists);
 }
 
+/// One row as an `Ultrastar.db` holds it: singer, artist, title, difficulty, score, date.
+type UsRow<'a> = (&'a str, &'a str, &'a str, i64, i64, Option<i64>);
+
 /// Write an `Ultrastar.db` the way UltraStar Deluxe does.
-fn write_ultrastar(path: &std::path::Path, rows: &[(&str, &str, &str, i64, i64, Option<i64>)]) {
+fn write_ultrastar(path: &std::path::Path, rows: &[UsRow<'_>]) {
     let db = rusqlite::Connection::open(path).unwrap();
     db.execute_batch(
         "CREATE TABLE us_songs (
