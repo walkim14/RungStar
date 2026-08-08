@@ -1062,6 +1062,7 @@ fn main() -> Result<()> {
 
     let audio_subsystem = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut text_input_on = false;
     let mut list = DrawList::new();
     let mut last = Instant::now();
 
@@ -1178,6 +1179,20 @@ fn main() -> Result<()> {
             app.apply_settings(renderer.canvas().window_mut());
             let _ = renderer.resize();
         }
+        // SDL3 delivers no `TextInput` events until text input is started for the window, and
+        // starts none by default. Without this the on-screen keyboard works and the physical
+        // one does nothing, which is a strange way for a search box to behave.
+        let editing = app.wants_text();
+        if editing != text_input_on {
+            let window = renderer.canvas().window();
+            if editing {
+                video.text_input().start(window);
+            } else {
+                video.text_input().stop(window);
+            }
+            text_input_on = editing;
+        }
+
         app.poll_scan();
         let scanning = app.scanning().then(|| app.status.clone());
         if let Some(Screen::Songs(songs)) = app.stack.last_mut() {

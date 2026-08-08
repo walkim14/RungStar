@@ -739,3 +739,101 @@ fn the_lyric_bar_arrives_before_the_first_word_and_sweeps_with_it() {
     );
     assert!(middle < end, "the bar stalled: {middle} then {end}");
 }
+
+#[test]
+fn a_hit_is_drawn_on_the_note_even_when_it_was_a_semitone_off() {
+    // Difficulty allows up to two semitones either side, so an honest hit can be a semitone
+    // away. Drawing it where the singer actually was puts the blue bar beside the bubble it
+    // just scored, which reads as a bug rather than as generosity.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let line = NoteLine {
+        start: 8.0,
+        end: 11.0,
+        notes: vec![Note {
+            start: 8.0,
+            duration: 3.0,
+            pitch: 60,
+            kind: NoteKind::Normal,
+        }],
+    };
+
+    let marker_y = |pitch: i32, hit: bool| -> f32 {
+        let mut screen = sing_screen(1);
+        screen.singers[0].sung = vec![Sung {
+            start: 8.0,
+            duration: 3.0,
+            pitch,
+            hit,
+        }];
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        let wanted = if hit { style.player(0) } else { style.danger };
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Rect { rect, color, .. } if *color == wanted => Some(rect.y),
+                _ => None,
+            })
+            .next()
+            .expect("the sung note was not drawn")
+    };
+
+    let exact = marker_y(60, true);
+    for off in [59, 61, 58, 62] {
+        assert!(
+            (marker_y(off, true) - exact).abs() < 1.0,
+            "a hit at {off} was drawn away from the note it scored"
+        );
+    }
+
+    // A miss still shows where the singer really was — that is what a miss tells you.
+    assert!(
+        (marker_y(64, false) - exact).abs() > 1.0,
+        "a miss was snapped onto the note as well"
+    );
+}
+
+#[test]
+fn the_lyric_bar_runs_in_from_the_edge_of_the_screen() {
+    // Starting beside the first word, or at the same moment the notes appear, is a run-up
+    // that is over before it has been noticed.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let screen = sing_screen(1);
+    let words = syllables();
+    let first = words[0].start;
+
+    let bar_x = |beat: f64| -> f32 {
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Rect { rect, color, .. }
+                    if rect.w < 6.0 && *color == style.accent.alpha(0.9) =>
+                {
+                    Some(rect.x)
+                }
+                _ => None,
+            })
+            .next()
+            .expect("no bar was drawn")
+    };
+
+    // Well before the line, the bar is at the very left of the screen.
+    let earliest = bar_x(first - 16.0);
+    assert!(
+        earliest <= area().x + 4.0,
+        "the bar started at {earliest} rather than the screen edge"
+    );
+
+    // And it is already well on its way by the time the words are due, rather than arriving
+    // with them.
+    let at_start = bar_x(first);
+    let halfway = bar_x(first - 8.0);
+    assert!(
+        halfway > earliest && halfway < at_start,
+        "the run-up did not progress: {earliest}, {halfway}, {at_start}"
+    );
+}

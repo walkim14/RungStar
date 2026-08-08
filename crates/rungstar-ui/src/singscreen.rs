@@ -56,6 +56,7 @@ impl Note {
 pub struct Sung {
     pub start: f64,
     pub duration: f64,
+    /// The pitch the detector reported.
     pub pitch: i32,
     pub hit: bool,
 }
@@ -235,9 +236,11 @@ const RATING_LIFETIME: f32 = 1.4;
 
 /// How far ahead of the first syllable the sweeping bar starts, in beats.
 ///
-/// Four beats is one bar of four-four at the note grid's rate, which is the count-in a person
-/// would give you.
-const LEAD_IN_BEATS: f64 = 4.0;
+/// The note grid runs at four times the written BPM, so sixteen of these is one bar of
+/// four-four — the count-in a person would give you. Four was the first attempt and was
+/// useless: it began beside the first word and arrived with the notes, which tells you
+/// nothing you could not already see.
+const LEAD_IN_BEATS: f64 = 16.0;
 
 impl SingScreen {
     pub fn new(artist: impl Into<String>, title: impl Into<String>, singers: usize) -> Self {
@@ -579,7 +582,13 @@ impl SingScreen {
                 }
                 let x = x_of(sung.start.max(line.start));
                 let w = (x_of(sung_end.min(line.end)) - x).max(4.0);
+                // A hit is drawn *on* the note rather than where the singer actually was.
+                // Difficulty allows up to two semitones either side, so an honest hit a
+                // semitone off would sit beside the bubble it just scored — the picture
+                // disagreeing with the points again, in smaller print. A miss is drawn where
+                // the singer really was, because that is the information a miss carries.
                 let pitch = match line.note_at(sung.start) {
+                    Some(target) if sung.hit => target.pitch,
                     Some(target) => fold_to_octave(sung.pitch, target.pitch),
                     None => sung.pitch,
                 };
@@ -656,23 +665,24 @@ impl SingScreen {
 
         // Where each syllable sits, so the sweeping bar and the text agree exactly.
         let mut spans: Vec<(f32, f32)> = Vec::with_capacity(syllables.len());
-        let mut x = left;
+        let mut pen = left;
         for syllable in syllables {
             let width = crate::draw::approx_text_width(&syllable.text, size);
-            spans.push((x, width));
-            x += width;
+            spans.push((pen, width));
+            pen += width;
         }
 
-        // The bar sweeps the line at the speed the words are sung, and enters from the left
-        // before the first syllable is due. Knowing *when* to come in is most of singing a
-        // song you half-remember, and a highlight that only starts once you are already late
-        // does not help with it.
+        // The bar sweeps the line at the speed the words are sung, and runs in from the edge
+        // of the screen well before the first syllable is due. Knowing *when* to come in is
+        // most of singing a song you only half-remember, and a run-up that starts beside the
+        // first word — or at the same moment the notes appear — is over before it has been
+        // noticed.
         let first = &syllables[0];
-        let lead_width = (total * 0.12).clamp(size * 1.2, size * 4.0);
+        let trail = (total * 0.12).clamp(size * 1.2, size * 4.0);
         let head = if beat < first.start {
             let progress =
                 ((beat - (first.start - LEAD_IN_BEATS)) / LEAD_IN_BEATS).clamp(0.0, 1.0) as f32;
-            left - lead_width * (1.0 - progress)
+            area.x + (left - area.x) * progress
         } else {
             // Inside the line: interpolate through whichever syllable is due.
             let mut position = left + total;
@@ -691,29 +701,32 @@ impl SingScreen {
             position
         };
 
-        // A soft wedge behind the bar rather than a bare line, so the eye can follow it
-        // across a busy background.
-        if head > current.x - lead_width {
-            let glow = Rect::new(
-                (head - lead_width).max(current.x - lead_width),
-                current.y + current.h * 0.12,
-                lead_width.min(head - (current.x - lead_width)).max(0.0),
-                current.h * 0.76,
-            );
-            if glow.w > 0.0 {
-                list.panel(glow, style.accent.alpha(0.16), glow.h / 2.0);
-            }
+        // A soft wedge behind the bar rather than a bare line, so the eye can follow it over
+        // a busy background.
+        let trail_from = (head - trail).max(area.x);
+        let trail_width = (head - trail_from).max(0.0);
+        if trail_width > 0.0 {
             list.panel(
                 Rect::new(
-                    head - 2.0,
-                    current.y + current.h * 0.08,
-                    4.0,
-                    current.h * 0.84,
+                    trail_from,
+                    current.y + current.h * 0.12,
+                    trail_width,
+                    current.h * 0.76,
                 ),
-                style.accent.alpha(0.9),
-                2.0,
+                style.accent.alpha(0.16),
+                current.h * 0.38,
             );
         }
+        list.panel(
+            Rect::new(
+                (head - 2.0).max(area.x),
+                current.y + current.h * 0.08,
+                4.0,
+                current.h * 0.84,
+            ),
+            style.accent.alpha(0.9),
+            2.0,
+        );
 
         for (syllable, (x, width)) in syllables.iter().zip(&spans) {
             let sung = beat >= syllable.start + syllable.duration;
