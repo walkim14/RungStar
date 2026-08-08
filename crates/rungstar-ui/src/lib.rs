@@ -8,6 +8,7 @@
 pub mod browse;
 pub mod color;
 pub mod draw;
+pub mod editorscreen;
 pub mod geom;
 pub mod keyboard;
 pub mod menu;

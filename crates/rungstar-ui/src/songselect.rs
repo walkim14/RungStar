@@ -286,16 +286,19 @@ pub enum SongAction {
     PickChallenge,
     /// Copy what the browser knows to the clipboard, for reporting a broken file.
     ShowDetails,
+    /// Open the song in the editor.
+    Edit,
     OpenFolder,
 }
 
 impl SongAction {
-    pub const ALL: [SongAction; 6] = [
+    pub const ALL: [SongAction; 7] = [
         SongAction::Sing,
         SongAction::SingFromChorus,
         SongAction::ToggleFavourite,
         SongAction::PickChallenge,
         SongAction::ShowDetails,
+        SongAction::Edit,
         SongAction::OpenFolder,
     ];
 
@@ -306,6 +309,7 @@ impl SongAction {
             Self::ToggleFavourite => "Favourite",
             Self::PickChallenge => "Sing it how\u{2026}",
             Self::ShowDetails => "Song details",
+            Self::Edit => "Edit this song",
             Self::OpenFolder => "Open the song folder",
         }
     }

@@ -41,6 +41,7 @@ rungstar-library = { path = "crates/rungstar-library" }
 rungstar-party = { path = "crates/rungstar-party" }
 rungstar-usdb = { path = "crates/rungstar-usdb" }
 rungstar-download = { path = "crates/rungstar-download" }
+rungstar-editor = { path = "crates/rungstar-editor" }
 rungstar-ui = { path = "crates/rungstar-ui" }
 rungstar-video = { path = "crates/rungstar-video" }
 rungstar-profile = { path = "crates/rungstar-profile" }

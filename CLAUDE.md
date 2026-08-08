@@ -475,4 +475,35 @@ with packaging.
   **What still needs the account**: the two requests that fetch a note file, and therefore any
   real download. Everything above them is finished and tested.
 
-Later phases in the plan: editor, packaging, extras.
+- **Phase 10 - the song editor**: done. `rungstar-editor` is the document and the operations;
+  `editorscreen.rs` is a piano roll with the waveform behind it.
+
+  **Undo is by snapshot, not by inverse.** Every operation could carry its own undo, and
+  getting one of them subtly wrong is how an editor silently corrupts an evening's work. A
+  whole song is a few hundred kilobytes and two hundred of them is less than one video frame,
+  so the obviously correct thing is affordable. A test applies every kind of edit, undoes it,
+  and asserts the written file is unchanged to the byte.
+
+  The rules that keep a song singable are enforced by the operations rather than left to the
+  person editing: no note on top of its neighbour, no note shorter than a beat, nothing before
+  beat zero. Each refusal says why, because a rule that stops an edit silently reads as a
+  broken key.
+
+  **`PITCH_RANGE` was guessed wrong first.** A symmetric ±60 refuses to transpose an ordinary
+  song: measured across the 8,134-song library, real pitches run **-12 to 74**, because the
+  format's number is a semitone offset from a baseline each file picks for itself. It is now
+  one byte either way.
+
+  Doubling the tempo scales every timestamp with it, so the notes stay on the same *moment* of
+  the audio - changing `#BPM` alone is how a fixable half-tempo file becomes an unsingable one.
+  `#GAP` is the other control and shifts the whole song instead.
+
+  The waveform is a **peak envelope at 100 buckets a second**, computed once when the editor
+  opens. Ten million samples per song against a thousand-unit staff means ten thousand reads
+  per pixel per frame otherwise. Peak rather than average, or it flattens into a band as you
+  zoom out and stops showing where anything starts.
+
+  Escape with unsaved work offers to save, and Save is what the cursor starts on: somebody who
+  pressed Escape almost always meant to keep it.
+
+Later phases in the plan: packaging, extras.

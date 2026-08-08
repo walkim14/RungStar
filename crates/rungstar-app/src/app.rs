@@ -22,6 +22,7 @@ use rungstar_platform::{Playback, SdlCapture};
 use rungstar_profile::stats::View;
 use rungstar_profile::{Profiles, Score};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
+use rungstar_ui::editorscreen::{EditorOutcome, EditorScreen};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::micscreen::{MicOutcome, MicScreen};
@@ -85,6 +86,7 @@ enum Screen {
     Players(Box<PlayerScreen>),
     Party(Box<PartyScreen>),
     Usdb(Box<UsdbScreen>),
+    Editing(Box<EditorScreen>),
     Stats(Box<StatsScreen>),
     About,
 }
@@ -123,6 +125,8 @@ struct App {
     party_scores: Option<Vec<i32>>,
     /// Whether the jukebox is running: songs play back to back and nothing is scored.
     jukebox: bool,
+    /// Set when the editor asked to start or stop its preview, which the frame loop owns.
+    pending_editor_audio: bool,
     /// The USDB worker, started the first time the browser is opened.
     ///
     /// Lazily, because it logs in: somebody who never opens it should not have their password
@@ -275,6 +279,7 @@ impl App {
             party_picking: false,
             party_scores: None,
             jukebox: false,
+            pending_editor_audio: false,
             usdb: None,
             pending_mics: false,
             singing: None,
@@ -555,6 +560,7 @@ impl App {
                     }
                 }
             }
+            SongAction::Edit => self.edit_song(id),
             SongAction::PickChallenge => {
                 if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
                     songs.pick_challenge();
@@ -630,6 +636,7 @@ impl App {
             Some(Screen::Songs(songs)) => songs.wants_text(),
             Some(Screen::Players(screen)) => screen.wants_text(),
             Some(Screen::Usdb(screen)) => screen.wants_text(),
+            Some(Screen::Editing(screen)) => screen.wants_text(),
             _ => false,
         }
     }
@@ -1005,6 +1012,7 @@ impl App {
             Some(Screen::Players(screen)) => screen.gamepad = gamepad,
             Some(Screen::Party(screen)) => screen.gamepad = gamepad,
             Some(Screen::Usdb(screen)) => screen.gamepad = gamepad,
+            Some(Screen::Editing(screen)) => screen.gamepad = gamepad,
             Some(Screen::Stats(screen)) => screen.gamepad = gamepad,
             _ => {}
         }
@@ -1117,6 +1125,11 @@ impl App {
             Some(Screen::Usdb(screen)) => {
                 let (transition, outcome) = screen.handle(input);
                 self.apply_usdb_outcome(outcome);
+                transition
+            }
+            Some(Screen::Editing(screen)) => {
+                let (transition, outcome) = screen.handle(input);
+                self.apply_editor_outcome(outcome);
                 transition
             }
             Some(Screen::Stats(screen)) => screen.handle(input),
@@ -1244,6 +1257,60 @@ impl App {
                 }
                 self.next_plan = self.plain_plan();
                 self.request_sing(id);
+            }
+        }
+    }
+
+    /// Open a song in the editor.
+    fn edit_song(&mut self, id: i64) {
+        let Ok(Some(entry)) = self.library.song(id) else {
+            self.status = "that song is no longer in the library".to_owned();
+            return;
+        };
+        match rungstar_editor::Editor::open(&entry.path) {
+            Ok(editor) => {
+                let mut screen = EditorScreen::new(editor);
+                // The waveform, when the audio is there and decodes. Without it the editor
+                // still works and says so, because a song with no audio is exactly the kind
+                // that needs its timing looked at.
+                if let (Some(directory), Some(name)) = (entry.directory(), &entry.audio_file) {
+                    if let Some(path) = resolve_beside(directory, name) {
+                        screen.waveform = waveform_of(&path);
+                    }
+                }
+                self.stop_preview();
+                self.stack.push(Screen::Editing(Box::new(screen)));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    /// Carry out what the editor asked for.
+    fn apply_editor_outcome(&mut self, outcome: EditorOutcome) {
+        match outcome {
+            EditorOutcome::None => {}
+            EditorOutcome::Save => {
+                let saved = match self.stack.last_mut() {
+                    Some(Screen::Editing(screen)) => Some(screen.editor.save()),
+                    _ => None,
+                };
+                match saved {
+                    Some(Ok(())) => {
+                        self.status = "saved".to_owned();
+                        // The file on disk changed, so the index has to be told or the browser
+                        // shows the old title until the next launch.
+                        self.start_scan(false);
+                    }
+                    Some(Err(error)) => self.status = error.to_string(),
+                    None => {}
+                }
+            }
+            EditorOutcome::Play(_) | EditorOutcome::Stop => {
+                // Preview playback belongs to the frame loop, which owns the audio device.
+                self.pending_editor_audio = true;
+            }
+            EditorOutcome::Leave => {
+                self.stop_preview();
             }
         }
     }
@@ -1946,6 +2013,7 @@ impl App {
             Some(Screen::Players(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Party(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Usdb(screen)) => screen.draw(list, area, &self.style),
+            Some(Screen::Editing(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Stats(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
@@ -1971,6 +2039,29 @@ fn singing_players(chosen: usize, microphones: usize) -> usize {
     match chosen {
         0 => microphones.max(1),
         chosen => chosen.min(microphones.max(1)),
+    }
+}
+
+/// Decode a song's audio far enough to draw it.
+///
+/// Peaks only, at a hundred a second, computed once when the editor opens. Ten million samples
+/// per song is more than a staff can show and more than a frame can read.
+fn waveform_of(path: &std::path::Path) -> rungstar_editor::Waveform {
+    match rungstar_audio::AudioClip::open(path) {
+        Ok(clip) => {
+            // Wait for the whole song rather than the usual half-second cushion: a waveform of
+            // the first two seconds is worse than none, because it looks like the song is
+            // silent after that.
+            clip.wait_for(f64::MAX, std::time::Duration::from_secs(30));
+            let frames = clip.ready_frames();
+            let mut samples = vec![0i16; frames * clip.channels()];
+            clip.read(0, &mut samples);
+            rungstar_editor::Waveform::from_samples(&samples, clip.channels(), clip.sample_rate())
+        }
+        Err(error) => {
+            tracing::warn!("no waveform for {}: {error}", path.display());
+            rungstar_editor::Waveform::default()
+        }
     }
 }
 
@@ -2677,6 +2768,38 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         }
         println!("usdb        {} draw commands", list.len());
         app.stack.pop();
+    }
+
+    // The editor, in each of its modes.
+    {
+        let parsed = rungstar_song::SongTxt::parse_bytes(
+            b"#TITLE:Check
+#ARTIST:Nobody
+#MP3:a.ogg
+#BPM:300
+#GAP:0
+              : 0 4 60 la
+: 4 4 62 la
+- 8
+: 12 4 64 la
+E
+",
+        )?;
+        let editor = rungstar_editor::Editor::over(parsed.song, "check.txt".into());
+        app.stack
+            .push(Screen::Editing(Box::new(EditorScreen::new(editor))));
+        for step in [Input::Up, Input::ContextMenu, Input::Back, Input::Search] {
+            list.clear();
+            app.draw(list, area);
+            renderer
+                .render(list, app.style.background)
+                .map_err(|e| anyhow::anyhow!("editor: {e}"))?;
+            app.handle(step, area);
+        }
+        println!("editor      {} draw commands", list.len());
+        while matches!(app.stack.last(), Some(Screen::Editing(_))) {
+            app.stack.pop();
+        }
     }
 
     // And the browser overlays, which have their own layout maths.
