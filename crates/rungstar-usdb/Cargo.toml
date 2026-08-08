@@ -1,0 +1,20 @@
+[package]
+name = "rungstar-usdb"
+description = "The usdb.animux.de protocol: catalog sync, song details and note files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ureq = { version = "3", features = ["cookies", "gzip"] }
+
+[dev-dependencies]
+tempfile = "3"
