@@ -3,6 +3,7 @@
 use rungstar_ui::draw::{Command, DrawList};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::screen::Transition;
+use rungstar_ui::settings::LyricEffect;
 use rungstar_ui::singscreen::{
     fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PauseChoice, SingScreen,
     Singer, Sung, Syllable,
@@ -310,14 +311,20 @@ fn the_lyric_being_sung_is_drawn_differently_from_the_rest() {
         })
         .collect();
 
-    let active = colours.iter().find(|(t, _)| t == "ver ").map(|(_, c)| *c);
-    let upcoming = colours.iter().find(|(t, _)| t == "na ").map(|(_, c)| *c);
-    assert_eq!(
-        active,
-        Some(style.accent),
-        "the active syllable is not highlighted"
+    // Slide draws the active syllable twice — a resting layer and an accented one clipped to
+    // how much of it has been sung — so it is enough that one of them is the accent.
+    assert!(
+        colours
+            .iter()
+            .any(|(t, c)| t == "ver " && *c == style.accent),
+        "the active syllable is never drawn in the accent: {colours:?}"
     );
-    assert_ne!(active, upcoming, "sung and unsung syllables look the same");
+    assert!(
+        !colours
+            .iter()
+            .any(|(t, c)| t == "na " && *c == style.accent),
+        "an unsung syllable was drawn as active"
+    );
 }
 
 #[test]
@@ -996,4 +1003,109 @@ fn the_outro_says_how_to_skip_it() {
     screen.draw(&mut list, area(), &style, &line(), &syllables(), "", 10.0);
     let offered = strings(&list).join(" ");
     assert!(offered.contains("for your score"), "not offered: {offered}");
+}
+
+#[test]
+fn each_lyric_effect_draws_something_different() {
+    // Five entries in the settings that all did the same thing would be five lies. Each one
+    // has to change the picture.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let words = syllables();
+
+    let frame = |effect: LyricEffect| -> DrawList {
+        let mut screen = sing_screen(1);
+        screen.effect = effect;
+        let mut list = DrawList::new();
+        // Part way through the second syllable, so an effect has something to act on.
+        screen.draw(&mut list, area(), &style, &line(), &words, "", 11.0);
+        list
+    };
+
+    let effects = [
+        LyricEffect::Simple,
+        LyricEffect::Zoom,
+        LyricEffect::Slide,
+        LyricEffect::Ball,
+        LyricEffect::Shift,
+    ];
+    let frames: Vec<DrawList> = effects.iter().map(|e| frame(*e)).collect();
+
+    for (i, a) in frames.iter().enumerate() {
+        for (j, b) in frames.iter().enumerate().skip(i + 1) {
+            assert!(
+                a != b,
+                "{:?} and {:?} draw the same thing",
+                effects[i],
+                effects[j]
+            );
+        }
+    }
+}
+
+#[test]
+fn zoom_swells_the_syllable_being_sung() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let words = syllables();
+
+    let size_of = |beat: f64, wanted: &str| -> f32 {
+        let mut screen = sing_screen(1);
+        screen.effect = LyricEffect::Zoom;
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Text { text, style, .. } if text == wanted => Some(style.size),
+                _ => None,
+            })
+            .next()
+            .expect("the syllable was not drawn")
+    };
+
+    // Mid-syllable it is larger than the same syllable before its turn.
+    let resting = size_of(9.0, "ver ");
+    let swollen = size_of(11.0, "ver ");
+    assert!(
+        swollen > resting * 1.05,
+        "zoom did not swell: {resting} then {swollen}"
+    );
+}
+
+#[test]
+fn shift_keeps_the_syllable_being_sung_in_the_middle() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let words = syllables();
+
+    let centre_of = |beat: f64, wanted: &str| -> f32 {
+        let mut screen = sing_screen(1);
+        screen.effect = LyricEffect::Shift;
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Text { text, rect, .. } if text == wanted => Some(rect.center().x),
+                _ => None,
+            })
+            .next()
+            .expect("the syllable was not drawn")
+    };
+
+    // Whichever syllable is due sits in the same place — the middle of the lyric strip,
+    // which is not the middle of the screen because the singer panels take the right edge.
+    // The property that matters is that the spot does not move, so the eye never has to
+    // find it again.
+    let anchor = centre_of(9.0, "Ne");
+    for (beat, word) in [(11.0, "ver "), (13.0, "gon"), (15.0, "na ")] {
+        let at = centre_of(beat, word);
+        assert!(
+            (at - anchor).abs() < 2.0,
+            "at beat {beat}, {word:?} sat at {at} rather than the anchor {anchor}"
+        );
+    }
+    // And it really is roughly central, not pinned to an edge.
+    assert!(anchor > area().w * 0.25 && anchor < area().w * 0.75);
 }

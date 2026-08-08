@@ -7,3 +7,5 @@ crates/rungstar-song/tests/fixtures/** -text
 
 # Vendored binaries.
 vendor/sdl3/lib/** binary
+vendor/ffmpeg/bin/** binary
+vendor/ffmpeg/lib/** binary

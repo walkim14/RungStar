@@ -856,6 +856,7 @@ impl App {
             self.settings.game.players as usize,
         );
         screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
+        screen.effect = self.settings.lyrics.effect;
         screen.duration = session.duration();
         let (low, high) = session.pitch_range();
         screen.pitch_low = low;

@@ -12,6 +12,7 @@ use crate::color::Color;
 use crate::draw::{Align, DrawList, Font, ImageId, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Point, Rect};
 use crate::screen::{Transition, Widgets};
+use crate::settings::LyricEffect;
 use crate::songselect::Input;
 use crate::theme::Style;
 
@@ -222,6 +223,8 @@ pub struct SingScreen {
     pub duration: f32,
     pub gamepad: bool,
     pub show_input_panel: bool,
+    /// How the highlight moves along the line.
+    pub effect: LyricEffect,
     /// The song's whole pitch range, so a note sits at the same height from first line to
     /// last. Deriving the scale from whatever happens to be on screen makes notes jump
     /// vertically as the window moves, which is the one thing a pitch display must not do.
@@ -270,6 +273,7 @@ impl SingScreen {
             duration: 0.0,
             gamepad: false,
             show_input_panel: false,
+            effect: LyricEffect::default(),
             pitch_low: 0,
             pitch_high: 12,
             pause_cursor: 0,
@@ -808,29 +812,93 @@ impl SingScreen {
             2.0,
         );
 
+        // Shift moves the whole line so the syllable being sung stays under the eye, which
+        // is the point of it: you never look away to find where you are.
+        let shift = if self.effect == LyricEffect::Shift {
+            let active = syllables
+                .iter()
+                .zip(&spans)
+                .find(|(s, _)| beat < s.start + s.duration)
+                .map(|(_, (x, w))| x + w / 2.0)
+                .unwrap_or(current.center().x);
+            current.center().x - active
+        } else {
+            0.0
+        };
+
         for (syllable, (x, width)) in syllables.iter().zip(&spans) {
-            let sung = beat >= syllable.start + syllable.duration;
-            let active = beat >= syllable.start && !sung;
-            let color = if active {
-                style.accent
-            } else if sung {
-                style.text
-            } else if syllable.golden {
+            let x = x + shift;
+            let ends = syllable.start + syllable.duration;
+            let done = beat >= ends;
+            let active = beat >= syllable.start && !done;
+            let through = if active {
+                ((beat - syllable.start) / syllable.duration.max(0.001)).clamp(0.0, 1.0) as f32
+            } else {
+                f32::from(u8::from(done))
+            };
+
+            let resting = if syllable.golden {
                 style.warning
             } else {
                 style.muted
             };
-            list.text(
-                Rect::new(*x, current.y, *width, current.h),
-                &syllable.text,
-                TextStyle::new(size, color)
+            let colour = if active {
+                style.accent
+            } else if done {
+                style.text
+            } else {
+                resting
+            };
+
+            // Zoom swells the syllable as it is sung and settles again, so the eye is pulled
+            // to it rather than having to track a colour change.
+            let drawn_size = if self.effect == LyricEffect::Zoom && active {
+                size * (1.0 + 0.22 * (through * std::f32::consts::PI).sin())
+            } else {
+                size
+            };
+            let box_rect = Rect::new(x, current.y, *width, current.h);
+            let text_style = |colour: Color, size: f32| {
+                TextStyle::new(size, colour)
                     .font(Font::Lyrics)
                     .centered()
                     .valign(VAlign::Middle)
                     // Lyrics sit over artwork and video, where an outline is the difference
                     // between readable and not.
-                    .outlined(style.background.alpha(0.85), 2.0),
-            );
+                    .outlined(style.background.alpha(0.85), 2.0)
+            };
+
+            if self.effect == LyricEffect::Slide && active {
+                // The syllable fills from the left as it is sung, so a long note shows how
+                // much of it is left rather than only that it is happening.
+                list.text(box_rect, &syllable.text, text_style(resting, drawn_size));
+                list.clipped(
+                    Rect::new(x, current.y, width * through, current.h),
+                    |list| {
+                        list.text(
+                            box_rect,
+                            &syllable.text,
+                            text_style(style.accent, drawn_size),
+                        );
+                    },
+                );
+            } else {
+                list.text(box_rect, &syllable.text, text_style(colour, drawn_size));
+            }
+
+            // The bouncing ball, which is the one everybody recognises: it arcs from syllable
+            // to syllable and is over the one due now.
+            if self.effect == LyricEffect::Ball && active {
+                let radius = size * 0.16;
+                let arc = (through * std::f32::consts::PI).sin();
+                let ball = Rect::new(
+                    x + width * through - radius,
+                    current.y + current.h * 0.06 - arc * size * 0.35,
+                    radius * 2.0,
+                    radius * 2.0,
+                );
+                list.panel(ball, style.accent, radius);
+            }
         }
 
         if !next_line.is_empty() {
