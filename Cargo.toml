@@ -38,6 +38,7 @@ rungstar-score = { path = "crates/rungstar-score" }
 rungstar-audio = { path = "crates/rungstar-audio" }
 rungstar-platform = { path = "crates/rungstar-platform" }
 rungstar-library = { path = "crates/rungstar-library" }
+rungstar-party = { path = "crates/rungstar-party" }
 rungstar-ui = { path = "crates/rungstar-ui" }
 rungstar-video = { path = "crates/rungstar-video" }
 rungstar-profile = { path = "crates/rungstar-profile" }

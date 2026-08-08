@@ -1,0 +1,12 @@
+[package]
+name = "rungstar-party"
+description = "Party modes, tournament brackets and the challenge rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true

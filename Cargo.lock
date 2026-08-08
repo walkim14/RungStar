@@ -1034,6 +1034,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rungstar-party"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rungstar-pitch"
 version = "0.1.0"
 dependencies = [
