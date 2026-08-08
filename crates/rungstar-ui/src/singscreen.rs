@@ -932,9 +932,9 @@ impl SingScreen {
             let y = y_of(mark.pitch) + (row_h - note_h) / 2.0;
             if mark.hit {
                 let colour = if mark.singers.len() > 1 {
-                    // Everybody on the note at once. Its own colour, so "we are together" is
-                    // a thing you can see rather than infer.
-                    style.success
+                    // Everybody on the note at once. The theme's own accent, so it belongs to
+                    // the interface rather than looking like a third singer wandered in.
+                    style.accent
                 } else {
                     style.player(mark.singers[0])
                 };
