@@ -998,6 +998,7 @@ dependencies = [
  "rungstar-library",
  "rungstar-pitch",
  "rungstar-platform",
+ "rungstar-profile",
  "rungstar-score",
  "rungstar-song",
  "rungstar-ui",
@@ -1083,6 +1084,7 @@ name = "rungstar-ui"
 version = "0.1.0"
 dependencies = [
  "rungstar-library",
+ "rungstar-profile",
  "serde",
  "tempfile",
  "thiserror",

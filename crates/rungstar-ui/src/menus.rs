@@ -47,6 +47,18 @@ impl MainMenu {
                 quit: false,
             },
             Entry {
+                label: "Singers",
+                detail: "Who is playing, and their scores",
+                route: Some(Route::Players),
+                quit: false,
+            },
+            Entry {
+                label: "Statistics",
+                detail: "Best scores, best singers, most-sung songs",
+                route: Some(Route::Stats),
+                quit: false,
+            },
+            Entry {
                 label: "Options",
                 detail: "Microphones, graphics, difficulty and appearance",
                 route: Some(Route::Options),

@@ -331,22 +331,40 @@ fn paging_moves_by_a_screenful_in_every_layout() {
 #[test]
 fn the_main_menu_routes_to_every_screen_it_offers() {
     let mut menu = MainMenu::new();
+    let mut seen = Vec::new();
+    // Walk the menu until it comes back to the top, confirming each row leads somewhere.
+    // Looping a fixed number of times would silently stop testing rows as the menu grows.
+    for step in 0..16 {
+        match menu.handle(Input::Confirm) {
+            Transition::Push(route) => seen.push(route),
+            Transition::Quit => seen.push(Route::Main),
+            other => panic!("a menu row produced {other:?}"),
+        }
+        menu.handle(Input::Down);
+        if menu.cursor() == 0 {
+            break;
+        }
+        assert!(step < 15, "the menu never wrapped");
+    }
+    for wanted in [
+        Route::SongSelect,
+        Route::Players,
+        Route::Stats,
+        Route::Options,
+        Route::About,
+    ] {
+        assert!(
+            seen.contains(&wanted),
+            "{wanted:?} is on no menu row: {seen:?}"
+        );
+    }
+    assert!(seen.contains(&Route::Main), "there is no way to quit");
+    assert_eq!(menu.cursor(), 0, "the menu did not wrap");
     assert_eq!(
-        menu.handle(Input::Confirm),
-        Transition::Push(Route::SongSelect)
+        seen.len(),
+        seen.iter().collect::<std::collections::HashSet<_>>().len(),
+        "two menu rows go to the same place: {seen:?}"
     );
-    menu.handle(Input::Down);
-    assert_eq!(
-        menu.handle(Input::Confirm),
-        Transition::Push(Route::Options)
-    );
-    menu.handle(Input::Down);
-    assert_eq!(menu.handle(Input::Confirm), Transition::Push(Route::About));
-    menu.handle(Input::Down);
-    assert_eq!(menu.handle(Input::Confirm), Transition::Quit);
-    // And it wraps, so the last entry is not a dead end.
-    menu.handle(Input::Down);
-    assert_eq!(menu.cursor(), 0);
 }
 
 #[test]
@@ -785,11 +803,12 @@ fn the_pointer_works_on_the_main_menu_and_the_options() {
             _ => None,
         })
         .collect();
-    assert!(rows.len() >= 4, "the menu did not draw four rows");
-    assert_eq!(
+    assert!(rows.len() >= 5, "the menu did not draw its rows");
+    // The second row, whatever it now is, must be reachable by clicking it.
+    assert!(matches!(
         menu.handle(Input::Click(rows[1].center())),
-        Transition::Push(Route::Options)
-    );
+        Transition::Push(_)
+    ));
 
     let mut screen = OptionsScreen::new();
     let mut settings = Settings::default();

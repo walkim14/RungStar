@@ -19,15 +19,19 @@ use rungstar_library::{
 use rungstar_platform::font::FontSet;
 use rungstar_platform::render::Renderer;
 use rungstar_platform::{Playback, SdlCapture};
+use rungstar_profile::stats::View;
+use rungstar_profile::{Profiles, Score};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::micscreen::{MicOutcome, MicScreen};
 use rungstar_ui::options::Action;
+use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
 use rungstar_ui::settings::{ScreenMode, Settings, Switch};
 use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Input, SongAction, SongSelect};
+use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
 use rungstar_ui::Color;
 
@@ -75,6 +79,8 @@ enum Screen {
     Sing(Box<SingScreen>, Box<session::Session>),
     /// Microphone setup, with capture running so the meters are live.
     Mics(Box<MicScreen>, Box<session::Monitor>),
+    Players(Box<PlayerScreen>),
+    Stats(Box<StatsScreen>),
     About,
 }
 
@@ -84,6 +90,9 @@ struct App {
     theme: Theme,
     style: Style,
     library: Database,
+    profiles: Profiles,
+    /// Who is singing, by profile id, in singer order.
+    singers: Vec<i64>,
     stack: Vec<Screen>,
     covers: CoverCache,
     data_dir: PathBuf,
@@ -215,12 +224,17 @@ impl App {
 
         std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
         let library = Database::open(data_dir.join("library.db")).context("opening the index")?;
+        // Its own file, because the index is a cache that can be rebuilt and this is not.
+        let profiles =
+            Profiles::open(data_dir.join("profiles.db")).context("opening the profiles")?;
 
         Ok(Self {
             settings,
             theme,
             style,
             library,
+            profiles,
+            singers: Vec::new(),
             stack: vec![Screen::Main(MainMenu::new())],
             covers: CoverCache::new(),
             data_dir,
@@ -492,7 +506,28 @@ impl App {
                 self.status = "starting from the chorus is not wired up yet".to_owned();
             }
             SongAction::ToggleFavourite => {
-                self.status = "favourites arrive with player profiles".to_owned();
+                // A favourite belongs to somebody, so there has to be a somebody. Whoever is
+                // singing first, or the only profile if there is one.
+                let owner = self
+                    .singers
+                    .first()
+                    .copied()
+                    .or_else(|| self.profiles.players().ok()?.first().map(|p| p.id));
+                let Some(owner) = owner else {
+                    self.status =
+                        "add a singer first, so the favourite belongs to somebody".to_owned();
+                    return;
+                };
+                if let Ok(Some(song)) = self.library.song(id) {
+                    match self
+                        .profiles
+                        .toggle_favourite(owner, &song.artist, &song.title)
+                    {
+                        Ok(true) => self.status = format!("favourited {}", song.display_name()),
+                        Ok(false) => self.status = format!("unfavourited {}", song.display_name()),
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
             }
             SongAction::ShowDetails => {
                 if let Ok(Some(song)) = self.library.song(id) {
@@ -536,7 +571,218 @@ impl App {
 
     /// Whether the screen on top is editing text.
     fn wants_text(&self) -> bool {
-        matches!(self.stack.last(), Some(Screen::Songs(songs)) if songs.wants_text())
+        match self.stack.last() {
+            Some(Screen::Songs(songs)) => songs.wants_text(),
+            Some(Screen::Players(screen)) => screen.wants_text(),
+            _ => false,
+        }
+    }
+
+    /// Reload the player list, with each profile's own history beside their name.
+    fn refresh_players(&self, screen: &mut PlayerScreen) {
+        let Ok(players) = self.profiles.players() else {
+            return;
+        };
+        screen.players = players
+            .into_iter()
+            .map(|player| {
+                // A profile is worth having because it remembers; showing what it remembers is
+                // what makes that visible rather than a claim.
+                let history = self.profiles.history(player.id, 1_000).unwrap_or_default();
+                Entry {
+                    id: player.id,
+                    name: player.name,
+                    colour: player.colour,
+                    songs: history.len() as i64,
+                    best: history.iter().map(|s| s.points).max().unwrap_or(0),
+                }
+            })
+            .collect();
+        // A profile that no longer exists cannot be singing.
+        let present: Vec<i64> = screen.players.iter().map(|p| p.id).collect();
+        screen.singers.retain(|id| present.contains(id));
+    }
+
+    /// Carry out what the player screen asked for.
+    fn apply_player_outcome(&mut self, outcome: PlayerOutcome) {
+        let now = unix_now();
+        match outcome {
+            PlayerOutcome::None => return,
+            PlayerOutcome::Add(name) => {
+                if let Err(error) = self.profiles.ensure_player(&name, now) {
+                    self.status = error.to_string();
+                }
+            }
+            PlayerOutcome::Rename(id, name) => {
+                if let Err(error) = self.profiles.rename_player(id, &name) {
+                    self.status = error.to_string();
+                }
+            }
+            PlayerOutcome::Recolour(id, colour) => {
+                let _ = self.profiles.set_colour(id, colour);
+            }
+            PlayerOutcome::Remove(id) => {
+                let _ = self.profiles.remove_player(id);
+                self.singers.retain(|s| *s != id);
+            }
+            PlayerOutcome::Singers(singers) => self.singers = singers,
+        }
+
+        // Taken out and put back, because refreshing needs the store and the screen at once.
+        if let Some(Screen::Players(screen)) = self.stack.last_mut() {
+            let mut taken = std::mem::take(screen);
+            self.refresh_players(&mut taken);
+            self.singers.clone_from(&taken.singers);
+            if let Some(Screen::Players(slot)) = self.stack.last_mut() {
+                *slot = taken;
+            }
+        }
+    }
+
+    /// Fill the statistics screen for whichever view it is showing.
+    fn refresh_stats(&mut self) {
+        let Some(Screen::Stats(screen)) = self.stack.last() else {
+            return;
+        };
+        if !screen.needs_rows() {
+            return;
+        }
+        let (view, order) = (screen.view, screen.order);
+        const LIMIT: usize = 200;
+        let rows: Vec<StatRow> = match view {
+            View::Scores => self
+                .profiles
+                .best_scores(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: format!("{} \u{2013} {}", e.artist, e.title),
+                    detail: e.player,
+                    value: e.points.to_string(),
+                })
+                .collect(),
+            View::Singers => self
+                .profiles
+                .best_singers(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: e.name,
+                    detail: format!("{} songs, best {}", e.songs, e.best),
+                    value: e.average.to_string(),
+                })
+                .collect(),
+            View::Songs => self
+                .profiles
+                .most_sung_songs(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: format!("{} \u{2013} {}", e.artist, e.title),
+                    detail: format!("best {}", e.best),
+                    value: e.times.to_string(),
+                })
+                .collect(),
+            View::Artists => self
+                .profiles
+                .most_sung_artists(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: e.artist,
+                    detail: String::new(),
+                    value: e.times.to_string(),
+                })
+                .collect(),
+        };
+        if let Some(Screen::Stats(screen)) = self.stack.last_mut() {
+            screen.set_rows(rows);
+        }
+    }
+
+    /// Write down the song that has just ended, if there is one on top.
+    fn record_finished_song(&mut self) {
+        let Some(Screen::Sing(screen, _)) = self.stack.last() else {
+            return;
+        };
+        // Cloned so the store can be borrowed mutably; a handful of singers, once a song.
+        let artist = screen.artist.clone();
+        let title = screen.title.clone();
+        let scores: Vec<i32> = screen.singers.iter().map(|s| s.score).collect();
+        self.record_scores(&artist, &title, &scores);
+    }
+
+    /// Write down what everybody scored, once a song is over.
+    ///
+    /// Only for singers who have a profile: an unnamed player's score has nowhere to go and
+    /// recording it under a placeholder is how UltraStar's tables end up full of "Player 1".
+    fn record_scores(&mut self, artist: &str, title: &str, scores: &[i32]) {
+        let now = unix_now();
+        for (index, points) in scores.iter().enumerate() {
+            let Some(player_id) = self.singers.get(index).copied() else {
+                continue;
+            };
+            let score = Score {
+                player_id,
+                artist: artist.to_owned(),
+                title: title.to_owned(),
+                difficulty: match self.settings.game.difficulty {
+                    rungstar_ui::settings::Difficulty::Easy => 0,
+                    rungstar_ui::settings::Difficulty::Medium => 1,
+                    rungstar_ui::settings::Difficulty::Hard => 2,
+                },
+                points: *points,
+                notes: 0,
+                golden: 0,
+                line_bonus: 0,
+                sung_at: now,
+            };
+            if let Err(error) = self.profiles.record(&score) {
+                tracing::warn!("score not saved: {error}");
+            }
+        }
+    }
+
+    /// Read an existing UltraStar database, from wherever it usually lives.
+    fn import_ultrastar(&mut self) {
+        let found = rungstar_profile::import::likely_ultrastar_paths()
+            .into_iter()
+            .find(|path| path.is_file());
+        let Some(path) = found else {
+            self.status = "no UltraStar database found in the usual places".to_owned();
+            return;
+        };
+        match rungstar_profile::import_ultrastar(&mut self.profiles, &path, unix_now()) {
+            Ok(report) => self.status = report.summary(),
+            Err(error) => self.status = format!("import failed: {error}"),
+        }
+    }
+
+    /// Keep the browser's highscore panel in step with the cursor.
+    fn refresh_highscores(&mut self) {
+        let wanted = match self.stack.last() {
+            Some(Screen::Songs(songs)) => songs
+                .selected()
+                .map(|song| (song.artist.clone(), song.title.clone())),
+            _ => None,
+        };
+        let Some((artist, title)) = wanted else {
+            return;
+        };
+        let scores = self.highscores(&artist, &title);
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.highscores = scores;
+        }
+    }
+
+    /// The song's table, for the browser to show beside it.
+    fn highscores(&self, artist: &str, title: &str) -> Vec<(String, i32)> {
+        self.profiles
+            .best_for(artist, title, None, 5)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.player, entry.points))
+            .collect()
     }
 
     /// Whether a scan is running, for the screens that say so.
@@ -666,6 +912,8 @@ impl App {
             Some(Screen::Options(options)) => options.gamepad = gamepad,
             Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
+            Some(Screen::Players(screen)) => screen.gamepad = gamepad,
+            Some(Screen::Stats(screen)) => screen.gamepad = gamepad,
             _ => {}
         }
     }
@@ -749,6 +997,12 @@ impl App {
                 }
                 transition
             }
+            Some(Screen::Players(screen)) => {
+                let (transition, outcome) = screen.handle(input);
+                self.apply_player_outcome(outcome);
+                transition
+            }
+            Some(Screen::Stats(screen)) => screen.handle(input),
             Some(Screen::About) => match input {
                 Input::Back | Input::Confirm => Transition::Pop,
                 _ => Transition::None,
@@ -798,6 +1052,14 @@ impl App {
                 Route::Options | Route::OptionsPage(_) => self
                     .stack
                     .push(Screen::Options(Box::new(OptionsScreen::new()))),
+                Route::Players => {
+                    let mut screen = PlayerScreen::new();
+                    screen.microphones = self.settings.game.players as usize;
+                    screen.singers = self.singers.clone();
+                    self.refresh_players(&mut screen);
+                    self.stack.push(Screen::Players(Box::new(screen)));
+                }
+                Route::Stats => self.stack.push(Screen::Stats(Box::new(StatsScreen::new()))),
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
             },
@@ -879,6 +1141,17 @@ impl App {
             &entry.title,
             self.settings.game.players as usize,
         );
+        // Real names and their chosen colours, so the panels say who is who rather than
+        // "Player 1". This is the whole reason profiles exist.
+        for (index, singer) in screen.singers.iter_mut().enumerate() {
+            if let Some(profile) = self
+                .singers
+                .get(index)
+                .and_then(|id| self.profiles.player(*id).ok().flatten())
+            {
+                singer.name = profile.name;
+            }
+        }
         screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
         screen.effect = self.settings.lyrics.effect;
         screen.duration = session.duration();
@@ -920,6 +1193,7 @@ impl App {
             Action::RebindControls => {
                 self.status = "rebinding arrives with the input screen".to_owned()
             }
+            Action::ImportUltrastar => self.import_ultrastar(),
         }
     }
 
@@ -962,10 +1236,20 @@ impl App {
                 screen.draw(list, area, &self.style, &parts, beat);
             }
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
+            Some(Screen::Players(screen)) => screen.draw(list, area, &self.style),
+            Some(Screen::Stats(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
         }
     }
+}
+
+/// Seconds since the epoch, for anything that records when it happened.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Find a file beside the song, tolerating a case mismatch in the header.
@@ -1276,9 +1560,12 @@ fn main() -> Result<()> {
             songs.scanning = scanning;
         }
         app.handle_song_menu();
+        app.refresh_stats();
         app.refresh_songs();
+        app.refresh_highscores();
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
+        let mut finished_song = false;
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
                 songs.tick(dt);
@@ -1321,6 +1608,8 @@ fn main() -> Result<()> {
                     // screen offers to skip the rest of the instrumental.
                     screen.outro = session.past_last_note();
                     if session.is_finished() && screen.overlay != Overlay::Results {
+                        // Recorded outside the borrow, since writing needs the whole app.
+                        finished_song = true;
                         // The scores go up rather than the screen closing: in a party the
                         // result is the point, and popping straight back to the browser
                         // throws it away before anybody has read it.
@@ -1330,6 +1619,10 @@ fn main() -> Result<()> {
                 }
             }
             _ => {}
+        }
+
+        if finished_song {
+            app.record_finished_song();
         }
 
         list.clear();
@@ -1400,7 +1693,9 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
     ];
     for (name, screen) in screens {
         app.stack.push(screen);
+        app.refresh_stats();
         app.refresh_songs();
+        app.refresh_highscores();
         list.clear();
         app.draw(list, area);
         if !list.is_balanced() {
@@ -1411,6 +1706,54 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
             .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         println!("{name:<12}{} draw commands", list.len());
         app.stack.pop();
+    }
+
+    // The two profile screens, with a profile and a table so the layouts are exercised rather
+    // than only their empty states.
+    {
+        let mut screen = PlayerScreen::new();
+        screen.microphones = 2;
+        screen.players = vec![
+            Entry {
+                id: 1,
+                name: "Walki".into(),
+                colour: 0,
+                songs: 12,
+                best: 8800,
+            },
+            Entry {
+                id: 2,
+                name: "Anna".into(),
+                colour: 1,
+                songs: 3,
+                best: 9100,
+            },
+        ];
+        screen.singers = vec![1];
+        list.clear();
+        screen.draw(list, area, &app.style);
+        renderer
+            .render(list, app.style.background)
+            .map_err(|e| anyhow::anyhow!("players: {e}"))?;
+        println!("players     {} draw commands", list.len());
+    }
+    {
+        let mut screen = StatsScreen::new();
+        screen.set_rows(
+            (0..6)
+                .map(|i| StatRow {
+                    label: format!("Artist {i} \u{2013} Song {i}"),
+                    detail: "Walki".into(),
+                    value: (9000 - i * 100).to_string(),
+                })
+                .collect(),
+        );
+        list.clear();
+        screen.draw(list, area, &app.style);
+        renderer
+            .render(list, app.style.background)
+            .map_err(|e| anyhow::anyhow!("stats: {e}"))?;
+        println!("statistics  {} draw commands", list.len());
     }
 
     // The microphone screen, with a device that has never produced a sample -- the state a

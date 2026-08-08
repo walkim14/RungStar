@@ -220,6 +220,9 @@ pub struct SongSelect {
     pub chosen: Option<SongAction>,
     /// Whether to label the on-screen hints with gamepad buttons or keyboard keys.
     pub gamepad: bool,
+    /// The selected song's best scores, highest first. Supplied by the application, which is
+    /// the only thing that knows who has sung what.
+    pub highscores: Vec<(String, i32)>,
     /// What a scan is doing, when one is running. Shown instead of "no songs", because a
     /// first run reaches this screen before the library exists.
     pub scanning: Option<String>,
@@ -249,6 +252,7 @@ impl SongSelect {
             menu_cursor: 0,
             chosen: None,
             gamepad: false,
+            highscores: Vec::new(),
             scanning: None,
         }
     }
@@ -853,6 +857,36 @@ impl SongSelect {
                 .align(Align::End),
             );
             y += line;
+        }
+
+        // The song's table, which is the point of keeping scores at all: seeing what there is
+        // to beat before choosing.
+        if !self.highscores.is_empty() && y + line * 2.0 < area.bottom() {
+            y += line * 0.5;
+            list.text(
+                Rect::new(area.x, y, area.w, line),
+                "Best scores",
+                TextStyle::new(style.scaled_text(0.8), style.muted).bold(),
+            );
+            y += line;
+            for (place, (name, points)) in self.highscores.iter().enumerate() {
+                if y + line > area.bottom() {
+                    break;
+                }
+                let row = Rect::new(area.x, y, area.w, line);
+                let colour = if place == 0 { style.accent } else { style.text };
+                list.text(
+                    row,
+                    format!("{}. {name}", place + 1),
+                    TextStyle::new(style.scaled_text(0.85), colour).overflow(Overflow::Ellipsis),
+                );
+                list.text(
+                    row,
+                    points.to_string(),
+                    TextStyle::new(style.scaled_text(0.85), colour).align(Align::End),
+                );
+                y += line;
+            }
         }
     }
 

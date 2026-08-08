@@ -26,6 +26,8 @@ pub enum Action {
     AddSongFolder,
     ManageMicrophones,
     RebindControls,
+    /// Read an existing UltraStar Deluxe database, so a returning player keeps their history.
+    ImportUltrastar,
     ResetToDefaults,
 }
 
@@ -563,6 +565,11 @@ impl Page {
                     "Show frame rate",
                     "Draw the frame rate in the corner."
                 ),
+                Item {
+                    label: "Import UltraStar scores",
+                    help: "Read the highscores from an existing UltraStar Deluxe                            installation. Additive and safe to run twice: nothing already                            here is replaced or duplicated.",
+                    control: Control::Button(Action::ImportUltrastar),
+                },
                 Item {
                     label: "Controls",
                     help: "Rebind the keyboard and controller.",

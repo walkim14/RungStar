@@ -31,13 +31,17 @@ pub enum Transition {
 }
 
 /// Screens the application knows how to open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Route {
     Main,
     SongSelect,
     Options,
     OptionsPage(usize),
     Search,
+    /// Who is singing tonight.
+    Players,
+    /// The four statistics views.
+    Stats,
     About,
 }
 

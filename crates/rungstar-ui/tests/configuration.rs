@@ -287,6 +287,7 @@ fn the_buttons_a_page_offers_are_the_ones_a_screen_handles() {
         Action::AddSongFolder,
         Action::ManageMicrophones,
         Action::RebindControls,
+        Action::ImportUltrastar,
         Action::ResetToDefaults,
     ] {
         assert!(buttons.contains(&action), "{action:?} is on no page");
