@@ -364,10 +364,14 @@ impl Renderer {
         // of text sits where the eye expects rather than being pushed down by descenders no
         // glyph in it uses.
         let cap = quantised as f32 * 0.72;
+        // Descenders reach below the baseline, so bottom alignment has to leave room for them.
+        // Putting the baseline on the box edge instead is what makes a label's `g` and `y`
+        // land in the caption underneath it.
+        let descent = quantised as f32 * 0.21;
         let y = match style.valign {
             VAlign::Top => box_px.y + cap,
             VAlign::Middle => box_px.y + (box_px.h + cap) / 2.0,
-            VAlign::Bottom => box_px.y + box_px.h,
+            VAlign::Bottom => box_px.y + box_px.h - descent,
         };
 
         if let Some((outline_color, outline_width)) = style.outline {

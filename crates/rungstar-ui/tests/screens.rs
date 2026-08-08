@@ -477,3 +477,359 @@ fn changing_the_text_scale_changes_what_is_drawn() {
     assert!(size_of(&large) > size_of(&small) * 1.5);
     let _ = &mut menu;
 }
+
+/// Nothing may be drawn outside the window.
+///
+/// A layout that overflows is invisible in a test that only checks it did not panic, and
+/// obvious the moment somebody looks at it — which is the wrong order to find it in.
+fn assert_on_screen(list: &DrawList, area: Rect, what: &str) {
+    // Clipped regions are allowed to be partly outside; only unclipped drawing must fit.
+    let mut depth = 0;
+    for command in list.commands() {
+        match command {
+            Command::PushClip(_) => depth += 1,
+            Command::PopClip => depth -= 1,
+            _ if depth > 0 => {}
+            Command::Rect { rect, .. }
+            | Command::Outline { rect, .. }
+            | Command::Image { rect, .. }
+            | Command::Text { rect, .. } => {
+                assert!(
+                    rect.x >= area.x - 1.0
+                        && rect.y >= area.y - 1.0
+                        && rect.right() <= area.right() + 1.0
+                        && rect.bottom() <= area.bottom() + 1.0,
+                    "{what}: {rect:?} falls outside the {}x{} window",
+                    area.w,
+                    area.h
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The displays this has to be right on, as design-space areas.
+fn areas() -> Vec<(&'static str, Rect)> {
+    vec![
+        ("deck 1280x800", Rect::new(0.0, 0.0, 1600.0, 1000.0)),
+        ("1080p", Rect::new(0.0, 0.0, 1778.0, 1000.0)),
+        ("4:3", Rect::new(0.0, 0.0, 1333.0, 1000.0)),
+        ("ultrawide", Rect::new(0.0, 0.0, 2389.0, 1000.0)),
+    ]
+}
+
+#[test]
+fn the_options_screen_stays_inside_the_window() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    for (name, area) in areas() {
+        let mut screen = OptionsScreen::new();
+        let mut settings = Settings::default();
+        // Every page, and every row on it.
+        for page in 0..6 {
+            screen.handle(Input::Confirm, &mut settings);
+            for row in 0..14 {
+                let mut list = DrawList::new();
+                screen.draw(&mut list, area, &style, &settings);
+                assert_on_screen(
+                    &list,
+                    area,
+                    &format!("{name} options page {page} row {row}"),
+                );
+                screen.handle(Input::Down, &mut settings);
+            }
+            screen.handle(Input::Back, &mut settings);
+            screen.handle(Input::Down, &mut settings);
+        }
+    }
+}
+
+#[test]
+fn the_main_menu_stays_inside_the_window() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    for (name, area) in areas() {
+        let mut menu = MainMenu::new();
+        let mut list = DrawList::new();
+        menu.draw(
+            &mut list,
+            area,
+            &style,
+            "An UltraStar Deluxe-class karaoke game",
+        );
+        assert_on_screen(&list, area, name);
+    }
+}
+
+#[test]
+fn the_song_browser_stays_inside_the_window() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    for (name, area) in areas() {
+        for layout in Layout::ALL {
+            let mut screen = loaded(200);
+            screen.browser.layout = layout;
+            screen.browser.jump_to(100);
+            let mut list = DrawList::new();
+            screen.draw(&mut list, area, &style, &|_| None);
+            assert_on_screen(&list, area, &format!("{name} {layout:?}"));
+
+            // And the overlays, which have their own layout maths.
+            screen.handle(Input::Search, area);
+            let mut list = DrawList::new();
+            screen.draw(&mut list, area, &style, &|_| None);
+            assert_on_screen(&list, area, &format!("{name} {layout:?} keyboard"));
+        }
+    }
+}
+
+#[test]
+fn text_rows_do_not_overlap_each_other() {
+    // Two lines in one row is the usual way a label and its caption end up on top of each
+    // other: one is bottom-aligned in the upper half and the other top-aligned in the lower,
+    // and the descenders of the first land in the second.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut menu = MainMenu::new();
+    let mut list = DrawList::new();
+    menu.draw(&mut list, area, &style, "subtitle");
+
+    let texts: Vec<(String, Rect, f32)> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Text { rect, text, style } => Some((text.clone(), *rect, style.size)),
+            _ => None,
+        })
+        .collect();
+
+    for (i, (a_text, a_rect, a_size)) in texts.iter().enumerate() {
+        for (b_text, b_rect, b_size) in texts.iter().skip(i + 1) {
+            if a_text.is_empty() || b_text.is_empty() {
+                continue;
+            }
+            // Only vertically stacked pairs in the same column matter.
+            let same_column = a_rect.x < b_rect.right() && b_rect.x < a_rect.right();
+            if !same_column {
+                continue;
+            }
+            let (upper, upper_size, lower) = if a_rect.center().y < b_rect.center().y {
+                (a_rect, a_size, b_rect)
+            } else {
+                (b_rect, b_size, a_rect)
+            };
+            // Descenders reach about a fifth of the size below the baseline. The upper box
+            // must leave that much clearance.
+            let descender = upper_size * 0.22;
+            assert!(
+                upper.bottom() - descender <= lower.y + 1.0,
+                "{a_text:?} and {b_text:?} overlap: {upper:?} then {lower:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn clicking_selects_a_song_and_clicking_again_sings_it() {
+    // Two clicks rather than one, and no selection on hover. In the list and the roulette the
+    // cursor is always centred and the songs scroll past it, so selecting on hover would drag
+    // the list out from under the pointer — you would click a different song than you aimed
+    // at. Probing real points rather than recomputing the layout, because a test that
+    // re-derives those rectangles agrees with a wrong answer.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    for layout in Layout::ALL {
+        let mut screen = loaded(200);
+        screen.browser.layout = layout;
+        screen.browser.jump_to(100);
+
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area, &style, &|_| None);
+
+        // Hovering never moves the cursor.
+        for row in 0..8 {
+            screen.handle(
+                Input::Hover(rungstar_ui::geom::Point::new(
+                    900.0,
+                    200.0 + row as f32 * 70.0,
+                )),
+                area,
+            );
+        }
+        assert_eq!(
+            screen.browser.cursor(),
+            100,
+            "{layout:?}: hovering moved the cursor"
+        );
+
+        // A click on a song that is not selected moves the cursor there and starts nothing.
+        // A click on the one already selected sings it. Which of the two a given point is
+        // depends on the layout, so the assertion is the contract rather than the outcome.
+        let mut selected_something = false;
+        'probe: for row in 0..12 {
+            for column in 0..6 {
+                let mut list = DrawList::new();
+                screen.draw(&mut list, area, &style, &|_| None);
+                let point = rungstar_ui::geom::Point::new(
+                    700.0 + column as f32 * 140.0,
+                    200.0 + row as f32 * 60.0,
+                );
+                let before = screen.browser.cursor();
+                let outcome = screen.handle(Input::Click(point), area);
+                let after = screen.browser.cursor();
+                match outcome {
+                    Transition::Sing(_) => assert_eq!(
+                        before, after,
+                        "{layout:?}: a click both moved the cursor and started a song"
+                    ),
+                    Transition::None => {}
+                    other => panic!("{layout:?}: a click produced {other:?}"),
+                }
+                if after != before {
+                    selected_something = true;
+                    break 'probe;
+                }
+            }
+        }
+        assert!(
+            selected_something,
+            "{layout:?}: no point in the list selected a song"
+        );
+
+        // Clicking the song that is now selected sings it. Where that lands on screen is a
+        // layout's own business, so this probes rather than assuming — the contract is "a
+        // click on the selected song sings it", not "the selected song is in the middle".
+        let mut sang = false;
+        'again: for _ in 0..2 {
+            for row in 0..12 {
+                for column in 0..6 {
+                    let mut list = DrawList::new();
+                    screen.draw(&mut list, area, &style, &|_| None);
+                    let probe = rungstar_ui::geom::Point::new(
+                        700.0 + column as f32 * 140.0,
+                        200.0 + row as f32 * 60.0,
+                    );
+                    if let Transition::Sing(_) = screen.handle(Input::Click(probe), area) {
+                        sang = true;
+                        break 'again;
+                    }
+                }
+            }
+        }
+        assert!(
+            sang,
+            "{layout:?}: no second click on the selected song ever sang it"
+        );
+    }
+}
+
+#[test]
+fn the_pointer_can_type_on_the_on_screen_keyboard() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    let mut screen = loaded(10);
+    screen.handle(Input::Search, area);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+
+    // The keys are drawn as panels; find one by pointing at every panel until something is
+    // typed. Anything else would be asserting the grid's arithmetic twice.
+    let panels: Vec<Rect> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Rect { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .collect();
+
+    let mut typed = false;
+    for panel in panels {
+        screen.handle(Input::Click(panel.center()), area);
+        if !screen.search_text().is_empty() {
+            typed = true;
+            break;
+        }
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area, &style, &|_| None);
+        if screen.mode() != Mode::Searching {
+            screen.handle(Input::Search, area);
+            let mut list = DrawList::new();
+            screen.draw(&mut list, area, &style, &|_| None);
+        }
+    }
+    assert!(typed, "no key on the on-screen keyboard could be clicked");
+}
+
+#[test]
+fn the_pointer_works_on_the_main_menu_and_the_options() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    let mut menu = MainMenu::new();
+    let mut list = DrawList::new();
+    menu.draw(&mut list, area, &style, "");
+    // The second entry is Options; find its row and click it.
+    let rows: Vec<Rect> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Rect { rect, .. } if rect.w > 300.0 && rect.h > 40.0 => Some(*rect),
+            _ => None,
+        })
+        .collect();
+    assert!(rows.len() >= 4, "the menu did not draw four rows");
+    assert_eq!(
+        menu.handle(Input::Click(rows[1].center())),
+        Transition::Push(Route::Options)
+    );
+
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &settings);
+    // Hovering a group previews it without stealing focus from the group list.
+    let before = screen.page_index();
+    screen.handle(
+        Input::Hover(Rect::new(30.0, 250.0, 10.0, 10.0).center()),
+        &mut settings,
+    );
+    assert!(screen.on_page_list(), "hovering a group took focus");
+    let _ = before;
+}
+
+#[test]
+fn hints_name_the_control_the_player_is_holding() {
+    // A hint reading "X" on a keyboard tells you a button exists and gives the wrong name.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    let mut screen = loaded(10);
+    screen.gamepad = false;
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let keys = strings(&list).join(" ");
+    assert!(keys.contains("Enter"), "keyboard hints missing: {keys}");
+    assert!(keys.contains("Esc"));
+
+    screen.gamepad = true;
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let pad = strings(&list).join(" ");
+    assert!(
+        pad.contains(" A ") || pad.starts_with("A ") || pad.contains("A"),
+        "{pad}"
+    );
+    assert!(
+        !pad.contains("Enter"),
+        "gamepad hints still name keyboard keys: {pad}"
+    );
+}

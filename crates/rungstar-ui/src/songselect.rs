@@ -10,7 +10,7 @@ use rungstar_library::{SearchField, SongEntry, SortKey};
 
 use crate::browse::{Browser, Layout};
 use crate::draw::{Align, DrawList, ImageId, Overflow, TextStyle, VAlign};
-use crate::geom::{Anchor, Rect};
+use crate::geom::{Anchor, Point, Rect};
 use crate::keyboard::{Key, Keyboard};
 use crate::screen::{Transition, Widgets};
 use crate::theme::Style;
@@ -29,7 +29,7 @@ pub enum Mode {
 
 /// Semantic inputs the screen understands. Deliberately not device events: the same enum comes
 /// from a keyboard, a gamepad or a touch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
     Up,
     Down,
@@ -49,6 +49,11 @@ pub enum Input {
     /// A character from a physical keyboard, while searching.
     Type(char),
     Backspace,
+    /// The pointer moved. Moves the cursor to whatever is under it, so the highlight follows
+    /// the mouse exactly as it follows the stick.
+    Hover(Point),
+    /// The pointer was clicked. Selects what is under it and activates it.
+    Click(Point),
 }
 
 /// The sorts offered, in the order the picker lists them.
@@ -78,6 +83,17 @@ pub const FIELDS: [(SearchField, &str); 4] = [
     (SearchField::Lyrics, "Lyrics"),
 ];
 
+/// Something the pointer can be over.
+///
+/// Recorded while drawing rather than recomputed, so hit testing cannot drift from the layout
+/// — the bug where a button moves and its clickable area stays behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Region {
+    Song(usize),
+    Key(usize),
+    Sort(usize),
+}
+
 /// The song browser.
 pub struct SongSelect {
     pub browser: Browser,
@@ -93,6 +109,10 @@ pub struct SongSelect {
     stale: bool,
     /// Text the current `songs` were fetched for, so a slow query landing late can be ignored.
     fetched_for: String,
+    /// Clickable areas from the last frame.
+    regions: Vec<(Rect, Region)>,
+    /// Whether to label the on-screen hints with gamepad buttons or keyboard keys.
+    pub gamepad: bool,
 }
 
 impl Default for SongSelect {
@@ -114,7 +134,18 @@ impl SongSelect {
             descending: false,
             stale: true,
             fetched_for: String::new(),
+            regions: Vec::new(),
+            gamepad: false,
         }
+    }
+
+    /// What is under a point, topmost first — the overlays are recorded last and so win.
+    fn region_at(&self, point: Point) -> Option<Region> {
+        self.regions
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(point))
+            .map(|(_, region)| *region)
     }
 
     pub fn mode(&self) -> Mode {
@@ -196,6 +227,10 @@ impl SongSelect {
     }
 
     pub fn handle(&mut self, input: Input, area: Rect) -> Transition {
+        if let Input::Hover(point) | Input::Click(point) = input {
+            let clicked = matches!(input, Input::Click(_));
+            return self.handle_pointer(point, clicked);
+        }
         match self.mode {
             Mode::Browsing => self.handle_browsing(input, area),
             Mode::Searching => self.handle_searching(input),
@@ -239,7 +274,57 @@ impl SongSelect {
                         .jump_to((self.browser.cursor() + 7919) % self.songs.len());
                 }
             }
-            Input::Type(_) | Input::Backspace => {}
+            Input::Type(_) | Input::Backspace | Input::Hover(_) | Input::Click(_) => {}
+        }
+        Transition::None
+    }
+
+    /// Move the cursor to whatever the pointer is over, and act on it if it was clicked.
+    fn handle_pointer(&mut self, point: Point, clicked: bool) -> Transition {
+        match self.region_at(point) {
+            Some(Region::Song(index)) => {
+                // Hovering deliberately does *not* move the cursor. In the list and the
+                // roulette the cursor is always centred and the songs scroll past it, so
+                // selecting on hover would drag the list out from under the pointer and you
+                // would click a different song than the one you aimed at.
+                if clicked {
+                    if index == self.browser.cursor() {
+                        // Second click on the same song: sing it. The first only selects, so
+                        // a stray click never starts a song.
+                        if let Some(song) = self.selected() {
+                            return Transition::Sing(song.id);
+                        }
+                    } else {
+                        self.browser.jump_to(index);
+                    }
+                }
+            }
+            Some(Region::Key(index)) => {
+                self.keyboard.set_cursor(index);
+                if clicked && self.keyboard.press() {
+                    self.mode = Mode::Browsing;
+                }
+                if clicked {
+                    self.stale = true;
+                }
+            }
+            Some(Region::Sort(index)) => {
+                if index != self.sort_cursor {
+                    self.sort_cursor = index;
+                    self.sort_chosen = true;
+                    self.stale = true;
+                }
+                if clicked {
+                    self.mode = Mode::Browsing;
+                }
+            }
+            None => {
+                // Clicking away from the overlays closes them, which is what every other
+                // program does and so what a hand expects.
+                if clicked && self.mode != Mode::Browsing {
+                    self.mode = Mode::Browsing;
+                }
+            }
         }
         Transition::None
     }
@@ -278,6 +363,7 @@ impl SongSelect {
             }
             Input::CycleLayout => self.browser.layout = self.browser.layout.next(),
             Input::Random | Input::PageUp | Input::PageDown => {}
+            Input::Hover(_) | Input::Click(_) => {}
         }
         if self.keyboard.text() != before {
             // Every keystroke re-queries. At 3 ms for a prefix search over 30,000 songs that
@@ -331,6 +417,7 @@ impl SongSelect {
         style: &Style,
         cover: &dyn Fn(i64) -> Option<ImageId>,
     ) {
+        self.regions.clear();
         let widgets = Widgets::new(style);
         let status = if self.songs.is_empty() {
             String::new()
@@ -350,24 +437,41 @@ impl SongSelect {
             self.draw_list(list, rest.inset(style.gap(1.0)), style, cover);
         }
 
+        // The overlays cover the list, so their regions are recorded after it and win.
+        let mut overlay = Vec::new();
         match self.mode {
-            Mode::Searching => self.draw_keyboard(list, area, style),
-            Mode::Sorting => self.draw_sort_picker(list, area, style),
+            Mode::Searching => self.draw_keyboard(list, area, style, &mut overlay),
+            Mode::Sorting => self.draw_sort_picker(list, area, style, &mut overlay),
             Mode::Browsing => {}
         }
+        self.regions.extend(overlay);
     }
 
+    /// What the buttons do right now, named for whatever is in the player's hands.
+    ///
+    /// Labelling a keyboard key "X" is worse than no hint at all: it says a button exists and
+    /// then gives the wrong name for it.
     fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        let pad = self.gamepad;
+        let confirm = if pad { "A" } else { "Enter" };
+        let back = if pad { "B" } else { "Esc" };
+        let search = if pad { "X" } else { "F" };
+        let sort = if pad { "Y" } else { "F3" };
+        let layout = if pad { "LB/RB" } else { "Tab" };
         match self.mode {
             Mode::Browsing => vec![
-                ("A", "Sing"),
-                ("B", "Back"),
-                ("X", "Search"),
-                ("Y", "Sort"),
-                ("LB/RB", "Layout"),
+                (confirm, "Sing"),
+                (back, "Back"),
+                (search, "Search"),
+                (sort, "Sort"),
+                (layout, "Layout"),
             ],
-            Mode::Searching => vec![("A", "Type"), ("B", "Done"), ("Y", "Search in")],
-            Mode::Sorting => vec![("A", "Choose"), ("<>", "Reverse"), ("B", "Back")],
+            Mode::Searching => vec![(confirm, "Press key"), (back, "Done"), (sort, "Search in")],
+            Mode::Sorting => vec![
+                (confirm, "Choose"),
+                ("\u{2190}\u{2192}", "Reverse"),
+                (back, "Back"),
+            ],
         }
     }
 
@@ -400,6 +504,10 @@ impl SongSelect {
     ) {
         let layout = self.browser.layout;
         let placements = self.browser.placements(area);
+        for placement in &placements {
+            self.regions
+                .push((placement.rect, Region::Song(placement.index)));
+        }
         let songs = &self.songs;
         // Clipped, so a row sliding in is cut at the edge rather than drawn over the header.
         list.clipped(area, |list| {
@@ -519,7 +627,13 @@ impl SongSelect {
         }
     }
 
-    fn draw_keyboard(&self, list: &mut DrawList, area: Rect, style: &Style) {
+    fn draw_keyboard(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
         let widgets = Widgets::new(style);
         widgets.scrim(list, area);
 
@@ -597,6 +711,7 @@ impl SongSelect {
             )
             .inset(gap);
             let selected = index == self.keyboard.cursor();
+            regions.push((cell, Region::Key(index)));
             list.panel(
                 cell,
                 if selected {
@@ -629,7 +744,13 @@ impl SongSelect {
         }
     }
 
-    fn draw_sort_picker(&self, list: &mut DrawList, area: Rect, style: &Style) {
+    fn draw_sort_picker(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
         let widgets = Widgets::new(style);
         widgets.scrim(list, area);
 
@@ -674,6 +795,7 @@ impl SongSelect {
                 row_h,
             )
             .inset_xy(0.0, style.gap(0.2));
+            regions.push((row, Region::Sort(index)));
             widgets.row(list, row, label, "", index == self.sort_cursor);
         }
     }

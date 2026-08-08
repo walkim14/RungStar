@@ -127,6 +127,11 @@ impl Keyboard {
         self.cursor
     }
 
+    /// Put the cursor on a specific key, for the pointer.
+    pub fn set_cursor(&mut self, index: usize) {
+        self.cursor = index.min(self.keys().len().saturating_sub(1));
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.truncate();

@@ -224,8 +224,9 @@ impl App {
         let query = SearchQuery::all()
             .text(songs.search_text())
             .field(songs.field())
-            .sort(songs.sort(), songs.descending())
-            .limit(5000);
+            .sort(songs.sort(), songs.descending());
+        // No limit: the browser is the whole library, and a cap silently truncates it. Eight
+        // thousand rows is a few megabytes, and the scroll is O(1) in the list length.
         match self.library.search(&query) {
             Ok(results) => songs.set_results(results),
             Err(error) => {
@@ -274,6 +275,16 @@ impl App {
             let image = load_cover(song, renderer);
             self.covers.insert(song.id, image, renderer);
             budget -= 1;
+        }
+    }
+
+    /// Label the on-screen hints for whatever the player is holding.
+    fn set_control_hints(&mut self, gamepad: bool) {
+        match self.stack.last_mut() {
+            Some(Screen::Main(menu)) => menu.gamepad = gamepad,
+            Some(Screen::Songs(songs)) => songs.gamepad = gamepad,
+            Some(Screen::Options(options)) => options.gamepad = gamepad,
+            _ => {}
         }
     }
 
@@ -331,14 +342,42 @@ impl App {
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
             },
-            Transition::Sing(id) => {
-                // Playing a song is the sing screen's job, and it is still a separate binary.
-                // Recording the play here keeps the count honest in the meantime.
+            Transition::Sing(id) => self.sing(id),
+        }
+    }
+
+    /// Play a song.
+    ///
+    /// The sing screen still builds its own SDL context and window, so it runs as a child
+    /// process rather than inside this one. That is a seam, not a design: the screen belongs
+    /// in `rungstar-ui` producing a display list like every other, and moving it there is
+    /// what removes the second window. Until then this is the difference between the browser
+    /// being usable and being a picture of a browser.
+    fn sing(&mut self, id: i64) {
+        let Ok(Some(song)) = self.library.song(id) else {
+            self.status = "that song is no longer in the library".to_owned();
+            return;
+        };
+        if !song.is_playable() {
+            self.status = format!("{} has no audio file", song.display_name());
+            return;
+        }
+        let Some(binary) = sing_binary() else {
+            self.status = "could not find the rungstar-sing executable".to_owned();
+            return;
+        };
+
+        self.status = format!("singing {}\u{2026}", song.display_name());
+        let result = std::process::Command::new(binary).arg(&song.path).status();
+        match result {
+            Ok(status) if status.success() => {
+                // Only count a play that actually ran, so a failed launch does not inflate
+                // the history the "times played" sort depends on.
                 let _ = self.library.record_play(id);
-                if let Ok(Some(song)) = self.library.song(id) {
-                    self.status = format!("would sing: {}", song.display_name());
-                }
+                self.status = format!("sang {}", song.display_name());
             }
+            Ok(_) => self.status = format!("{} ended early", song.display_name()),
+            Err(error) => self.status = format!("could not start the song: {error}"),
         }
     }
 
@@ -388,6 +427,19 @@ impl App {
             None => {}
         }
     }
+}
+
+/// Where the sing executable is, which is beside this one.
+fn sing_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let directory = exe.parent()?;
+    let name = if cfg!(windows) {
+        "rungstar-sing.exe"
+    } else {
+        "rungstar-sing"
+    };
+    let path = directory.join(name);
+    path.exists().then_some(path)
 }
 
 /// Load the theme named in the settings, falling back to the built-in one.
@@ -454,7 +506,12 @@ fn action_for(keycode: Keycode) -> Option<Input> {
         Keycode::Return | Keycode::KpEnter => Input::Confirm,
         Keycode::Escape => Input::Back,
         Keycode::Tab => Input::CycleLayout,
+        // The keys the on-screen hints name. A hint that names a key which does nothing is
+        // worse than no hint at all.
+        Keycode::F => Input::Search,
+        Keycode::Slash => Input::Search,
         Keycode::F3 => Input::Sort,
+        Keycode::R => Input::Random,
         Keycode::PageUp => Input::PageUp,
         Keycode::PageDown => Input::PageDown,
         Keycode::Backspace => Input::Backspace,
@@ -533,6 +590,7 @@ fn main() -> Result<()> {
                 Event::KeyDown {
                     keycode: Some(key), ..
                 } => {
+                    app.set_control_hints(false);
                     if let Some(input) = action_for(key) {
                         app.handle(input, area);
                     }
@@ -544,12 +602,28 @@ fn main() -> Result<()> {
                         app.handle(Input::Type(c), area);
                     }
                 }
+                Event::MouseMotion { x, y, .. } => {
+                    app.set_control_hints(false);
+                    app.handle(Input::Hover(renderer.projection().unproject(x, y)), area);
+                }
+                Event::MouseButtonDown { x, y, .. } => {
+                    app.set_control_hints(false);
+                    app.handle(Input::Click(renderer.projection().unproject(x, y)), area);
+                }
+                Event::MouseWheel { y, .. } => {
+                    // A wheel notch is a step, and a fast flick is several.
+                    let steps = (y.abs().ceil() as i32).clamp(1, 8);
+                    for _ in 0..steps {
+                        app.handle(if y > 0.0 { Input::Up } else { Input::Down }, area);
+                    }
+                }
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(pad) = gamepads.open(sdl3::joystick::JoystickId::new(which)) {
                         open_pads.push(pad);
                     }
                 }
                 Event::ControllerButtonDown { button, .. } => {
+                    app.set_control_hints(true);
                     use sdl3::gamepad::Button;
                     let input = match button {
                         Button::DPadUp => Some(Input::Up),

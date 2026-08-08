@@ -25,6 +25,10 @@ struct Entry {
 pub struct MainMenu {
     cursor: Cursor,
     entries: Vec<Entry>,
+    /// Clickable rows from the last frame, so hit testing cannot drift from the picture.
+    regions: Vec<Rect>,
+    /// Label the hints for a gamepad rather than a keyboard.
+    pub gamepad: bool,
 }
 
 impl Default for MainMenu {
@@ -64,6 +68,8 @@ impl MainMenu {
         Self {
             cursor: Cursor::new(entries.len()),
             entries,
+            regions: Vec::new(),
+            gamepad: false,
         }
     }
 
@@ -72,6 +78,15 @@ impl MainMenu {
     }
 
     pub fn handle(&mut self, input: Input) -> Transition {
+        if let Input::Hover(point) | Input::Click(point) = input {
+            if let Some(index) = self.regions.iter().position(|r| r.contains(point)) {
+                self.cursor.set(index);
+                if matches!(input, Input::Click(_)) {
+                    return self.handle(Input::Confirm);
+                }
+            }
+            return Transition::None;
+        }
         match input {
             Input::Up => self.cursor.move_by(-1),
             Input::Down => self.cursor.move_by(1),
@@ -92,9 +107,15 @@ impl MainMenu {
         Transition::None
     }
 
-    pub fn draw(&self, list: &mut DrawList, area: Rect, style: &Style, subtitle: &str) {
+    pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style, subtitle: &str) {
+        self.regions.clear();
         let widgets = Widgets::new(style);
-        let body = widgets.footer(list, area, &[("A", "Choose"), ("B", "Quit")]);
+        let hints: &[(&str, &str)] = if self.gamepad {
+            &[("A", "Choose"), ("B", "Quit")]
+        } else {
+            &[("Enter", "Choose"), ("Esc", "Quit")]
+        };
+        let body = widgets.footer(list, area, hints);
 
         // Wordmark on the left, menu on the right: the menu stays a readable width on an
         // ultrawide instead of stretching across it.
@@ -132,6 +153,7 @@ impl MainMenu {
             let row = Rect::new(menu.x, menu.y + row_h * index as f32, menu.w, row_h)
                 .inset_xy(0.0, style.gap(0.4));
             let selected = index == self.cursor.index();
+            self.regions.push(row);
             list.panel(
                 row,
                 if selected {
@@ -146,8 +168,8 @@ impl MainMenu {
             } else {
                 (style.text, style.muted)
             };
-            let inner = row.inset_xy(style.gap(1.5), style.gap(0.4));
-            let (top, bottom) = inner.cut_top(inner.h * 0.6);
+            let inner = row.inset_xy(style.gap(1.5), style.gap(0.5));
+            let (top, bottom) = inner.cut_top(inner.h * 0.56);
             list.text(
                 top,
                 entry.label,
@@ -184,6 +206,10 @@ pub struct OptionsScreen {
     item_cursor: Cursor,
     /// `true` while the page list has focus rather than the items on it.
     on_page_list: bool,
+    page_regions: Vec<Rect>,
+    /// Item rows from the last frame, with the index each one shows.
+    item_regions: Vec<(Rect, usize)>,
+    pub gamepad: bool,
 }
 
 impl Default for OptionsScreen {
@@ -201,6 +227,9 @@ impl OptionsScreen {
             item_cursor: Cursor::new(items),
             pages,
             on_page_list: true,
+            page_regions: Vec::new(),
+            item_regions: Vec::new(),
+            gamepad: false,
         }
     }
 
@@ -230,6 +259,26 @@ impl OptionsScreen {
     }
 
     pub fn handle(&mut self, input: Input, settings: &mut Settings) -> OptionsOutcome {
+        if let Input::Hover(point) | Input::Click(point) = input {
+            let clicked = matches!(input, Input::Click(_));
+            if let Some(index) = self.page_regions.iter().position(|r| r.contains(point)) {
+                self.page_cursor.set(index);
+                self.item_cursor = Cursor::new(self.pages[index].items.len());
+                // Pointing at a group previews it; the items only take focus on a click, so
+                // sweeping the pointer across the list does not steal the cursor.
+                self.on_page_list = !clicked;
+                return OptionsOutcome::None;
+            }
+            if let Some((_, index)) = self.item_regions.iter().find(|(r, _)| r.contains(point)) {
+                let index = *index;
+                self.item_cursor.set(index);
+                self.on_page_list = false;
+                if clicked {
+                    return self.handle(Input::Confirm, settings);
+                }
+            }
+            return OptionsOutcome::None;
+        }
         if self.on_page_list {
             match input {
                 Input::Up => self.page_cursor.move_by(-1),
@@ -279,19 +328,27 @@ impl OptionsScreen {
         OptionsOutcome::None
     }
 
-    pub fn draw(&self, list: &mut DrawList, area: Rect, style: &Style, settings: &Settings) {
+    pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style, settings: &Settings) {
+        self.page_regions.clear();
+        self.item_regions.clear();
         let widgets = Widgets::new(style);
         let body = widgets.header(list, area, "Options", "");
-        let hints: &[(&str, &str)] = if self.on_page_list {
-            &[("A", "Open"), ("B", "Back")]
-        } else {
-            &[("<>", "Change"), ("A", "Change"), ("B", "Groups")]
+        let hints: &[(&str, &str)] = match (self.on_page_list, self.gamepad) {
+            (true, true) => &[("A", "Open"), ("B", "Back")],
+            (true, false) => &[("Enter", "Open"), ("Esc", "Back")],
+            (false, true) => &[("A", "Change"), ("LS", "Adjust"), ("B", "Groups")],
+            (false, false) => &[
+                ("Enter", "Change"),
+                ("\u{2190}\u{2192}", "Adjust"),
+                ("Esc", "Groups"),
+            ],
         };
         let body = widgets.footer(list, body, hints);
 
         // Help sits under the list rather than beside it, so a long explanation does not
         // squeeze the values into an unreadable column.
-        let (body, help_area) = body.cut_bottom(style.gap(4.0));
+        // `cut_bottom` returns the strip first and what is left second, in that order.
+        let (help_area, body) = body.cut_bottom(style.gap(4.0));
         list.text(
             help_area.inset_xy(style.gap(2.0), 0.0),
             self.help(),
@@ -303,13 +360,14 @@ impl OptionsScreen {
         self.draw_items(list, items_area.inset(style.gap(1.5)), style, settings);
     }
 
-    fn draw_pages(&self, list: &mut DrawList, area: Rect, style: &Style) {
+    fn draw_pages(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
         let widgets = Widgets::new(style);
         let row_h = style.gap(3.4);
         for (index, page) in self.pages.iter().enumerate() {
             let row = Rect::new(area.x, area.y + row_h * index as f32, area.w, row_h)
                 .inset_xy(0.0, style.gap(0.25));
             let selected = index == self.page_cursor.index();
+            self.page_regions.push(row);
             widgets.row(list, row, page.title, "", selected);
             // The group keeps a marker while the items have focus, so it stays clear which
             // page the values on the right belong to.
@@ -324,8 +382,8 @@ impl OptionsScreen {
         }
     }
 
-    fn draw_items(&self, list: &mut DrawList, area: Rect, style: &Style, settings: &Settings) {
-        let page = self.page();
+    fn draw_items(&mut self, list: &mut DrawList, area: Rect, style: &Style, settings: &Settings) {
+        let page = &self.pages[self.page_cursor.index()];
         let row_h = style.gap(3.4);
         let visible = ((area.h / row_h).floor() as usize).max(1);
         // Scroll so the cursor stays on screen, keeping as much context above it as fits.
@@ -335,11 +393,16 @@ impl OptionsScreen {
             .saturating_sub(visible.saturating_sub(2))
             .min(page.items.len().saturating_sub(visible));
 
+        // Copied out before the closure, which cannot also borrow `self`.
+        let on_page_list = self.on_page_list;
+        let cursor = self.item_cursor.index();
+        let mut regions: Vec<(Rect, usize)> = Vec::new();
         list.clipped(area, |list| {
             for (offset, item) in page.items.iter().skip(first).take(visible).enumerate() {
                 let row = Rect::new(area.x, area.y + row_h * offset as f32, area.w, row_h)
                     .inset_xy(0.0, style.gap(0.25));
-                let selected = !self.on_page_list && first + offset == self.item_cursor.index();
+                let selected = !on_page_list && first + offset == cursor;
+                regions.push((row, first + offset));
                 let value = item.value(settings);
 
                 list.panel(
@@ -402,8 +465,9 @@ impl OptionsScreen {
         });
 
         // A hint that the list continues, rather than leaving it to be discovered.
-        if page.items.len() > visible {
-            let shown = format!("{}/{}", self.item_cursor.index() + 1, page.items.len());
+        let total = page.items.len();
+        if total > visible {
+            let shown = format!("{}/{}", self.item_cursor.index() + 1, total);
             list.text(
                 Rect::new(
                     area.x,
@@ -415,5 +479,6 @@ impl OptionsScreen {
                 TextStyle::new(style.scaled_text(0.75), style.muted).align(Align::End),
             );
         }
+        self.item_regions = regions;
     }
 }
