@@ -50,11 +50,13 @@ pub trait Choice: Sized + Copy + PartialEq + 'static {
 macro_rules! choice {
     (
         $(#[$meta:meta])*
-        $name:ident { $( $variant:ident = $label:literal ),+ $(,)? } default $default:ident
+        $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident = $label:literal ),+ $(,)?
+        } default $default:ident
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub enum $name { $( $variant ),+ }
+        pub enum $name { $( $(#[$variant_meta])* $variant ),+ }
 
         impl Choice for $name {
             const VALUES: &'static [Self] = &[ $( Self::$variant ),+ ];
@@ -167,8 +169,17 @@ impl FrameLimit {
 }
 
 choice! {
-    /// How much of the screen the song video fills.
-    VideoSize { Half = "Half", Full = "Full", Fit = "Fit" } default Full
+    /// How the song video is fitted to the screen.
+    ///
+    /// UltraStar also offers a half-size option, which draws the video in a box in the middle.
+    /// That made sense when a video was a feature to show off; as a background behind lyrics it
+    /// is just a small picture with a wide border, and it is easy to land on by accident while
+    /// cycling. An old `Half` setting is read as `Full`.
+    VideoSize {
+        #[serde(alias = "Half")]
+        Full = "Fill the screen",
+        Fit = "Fit, with bars",
+    } default Full
 }
 
 choice! {

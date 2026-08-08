@@ -422,17 +422,55 @@ impl SingScreen {
         style.player(singer)
     }
 
-    /// Both parts' notes on one line, tagged with whose they are.
+    /// Both parts' notes on one page, tagged with whose they are.
     ///
-    /// A beat both parts sing is drawn once, in a third colour, because two bubbles at the
-    /// same pitch on the same beat is a thicker bubble with a seam down it.
-    fn merge_parts(&self, parts: &[PartView<'_>]) -> NoteLine {
+    /// Each part picks its own current line, and in a duet those lines are rarely the same
+    /// stretch of song — while one part sings, the other's "current" line is the one it sings
+    /// next, which can be half a verse away. Merging the two spans directly produced a page
+    /// running from one part's line to the other's, which squeezed the notes being sung now
+    /// into a corner and showed the other singer's part long before it was due.
+    ///
+    /// So the page is one part's line — whichever is actually being sung — and the other
+    /// part's notes appear only where they fall inside it.
+    fn merge_parts(&self, parts: &[PartView<'_>], beat: f64) -> NoteLine {
         if parts.len() < 2 {
             return parts.first().map(|p| p.line.clone()).unwrap_or_default();
         }
+
+        // The line being sung now, or the next one due if there is a gap between phrases.
+        let window = parts
+            .iter()
+            .map(|p| p.line)
+            .filter(|line| !line.is_empty())
+            .min_by(|a, b| {
+                let rank = |line: &NoteLine| {
+                    if beat >= line.start && beat < line.end {
+                        (0, 0.0)
+                    } else if line.start > beat {
+                        (1, line.start - beat)
+                    } else {
+                        (2, beat - line.end)
+                    }
+                };
+                let (a_rank, a_gap) = rank(a);
+                let (b_rank, b_gap) = rank(b);
+                a_rank.cmp(&b_rank).then(
+                    a_gap
+                        .partial_cmp(&b_gap)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+            });
+        let Some(window) = window else {
+            return NoteLine::default();
+        };
+
         let mut notes: Vec<Note> = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             for note in &part.line.notes {
+                // Only what falls inside the page. The other part's later phrases stay off it.
+                if note.end() <= window.start || note.start >= window.end {
+                    continue;
+                }
                 match notes
                     .iter_mut()
                     .find(|other| other.start == note.start && other.pitch == note.pitch)
@@ -450,9 +488,11 @@ impl SingScreen {
                 .partial_cmp(&b.start)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let start = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
-        let end = notes.iter().map(Note::end).fold(f64::MIN, f64::max);
-        NoteLine { notes, start, end }
+        NoteLine {
+            notes,
+            start: window.start,
+            end: window.end,
+        }
     }
 
     /// Draw a frame.
@@ -484,9 +524,6 @@ impl SingScreen {
                 VideoSize::Full => area.cover_aspect(self.video_aspect),
                 // Fitting shows all of it, letterboxed.
                 VideoSize::Fit => area.fit_aspect(self.video_aspect),
-                VideoSize::Half => area
-                    .anchored(Anchor::Center, area.w * 0.55, area.h * 0.55, 0.0)
-                    .fit_aspect(self.video_aspect),
             };
             list.clipped(area, |list| {
                 list.image_tinted(rect, video, Color::WHITE, 0.0);
@@ -516,7 +553,7 @@ impl SingScreen {
         let lyric_height = style.gap(4.0) + style.gap(3.4) * parts.len() as f32;
         let (lyrics_area, staff_area) = middle.cut_bottom(lyric_height);
 
-        let merged = self.merge_parts(parts);
+        let merged = self.merge_parts(parts, beat);
         self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
 
         // Both parts' words, stacked at the bottom in their own colours, each with its own
@@ -636,15 +673,17 @@ impl SingScreen {
                 }
             }
 
-            if self.show_input_panel || singer.input_problem().is_some() {
-                let strip = Rect::new(
-                    inner.x,
-                    inner.bottom() - style.gap(2.4),
-                    inner.w,
-                    style.gap(2.4),
-                );
-                self.draw_input_strip(list, strip, style, singer, color);
-            }
+            // The meter is always there. Showing it only while something was wrong meant it
+            // vanished the moment you sang loudly enough, which is the opposite of
+            // reassuring: the reading disappeared exactly when it turned good.
+            let wordy = self.show_input_panel || singer.input_problem().is_some();
+            let height = if wordy {
+                style.gap(2.4)
+            } else {
+                style.gap(1.0)
+            };
+            let strip = Rect::new(inner.x, inner.bottom() - height, inner.w, height);
+            self.draw_input_strip(list, strip, style, singer, color, wordy);
         }
     }
 
@@ -659,28 +698,55 @@ impl SingScreen {
         style: &Style,
         singer: &Singer,
         color: Color,
+        wordy: bool,
     ) {
-        let (meter, label) = area.cut_top(style.gap(0.7));
-        let track = meter.anchored(Anchor::Center, meter.w, style.gap(0.4), 0.0);
-        list.panel(track, style.surface_sunken, track.h / 2.0);
-        let level = singer.level.clamp(0.0, 1.0);
-        if level > 0.0 {
+        let (meter, label) = if wordy {
+            area.cut_top(style.gap(0.9))
+        } else {
+            (area, Rect::default())
+        };
+        let track = meter.anchored(Anchor::Center, meter.w, style.gap(0.5), 0.0);
+        let radius = track.h / 2.0;
+        list.panel(track, style.surface_sunken, radius);
+
+        // The stretch below the gate is shaded, so the threshold reads as a region to get past
+        // rather than as a line things vanish behind.
+        let gate = singer.gate.clamp(0.0, 1.0);
+        if gate > 0.0 {
             list.panel(
-                Rect::new(track.x, track.y, track.w * level, track.h),
-                if level >= singer.gate {
-                    color
-                } else {
-                    style.muted
-                },
-                track.h / 2.0,
+                Rect::new(track.x, track.y, track.w * gate, track.h),
+                style.warning.alpha(0.16),
+                radius,
             );
         }
-        // A mark at the gate, so "too quiet" is visible rather than inferred.
-        let gate_x = track.x + track.w * singer.gate.clamp(0.0, 1.0);
+
+        let level = singer.level.clamp(0.0, 1.0);
+        if level > 0.0 {
+            // Below the gate the fill is grey — present, but visibly not counting. Above it,
+            // the singer's colour. The bar never disappears; only its colour changes.
+            list.panel(
+                Rect::new(
+                    track.x,
+                    track.y,
+                    (track.w * level).max(radius * 2.0),
+                    track.h,
+                ),
+                if level >= gate { color } else { style.muted },
+                radius,
+            );
+        }
+
+        // A notch at the gate rather than a bar through it, so it marks the boundary without
+        // looking like part of the reading.
+        let gate_x = track.x + track.w * gate;
         list.fill(
-            Rect::new(gate_x - 1.0, track.y - 2.0, 2.0, track.h + 4.0),
-            style.warning,
+            Rect::new(gate_x - 1.0, track.y - 1.5, 2.0, track.h + 3.0),
+            style.warning.alpha(0.8),
         );
+
+        if !wordy {
+            return;
+        }
 
         let (text, tint) = match singer.input_problem() {
             Some(problem) => (problem.to_owned(), style.warning),
@@ -753,66 +819,136 @@ impl SingScreen {
         }
 
         let note_h = (row_h * 0.72).clamp(6.0, 26.0);
-        for note in &line.notes {
-            let x = x_of(note.start);
-            let w = (x_of(note.end()) - x).max(4.0);
-            let y = y_of(note.pitch) + (row_h - note_h) / 2.0;
-            let rect = Rect::new(x, y, w, note_h);
-            // A duet's notes are coloured by whose they are, and the ones both sing get a
-            // third colour of their own rather than arbitrarily belonging to the first part.
-            let color = if note.kind.is_golden() {
-                style.warning
-            } else if note.part == BOTH_PARTS {
-                style.text.alpha(0.85)
-            } else if self.is_duet() {
-                self.part_colour(note.part, style).alpha(0.75)
-            } else {
-                style.muted.alpha(0.8)
-            };
-            if note.kind.is_freestyle() {
-                // Freestyle scores nothing, so it is drawn as an outline: a cue, not a target.
-                list.outline(rect, color.alpha(0.4), 2.0, note_h / 2.0);
-            } else {
-                list.panel(rect, color, note_h / 2.0);
+        // Clipped: a note that started before the window still has to be drawn, and without
+        // this it is drawn from off the left edge across whatever is beside the staff.
+        list.clipped(inner, |list| {
+            for note in &line.notes {
+                let x = x_of(note.start);
+                let w = (x_of(note.end()) - x).max(4.0);
+                let y = y_of(note.pitch) + (row_h - note_h) / 2.0;
+                let rect = Rect::new(x, y, w, note_h);
+
+                // Whose note this is. In a duet the target is drawn in that singer's colour so
+                // you can see whose turn is coming without reading the words; a solo stays
+                // neutral, because there is only one answer.
+                let owner = if !self.is_duet() {
+                    None
+                } else if note.part == BOTH_PARTS {
+                    Some(style.text)
+                } else {
+                    Some(self.part_colour(note.part, style))
+                };
+
+                if note.kind.is_freestyle() {
+                    // Freestyle scores nothing, so it is drawn as an outline: a cue, not a
+                    // target, and filling it would promise points that never arrive.
+                    let colour = owner.unwrap_or(style.muted);
+                    list.outline(rect, colour.alpha(0.35), 2.0, note_h / 2.0);
+                    continue;
+                }
+
+                match owner {
+                    // A faint fill in the part's colour with a firm outline round it: legible
+                    // as "yours, not yet sung" without competing with the bar that fills it in
+                    // once it has been.
+                    Some(colour) => {
+                        list.panel(rect, colour.alpha(0.22), note_h / 2.0);
+                        list.outline(rect, colour.alpha(0.85), 2.0, note_h / 2.0);
+                        // Golden is worth double, and that has to survive being coloured by
+                        // part, so it keeps a gold core rather than a gold outline.
+                        if note.kind.is_golden() {
+                            list.panel(
+                                rect.inset_xy(0.0, note_h * 0.3),
+                                style.warning.alpha(0.9),
+                                note_h * 0.2,
+                            );
+                        }
+                    }
+                    None => {
+                        let colour = if note.kind.is_golden() {
+                            style.warning
+                        } else {
+                            style.muted.alpha(0.8)
+                        };
+                        list.panel(rect, colour, note_h / 2.0);
+                    }
+                }
             }
-        }
+        });
 
         // What each singer sang, over the top and clipped to this line. It stays on screen
         // until the line turns, which is the point: you can look at what you just did.
+        //
+        // Where two singers hit the same note at the same moment, one bar is drawn in a
+        // shared colour rather than one on top of the other. Stacking meant the topmost
+        // singer's colour won, and since player two's is red it read as a miss — the picture
+        // saying the opposite of what happened.
+        struct Mark {
+            start: f64,
+            end: f64,
+            pitch: i32,
+            hit: bool,
+            singers: Vec<usize>,
+        }
+        let mut marks: Vec<Mark> = Vec::new();
         for (index, singer) in self.singers.iter().enumerate() {
-            let color = style.player(index);
             for sung in &singer.sung {
                 let sung_end = sung.start + sung.duration;
                 if sung_end < line.start || sung.start > line.end {
                     continue;
                 }
-                let x = x_of(sung.start.max(line.start));
-                let w = (x_of(sung_end.min(line.end)) - x).max(4.0);
-                // A hit is drawn *on* the note rather than where the singer actually was.
-                // Difficulty allows up to two semitones either side, so an honest hit a
-                // semitone off would sit beside the bubble it just scored — the picture
-                // disagreeing with the points again, in smaller print. A miss is drawn where
-                // the singer really was, because that is the information a miss carries.
                 let pitch = match line.note_at(sung.start) {
                     Some(target) if sung.hit => target.pitch,
                     Some(target) => fold_to_octave(sung.pitch, target.pitch),
                     None => sung.pitch,
                 };
-                let y = y_of(pitch) + (row_h - note_h) / 2.0;
-                if sung.hit {
-                    // A hit fills the bubble it landed in rather than sitting as a bar
-                    // inside it, so the two read as one shape lighting up rather than as
-                    // two things that happen to overlap.
-                    list.panel(Rect::new(x, y, w, note_h), color, note_h / 2.0);
-                } else {
-                    // A miss stays a thin mark at the pitch actually sung: it belongs to no
-                    // bubble, and drawing it as one would claim it did.
-                    list.panel(
-                        Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
-                        style.danger,
-                        note_h * 0.24,
-                    );
+                match marks.iter_mut().find(|m| {
+                    m.pitch == pitch
+                        && m.hit == sung.hit
+                        && m.start < sung_end
+                        && sung.start < m.end
+                }) {
+                    Some(shared) => {
+                        shared.start = shared.start.min(sung.start);
+                        shared.end = shared.end.max(sung_end);
+                        if !shared.singers.contains(&index) {
+                            shared.singers.push(index);
+                        }
+                    }
+                    None => marks.push(Mark {
+                        start: sung.start,
+                        end: sung_end,
+                        pitch,
+                        hit: sung.hit,
+                        singers: vec![index],
+                    }),
                 }
+            }
+        }
+
+        for mark in &marks {
+            let x = x_of(mark.start.max(line.start));
+            let w = (x_of(mark.end.min(line.end)) - x).max(4.0);
+            let y = y_of(mark.pitch) + (row_h - note_h) / 2.0;
+            if mark.hit {
+                let colour = if mark.singers.len() > 1 {
+                    // Everybody on the note at once. Its own colour, so "we are together" is
+                    // a thing you can see rather than infer.
+                    style.success
+                } else {
+                    style.player(mark.singers[0])
+                };
+                // A hit fills the bubble it landed in rather than sitting as a bar inside it,
+                // so the two read as one shape lighting up.
+                list.panel(Rect::new(x, y, w, note_h), colour, note_h / 2.0);
+            } else {
+                // A miss stays a thin mark at the pitch actually sung: it belongs to no
+                // bubble, and drawing it as one would claim it did.
+                list.panel(
+                    Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
+                    style.danger,
+                    note_h * 0.24,
+                );
             }
         }
 

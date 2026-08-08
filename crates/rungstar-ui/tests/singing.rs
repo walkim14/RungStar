@@ -289,6 +289,40 @@ fn a_broken_microphone_is_reported_even_with_the_panel_off() {
 }
 
 #[test]
+fn the_level_meter_never_vanishes() {
+    // It used to be drawn only while something was wrong, so it disappeared the moment you
+    // sang loudly enough — the reading gone exactly when it turned good.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+
+    let meters = |level: f32| -> usize {
+        let mut screen = sing_screen(1);
+        screen.show_input_panel = false;
+        screen.singers[0].has_microphone = true;
+        screen.singers[0].ever_heard = true;
+        screen.singers[0].gate = 0.1;
+        screen.singers[0].level = level;
+        let list = draw(&mut screen, 10.0);
+        // The meter track is the sunken bar in the singer panel.
+        list.commands()
+            .iter()
+            .filter(|c| matches!(c, Command::Rect { color, .. } if *color == style.surface_sunken))
+            .count()
+    };
+
+    assert!(meters(0.02) > 0, "no meter while too quiet");
+    assert!(
+        meters(0.5) > 0,
+        "the meter vanished once the gate was cleared"
+    );
+    assert_eq!(
+        meters(0.02),
+        meters(0.5),
+        "the meter came and went with the level"
+    );
+}
+
+#[test]
 fn a_working_microphone_stays_quiet_unless_asked() {
     let mut screen = sing_screen(1);
     screen.show_input_panel = false;
@@ -436,8 +470,18 @@ fn widest(list: &DrawList, color: rungstar_ui::Color) -> Rect {
 /// Matching on shape alone also catches the score bars and the progress bar, which is how the
 /// first version of this helper measured a note as most of the screen.
 fn bars(list: &DrawList, style: &rungstar_ui::Style) -> Vec<Rect> {
-    let note = style.muted.alpha(0.8);
-    let golden = style.warning;
+    let solo_fill = style.muted.alpha(0.8);
+    let solo_freestyle = style.muted.alpha(0.35);
+    // A duet outlines each note in its part's colour and fills it faintly; a solo fills it and
+    // outlines only the freestyle ones. Either way this yields one rectangle per note.
+    let owners: Vec<rungstar_ui::Color> = (0..6)
+        .map(|i| style.player(i))
+        .chain(std::iter::once(style.text))
+        .collect();
+    let owned = |colour: &rungstar_ui::Color, alpha: f32| {
+        owners.iter().any(|owner| owner.alpha(alpha) == *colour)
+    };
+
     list.commands()
         .iter()
         .filter_map(|c| match c {
@@ -447,10 +491,9 @@ fn bars(list: &DrawList, style: &rungstar_ui::Style) -> Vec<Rect> {
                 rect,
                 color,
                 radius,
-            } if *radius > 0.0 && (*color == note || *color == golden) => Some(*rect),
-            // Freestyle notes are outlines rather than bars — still notes, still drawn.
+            } if *radius > 0.0 && (*color == solo_fill || *color == style.warning) => Some(*rect),
             Command::Outline { rect, color, .. }
-                if *color == note.alpha(0.4) || *color == golden.alpha(0.4) =>
+                if *color == solo_freestyle || owned(color, 0.85) || owned(color, 0.35) =>
             {
                 Some(*rect)
             }
@@ -1416,16 +1459,16 @@ fn a_duet_shares_one_staff_and_colours_the_notes_by_part() {
         .commands()
         .iter()
         .filter_map(|c| match c {
-            Command::Rect { rect, color, .. } if rect.h < 40.0 && rect.w > 40.0 => Some(*color),
+            Command::Outline { color, .. } => Some(*color),
             _ => None,
         })
         .collect();
     assert!(
-        colours.contains(&style.player(0).alpha(0.75)),
+        colours.contains(&style.player(0).alpha(0.85)),
         "part one's notes are not in its colour"
     );
     assert!(
-        colours.contains(&style.player(1).alpha(0.75)),
+        colours.contains(&style.player(1).alpha(0.85)),
         "part two's notes are not in its colour"
     );
     assert!(
