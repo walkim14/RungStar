@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use rungstar_audio::{AudioClip, CaptureBackend, DeviceConfig, MasterClock, PlayerBuffers, Timing};
+use rungstar_party::{Effects, Watch};
 use rungstar_pitch::{Analyzer, AnalyzerConfig};
 use rungstar_platform::{Playback, SdlCapture};
 use rungstar_score::{Difficulty, ScoreTrack, Scorer};
@@ -59,6 +60,33 @@ fn continues_run(last: Option<&Sung>, beat: f64, pitch: i32, hit: bool, same_not
     contiguous && last.hit == hit && same_place
 }
 
+/// How a song is to be played this time.
+///
+/// Kept as one value rather than four more arguments, and defaulted, so the ordinary case
+/// stays `Plan::default()` and a medley or a challenge is the same call with one field set.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    /// Where to begin, in seconds. `None` starts at the top.
+    pub start_secs: Option<f64>,
+    /// Where to stop, in seconds. Narrows `#END`; it never extends it.
+    pub end_secs: Option<f64>,
+    /// What the challenge changes.
+    pub effects: Effects,
+    /// Only used by the Deaf challenge, and taken rather than drawn so a run is reproducible.
+    pub seed: u64,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Self {
+            start_secs: None,
+            end_secs: None,
+            effects: Effects::PLAIN,
+            seed: 0,
+        }
+    }
+}
+
 /// One song being played.
 pub struct Session {
     clock: MasterClock,
@@ -92,6 +120,16 @@ pub struct Session {
     end_secs: Option<f64>,
     /// The last beat any note ends on, for knowing when the outro has started.
     last_note_beat: f64,
+    /// The challenge rules, watching the same lines the scorer does.
+    watch: Watch,
+    /// The line of the first part that the watch has already been told about.
+    watched_line: usize,
+    /// Each singer's rating for the line they last finished, for the watch.
+    line_rating: Vec<f32>,
+    /// How loud the song plays when it is not being cut out by a challenge.
+    volume: f32,
+    /// Whether the backing track is audible right now.
+    audible: bool,
     /// The song's video, when it has one and videos are on.
     video: Option<rungstar_video::Video>,
     /// The note each singer's last recorded run was scored against.
@@ -117,6 +155,7 @@ impl Session {
         saved_microphones: &[rungstar_ui::settings::MicAssignment],
         video_path: Option<&Path>,
         mut capture: SdlCapture,
+        plan: &Plan,
     ) -> Result<Self> {
         let clip = AudioClip::open(audio_path).context("could not decode the audio")?;
         // A cushion, so playback does not stall on the first frames.
@@ -196,8 +235,20 @@ impl Session {
             .end
             .filter(|ms| *ms > 0)
             .map(|ms| ms as f64 / 1000.0);
+        // A plan narrows the song, never widens it: a medley that runs past `#END` would play
+        // over whatever the file was trimmed to avoid.
+        let end_secs = match (end_secs, plan.end_secs) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
 
         let mut clock = MasterClock::new(timing);
+        // Seek before starting, so the first frame is already at the medley point rather than
+        // playing a moment of the intro and jumping.
+        if let Some(start) = plan.start_secs.filter(|s| *s > 0.0) {
+            let _ = playback.seek(start);
+            clock.seek(start);
+        }
         playback
             .start()
             .map_err(|e| anyhow::anyhow!("could not start playback: {e}"))?;
@@ -239,12 +290,32 @@ impl Session {
             video,
             last_note_beat,
             last_target: vec![None; players],
+            watch: Watch::new(plan.effects, players, last_note_beat.max(1.0), plan.seed),
+            watched_line: 0,
+            line_rating: vec![0.0; players],
+            volume: 1.0,
+            audible: true,
         })
     }
 
     /// Change how loud the song plays, while it is playing.
-    pub fn set_volume(&self, volume: f32) {
-        self.playback.set_volume(volume);
+    ///
+    /// Remembered rather than only applied, because the Deaf challenge cuts the track in and
+    /// out underneath and has to put it back to whatever the player actually chose.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume;
+        self.playback
+            .set_volume(if self.audible { volume } else { 0.0 });
+    }
+
+    /// The challenge rules watching this song.
+    pub fn watch(&self) -> &Watch {
+        &self.watch
+    }
+
+    /// Whether the backing track is audible, for the screen to say so.
+    pub fn audible(&self) -> bool {
+        self.audible
     }
 
     pub fn is_finished(&self) -> bool {
@@ -321,11 +392,26 @@ impl Session {
             self.score_elapsed(beats.detection);
         }
 
+        // Deaf cuts the backing track in and out. Muting rather than pausing on purpose: the
+        // clock has to keep running or the notes stop with the music and there is nothing left
+        // to sing against.
+        if !self.clock.is_paused() {
+            let audible = self.watch.music_at(self.playback.position());
+            if audible != self.audible {
+                self.audible = audible;
+                self.playback
+                    .set_volume(if audible { self.volume } else { 0.0 });
+            }
+        }
+
         if song_over(
             self.playback.is_finished(),
             self.playback.position(),
             self.end_secs,
         ) {
+            self.watch.song_ended();
+        }
+        if self.watch.ending().is_some() {
             self.finished = true;
         }
         Ok(())
@@ -356,12 +442,14 @@ impl Session {
                     }
                     if let Some(result) = self.scorers[player].end_line(self.next_line[player]) {
                         self.ratings[player] = Some((result.rating, Instant::now()));
+                        self.line_rating[player] = result.perfection as f32;
                     }
                     self.next_line[player] += 1;
                 }
             }
         }
         self.scored_through = detection_beat;
+        self.watch_lines(detection_beat);
 
         // Forget what is behind the line being sung, so a long song does not grow without
         // bound, but never anything still on screen.
@@ -373,6 +461,26 @@ impl Session {
         for history in &mut self.sung {
             history.retain(|s| s.start + s.duration >= cutoff);
         }
+    }
+
+    /// Tell the challenge rules about every line the first singer has finished.
+    ///
+    /// Driven by the first part rather than per singer, because a challenge compares people to
+    /// each other and that only means anything at a shared moment. In a duet the parts do not
+    /// share line boundaries, so one of them has to be the clock.
+    fn watch_lines(&mut self, beat: f64) {
+        let finished = self.next_line.first().copied().unwrap_or(0);
+        if finished <= self.watched_line {
+            return;
+        }
+        self.watched_line = finished;
+        let scores: Vec<i32> = self
+            .scorers
+            .iter()
+            .map(|scorer| scorer.totals().total as i32)
+            .collect();
+        self.watch.line_ended(beat, &scores, &self.line_rating);
+        self.line_rating.fill(0.0);
     }
 
     /// Extend the last run rather than pushing a bar per beat, so a held note draws as one

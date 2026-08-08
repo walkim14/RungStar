@@ -27,6 +27,7 @@ rungstar-platform.workspace = true
 rungstar-song.workspace = true
 rungstar-library.workspace = true
 rungstar-ui.workspace = true
+rungstar-party.workspace = true
 rungstar-profile.workspace = true
 rungstar-video.workspace = true
 rungstar-score.workspace = true

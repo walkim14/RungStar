@@ -1783,3 +1783,136 @@ fn mark_or_none(
         })
         .max_by(|a, b| a.w.partial_cmp(&b.w).unwrap_or(std::cmp::Ordering::Equal))
 }
+
+#[test]
+fn a_blind_challenge_says_what_it_took_away() {
+    // Blank is not the same as hidden. An empty middle of the screen is indistinguishable
+    // from a song that failed to load, and somebody who walked in has no way to tell.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+    screen.challenge = Some("Blind".to_owned());
+    screen.show_lyrics = false;
+    screen.show_notes = false;
+
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[PartView {
+            line: &line,
+            syllables: &[Syllable {
+                text: "secret".into(),
+                start: 8.0,
+                duration: 1.0,
+                golden: false,
+            }],
+            next_line: "also secret",
+        }],
+        8.0,
+    );
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    assert!(text.iter().any(|t| t == "Words hidden"), "{text:?}");
+    assert!(text.iter().any(|t| t == "Notes hidden"));
+    assert!(text.iter().any(|t| t == "Blind"), "the mode is not named");
+    assert!(
+        !text.iter().any(|t| t.contains("secret")),
+        "the words were drawn anyway: {text:?}"
+    );
+}
+
+#[test]
+fn the_music_cutting_out_is_said_rather_than_just_happening() {
+    // Silence with no explanation reads as the game having crashed.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+    screen.challenge = Some("Deaf".to_owned());
+    screen.audible = false;
+    let text = strings(&draw_with(&mut screen, &line, 8.0, &style));
+    assert!(
+        text.iter().any(|t| t.contains("music off")),
+        "nothing said the music had gone: {text:?}"
+    );
+}
+
+#[test]
+fn the_rising_bar_is_drawn_with_the_number_on_it() {
+    // A rule that puts somebody out without showing how close they were cannot be played
+    // against, and "you are out" with no warning reads as a bug.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(2);
+    screen.challenge = Some("Hold the line".to_owned());
+    screen.bar = Some(0.42);
+    let text = strings(&draw_with(&mut screen, &line, 8.0, &style));
+    assert!(
+        text.iter().any(|t| t.contains("42%")),
+        "the bar is not readable: {text:?}"
+    );
+
+    // Somebody knocked out keeps their panel and their score, and is marked.
+    screen.knocked_out = vec![false, true];
+    screen.singers[1].name = "Grace".to_owned();
+    screen.singers[1].score = 3100;
+    let text = strings(&draw_with(&mut screen, &line, 8.0, &style));
+    assert!(text.iter().any(|t| t == "OUT"), "{text:?}");
+    assert!(
+        text.iter().any(|t| t == "Grace") && text.iter().any(|t| t == "3100"),
+        "a knocked-out singer lost the thing they want to look at"
+    );
+}
+
+#[test]
+fn the_jukebox_has_no_panels_and_the_staff_takes_the_room() {
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut with = sing_screen(1);
+    with.singers[0].name = "Walki".to_owned();
+    let widest_with = bars(&draw_with(&mut with, &line, 8.0, &style), &style)
+        .iter()
+        .map(|r| r.right())
+        .fold(0.0_f32, f32::max);
+
+    let mut without = sing_screen(1);
+    without.singers[0].name = "Walki".to_owned();
+    without.show_panels = false;
+    let list = draw_with(&mut without, &line, 8.0, &style);
+    assert!(
+        !strings(&list).iter().any(|t| t == "Walki"),
+        "the jukebox drew a singer panel"
+    );
+    let widest_without = bars(&list, &style)
+        .iter()
+        .map(|r| r.right())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        widest_without > widest_with,
+        "the staff did not take the room the panels left: {widest_with} then {widest_without}"
+    );
+}
+
+/// Draw one frame of a screen and hand back the list.
+fn draw_with(
+    screen: &mut SingScreen,
+    line: &NoteLine,
+    beat: f64,
+    style: &rungstar_ui::Style,
+) -> DrawList {
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        style,
+        &[PartView {
+            line,
+            syllables: &[],
+            next_line: "",
+        }],
+        beat,
+    );
+    assert!(list.is_balanced());
+    list
+}

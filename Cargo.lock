@@ -996,6 +996,7 @@ dependencies = [
  "image",
  "rungstar-audio",
  "rungstar-library",
+ "rungstar-party",
  "rungstar-pitch",
  "rungstar-platform",
  "rungstar-profile",
@@ -1091,6 +1092,7 @@ name = "rungstar-ui"
 version = "0.1.0"
 dependencies = [
  "rungstar-library",
+ "rungstar-party",
  "rungstar-profile",
  "serde",
  "tempfile",

@@ -26,6 +26,7 @@ use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::micscreen::{MicOutcome, MicScreen};
 use rungstar_ui::options::Action;
+use rungstar_ui::partyscreen::{Kind, PartyOutcome, PartyScreen, Stage};
 use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
 use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch};
@@ -80,6 +81,7 @@ enum Screen {
     /// Microphone setup, with capture running so the meters are live.
     Mics(Box<MicScreen>, Box<session::Monitor>),
     Players(Box<PlayerScreen>),
+    Party(Box<PartyScreen>),
     Stats(Box<StatsScreen>),
     About,
 }
@@ -102,6 +104,22 @@ struct App {
     pending_sing: Option<i64>,
     /// The song the singer picker is open for, if it is open.
     pending_pick: Option<i64>,
+    /// How the next song is to be played: where it starts, and under what challenge.
+    ///
+    /// Kept beside the song rather than inside `pending_sing` so that restarting from the
+    /// pause menu replays the same medley or challenge rather than quietly reverting to the
+    /// plain song from the top.
+    next_plan: session::Plan,
+    /// The challenge the next song is sung under.
+    challenge: &'static rungstar_party::Challenge,
+    /// The song offered for the party round in progress.
+    party_song: Option<i64>,
+    /// Set while the browser is open to pick a song for a party round rather than to sing one.
+    party_picking: bool,
+    /// Set when a party song has just finished and its scores have to be reported.
+    party_scores: Option<Vec<i32>>,
+    /// Whether the jukebox is running: songs play back to back and nothing is scored.
+    jukebox: bool,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
@@ -243,6 +261,12 @@ impl App {
             status: String::new(),
             pending_sing: None,
             pending_pick: None,
+            next_plan: session::Plan::default(),
+            challenge: rungstar_party::Challenge::normal(),
+            party_song: None,
+            party_picking: false,
+            party_scores: None,
+            jukebox: false,
             pending_mics: false,
             singing: None,
             dropped_video: None,
@@ -503,10 +527,29 @@ impl App {
             return;
         };
         match action {
-            SongAction::Sing => self.request_sing(id),
+            SongAction::Sing => {
+                self.next_plan = self.plain_plan();
+                self.request_sing(id);
+            }
             SongAction::SingFromChorus => {
-                self.pending_sing = Some(id);
-                self.status = "starting from the chorus is not wired up yet".to_owned();
+                // The challenge is taken from the browser first, so a medley is sung under
+                // whatever was chosen rather than always plainly.
+                self.plain_plan();
+                match self.medley(id) {
+                    Some(plan) => {
+                        self.next_plan = plan;
+                        self.request_sing(id);
+                    }
+                    None => {
+                        self.status = "that song has no chorus marked and is too short to guess one"
+                            .to_owned()
+                    }
+                }
+            }
+            SongAction::PickChallenge => {
+                if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+                    songs.pick_challenge();
+                }
             }
             SongAction::ToggleFavourite => {
                 // A favourite belongs to somebody, so there has to be a somebody. Whoever is
@@ -950,6 +993,7 @@ impl App {
             Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Players(screen)) => screen.gamepad = gamepad,
+            Some(Screen::Party(screen)) => screen.gamepad = gamepad,
             Some(Screen::Stats(screen)) => screen.gamepad = gamepad,
             _ => {}
         }
@@ -1054,6 +1098,11 @@ impl App {
                 self.apply_player_outcome(outcome);
                 transition
             }
+            Some(Screen::Party(screen)) => {
+                let (transition, outcome) = screen.handle(input);
+                self.apply_party_outcome(outcome);
+                transition
+            }
             Some(Screen::Stats(screen)) => screen.handle(input),
             Some(Screen::About) => match input {
                 Input::Back | Input::Confirm => Transition::Pop,
@@ -1072,6 +1121,12 @@ impl App {
                     // The video texture is this song's; leaving it behind would leak one per
                     // song sung.
                     self.dropped_video = screen.video;
+                    // A party song's result is read off the same panels the singers watched,
+                    // so there is one score per microphone and it is already in slot order.
+                    let under = self.stack.len().saturating_sub(2);
+                    if matches!(self.stack.get(under), Some(Screen::Party(_))) {
+                        self.party_scores = Some(screen.singers.iter().map(|s| s.score).collect());
+                    }
                 }
                 if let Some(Screen::Mics(screen, monitor)) = self.stack.last_mut() {
                     let assignment = monitor.saved();
@@ -1095,6 +1150,14 @@ impl App {
                 if self.stack.is_empty() {
                     self.running = false;
                 }
+                // Reported after the score screen has closed rather than when the song ended,
+                // so the standings do not change under the result being read.
+                self.report_party_round();
+                // The jukebox rolls straight into the next song, and Back from the sing screen
+                // is what stops it: an endless mode needs one obvious way out.
+                if self.jukebox {
+                    self.jukebox = false;
+                }
             }
             Transition::Quit => self.running = false,
             Transition::Push(route) => match route {
@@ -1116,14 +1179,307 @@ impl App {
                     self.refresh_players(&mut screen);
                     self.stack.push(Screen::Players(Box::new(screen)));
                 }
+                Route::Party => {
+                    let mut screen = PartyScreen::new();
+                    screen.pool = self
+                        .profiles
+                        .players()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|player| player.name)
+                        .collect();
+                    self.stack.push(Screen::Party(Box::new(screen)));
+                }
+                Route::Jukebox => {
+                    if self.library.count().unwrap_or(0) == 0 {
+                        self.start_scan(false);
+                        self.status = "finding your songs first".to_owned();
+                    }
+                    match self.random_song() {
+                        Some(id) => {
+                            self.jukebox = true;
+                            self.next_plan = session::Plan::default();
+                            self.pending_sing = Some(id);
+                        }
+                        None => self.status = "there are no songs to play".to_owned(),
+                    }
+                }
                 Route::Stats => self.stack.push(Screen::Stats(Box::new(StatsScreen::new()))),
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
             },
             // Starting a song needs the audio subsystem, which the frame loop owns. It is
             // recorded here and acted on there.
-            Transition::Sing(id) => self.request_sing(id),
+            Transition::Sing(id) => {
+                if self.party_picking {
+                    // The browser was open to choose this round's song, not to sing one.
+                    self.party_picking = false;
+                    self.stack.pop();
+                    self.offer_to_party(Some(id));
+                    return;
+                }
+                self.next_plan = self.plain_plan();
+                self.request_sing(id);
+            }
         }
+    }
+
+    /// Carry out what the party screen asked for.
+    fn apply_party_outcome(&mut self, outcome: PartyOutcome) {
+        match outcome {
+            PartyOutcome::None => {}
+            PartyOutcome::Begin => self.begin_party(),
+            PartyOutcome::Sing => self.sing_for_party(),
+            PartyOutcome::Reroll => {
+                if let Some(Screen::Party(screen)) = self.stack.last_mut() {
+                    let spent = screen.party.as_mut().is_some_and(|party| party.reject());
+                    if spent {
+                        screen.offered = None;
+                    }
+                }
+                let drawn = self.random_song();
+                self.offer_to_party(drawn);
+            }
+            PartyOutcome::Choose => {
+                // The browser, with everything it already does — search, filters, previews.
+                // A party song picker that is a worse song list is not worth having.
+                self.party_picking = true;
+                self.stack.push(Screen::Songs(Box::new(SongSelect::new())));
+                if self.library.count().unwrap_or(0) == 0 {
+                    self.start_scan(false);
+                }
+            }
+            PartyOutcome::Leave => {
+                self.party_song = None;
+                self.party_picking = false;
+                self.party_scores = None;
+            }
+        }
+    }
+
+    /// Build the party or the bracket the setup stage describes, and start it.
+    ///
+    /// Teams are filled round-robin from the saved profiles rather than through a team-editing
+    /// screen: with four people and two teams, first and third against second and fourth. It
+    /// is the split anybody would make, and it costs no screen to make it.
+    fn begin_party(&mut self) {
+        let Some(Screen::Party(screen)) = self.stack.last_mut() else {
+            return;
+        };
+        let pool = screen.pool.clone();
+        if pool.len() < screen.size {
+            return;
+        }
+        if screen.kind.is_tournament() {
+            let players: Vec<String> = pool.into_iter().take(screen.size).collect();
+            match rungstar_party::Bracket::new(players) {
+                Ok(bracket) => {
+                    screen.bracket = Some(bracket);
+                    screen.party = None;
+                }
+                Err(error) => {
+                    self.status = error.to_string();
+                    return;
+                }
+            }
+        } else {
+            let mut teams: Vec<rungstar_party::Team> = (0..screen.size)
+                .map(|index| rungstar_party::Team::new(format!("Team {}", index + 1), Vec::new()))
+                .collect();
+            for (index, name) in pool.iter().enumerate() {
+                teams[index % screen.size].players.push(name.clone());
+            }
+            let mut party = rungstar_party::Party::new(teams, screen.rounds);
+            party.offer(String::new());
+            screen.party = Some(party);
+            screen.bracket = None;
+        }
+        self.challenge = screen.challenge();
+        let classic = screen.kind == Kind::Classic;
+        screen.to_round();
+        // Classic draws a song and offers it; the other two ask for one.
+        let drawn = classic.then(|| self.random_song()).flatten();
+        self.offer_to_party(drawn);
+    }
+
+    /// Put a song in front of the team whose turn it is.
+    fn offer_to_party(&mut self, song: Option<i64>) {
+        let name = song
+            .and_then(|id| self.library.song(id).ok().flatten())
+            .map(|entry| entry.display_name());
+        self.party_song = song.filter(|_| name.is_some());
+        if let Some(Screen::Party(screen)) = self.stack.last_mut() {
+            if let (Some(party), Some(name)) = (screen.party.as_mut(), name.clone()) {
+                party.offer(name);
+            }
+            screen.offered = name;
+            screen.to_round();
+        }
+    }
+
+    /// Start the song the party is holding.
+    fn sing_for_party(&mut self) {
+        let Some(id) = self.party_song else {
+            return;
+        };
+        let Some(Screen::Party(screen)) = self.stack.last_mut() else {
+            return;
+        };
+        // Who is at the microphones this round, in slot order: one singer per team, or the two
+        // players of the match. Everything downstream — panels, scoring, highscores — already
+        // follows this list, so a party needs no separate idea of who is playing.
+        let names: Vec<String> = match (&screen.bracket, &screen.party) {
+            (Some(bracket), _) => bracket
+                .next_match()
+                .map(|(round, index)| {
+                    let fixture = &bracket.rounds[round][index];
+                    vec![
+                        bracket.name(fixture.left).to_owned(),
+                        bracket.name(fixture.right).to_owned(),
+                    ]
+                })
+                .unwrap_or_default(),
+            (_, Some(party)) => party
+                .teams
+                .iter()
+                .map(|team| team.singer().unwrap_or_default().to_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        if let Some(party) = screen.party.as_mut() {
+            party.accept();
+        }
+        let effects = screen.challenge().effects;
+
+        let known = self.profiles.players().unwrap_or_default();
+        self.singers = names
+            .iter()
+            .filter_map(|name| {
+                known
+                    .iter()
+                    .find(|player| player.name.eq_ignore_ascii_case(name))
+                    .map(|player| player.id)
+            })
+            .collect();
+        self.next_plan = session::Plan {
+            effects,
+            seed: unix_now() as u64,
+            ..session::Plan::default()
+        };
+        self.pending_sing = Some(id);
+    }
+
+    /// Report a finished party song and move the party on.
+    ///
+    /// Called after the score screen closes rather than the moment the song ends, so the
+    /// result is read before the standings change under it.
+    fn report_party_round(&mut self) {
+        let Some(scores) = self.party_scores.take() else {
+            return;
+        };
+        let Some(Screen::Party(screen)) = self.stack.last_mut() else {
+            return;
+        };
+        if let Some(bracket) = screen.bracket.as_mut() {
+            if let Some((round, index)) = bracket.next_match() {
+                let left = scores.first().copied().unwrap_or(0);
+                let right = scores.get(1).copied().unwrap_or(0);
+                bracket.report(round, index, (left, right));
+            }
+            if bracket.is_finished() {
+                screen.to_finished();
+                return;
+            }
+        } else if let Some(party) = screen.party.as_mut() {
+            party.finish_round(&scores);
+            if party.phase() == rungstar_party::Phase::Finished {
+                screen.to_finished();
+                return;
+            }
+        }
+        screen.offered = None;
+        self.party_song = None;
+        let classic = screen.kind == Kind::Classic;
+        screen.to_round();
+        let drawn = classic.then(|| self.random_song()).flatten();
+        self.offer_to_party(drawn);
+    }
+
+    /// A song at random from the whole library.
+    ///
+    /// Not filtered to what anybody knows: being handed something nobody has heard of is what
+    /// the jokers are for, and a "random" that only ever offers the same fifty songs is not
+    /// a party.
+    fn random_song(&mut self) -> Option<i64> {
+        let count = self.library.count().unwrap_or(0);
+        if count == 0 {
+            return None;
+        }
+        // The clock is the only entropy to hand, and it moves between rounds. Mixed rather
+        // than used raw, because consecutive seconds otherwise give neighbouring songs.
+        let mut seed = unix_now() as u64 ^ (self.party_song.unwrap_or(0) as u64).wrapping_mul(31);
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        seed = (seed ^ (seed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        seed = (seed ^ (seed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let offset = ((seed ^ (seed >> 31)) % count.max(1) as u64) as usize;
+
+        let mut query = SearchQuery::all().limit(1);
+        query.offset = offset;
+        self.library
+            .search(&query)
+            .ok()
+            .and_then(|found| found.first().map(|entry| entry.id))
+    }
+
+    /// A plan for the whole song under whatever challenge the browser has chosen.
+    ///
+    /// The challenge lives on the browser rather than in the settings: it is a choice about
+    /// the next song, not a preference, and a party that turned on Blind three weeks ago
+    /// should not still be blind tonight.
+    fn plain_plan(&mut self) -> session::Plan {
+        self.challenge = match self.stack.last() {
+            Some(Screen::Songs(songs)) => songs.challenge(),
+            _ => self.challenge,
+        };
+        session::Plan {
+            effects: self.challenge.effects,
+            seed: unix_now() as u64,
+            ..session::Plan::default()
+        }
+    }
+
+    /// Where the chorus is, as a plan that starts there.
+    ///
+    /// `#MEDLEYSTARTBEAT` when the file has one, `#PREVIEWSTART` when it does not — the
+    /// preview point is somebody's answer to "the bit worth hearing", which is the same
+    /// question. Failing that, a third of the way in, which is roughly where a first chorus
+    /// lands and is better than refusing.
+    ///
+    /// A song with no medley end runs to its own end rather than for a fixed length: cutting a
+    /// chorus off after thirty seconds is worse than singing one verse too many.
+    fn medley(&self, id: i64) -> Option<session::Plan> {
+        let entry = self.library.song(id).ok().flatten()?;
+        let bpm = rungstar_song::Bpm::new(entry.bpm);
+        let gap = entry.gap_ms as f64;
+        let at_beat = |beat: i32| bpm.beat_to_time(f64::from(beat), gap);
+
+        let start = entry
+            .medley_start
+            .map(at_beat)
+            .or(entry.preview_start)
+            .or_else(|| (entry.duration_secs > 60.0).then(|| entry.duration_secs / 3.0))?;
+        // A few beats of run-up, so the first word is not already going when the audio starts.
+        let start = (start - 2.0).max(0.0);
+        let end = entry.medley_end.map(at_beat);
+        if end.is_some_and(|end| end <= start) {
+            return None;
+        }
+        Some(session::Plan {
+            start_secs: Some(start),
+            end_secs: end,
+            effects: self.challenge.effects,
+            seed: unix_now() as u64,
+        })
     }
 
     /// Ask who is singing, when there is anything to ask.
@@ -1244,6 +1600,7 @@ impl App {
             &self.settings.sound.microphones,
             video.as_deref(),
             capture,
+            &self.next_plan,
         );
         let session = match session {
             Ok(session) => session,
@@ -1266,6 +1623,16 @@ impl App {
             }
         }
         screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
+        // Nobody is singing a jukebox song, so nobody has a panel and nothing is recorded.
+        // The scorer still runs underneath — stopping it would be a second code path through
+        // the session for no gain — but its result never leaves this screen.
+        screen.show_panels = !self.jukebox;
+        // What the challenge takes away is decided once, at the start: a mode that hid the
+        // words halfway through would be a different mode.
+        let effects = self.next_plan.effects;
+        screen.show_lyrics = effects.lyrics;
+        screen.show_notes = effects.notes;
+        screen.challenge = (!effects.is_plain()).then(|| self.challenge.name.to_owned());
         screen.effect = self.settings.lyrics.effect;
         screen.duration = session.duration();
         let (low, high) = session.pitch_range();
@@ -1356,6 +1723,7 @@ impl App {
             }
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
             Some(Screen::Players(screen)) => screen.draw(list, area, &self.style),
+            Some(Screen::Party(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Stats(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
@@ -1718,6 +2086,9 @@ fn main() -> Result<()> {
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
         let mut finished_song = false;
+        let mut next_jukebox_song = false;
+        // Read before the sing screen is borrowed, since that borrow takes the whole app.
+        let jukebox = app.jukebox;
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
                 songs.tick(dt);
@@ -1756,17 +2127,30 @@ fn main() -> Result<()> {
                 } else {
                     session.update_singers(&mut screen.singers);
                     screen.position = session.position();
+                    // The challenge state, refreshed per frame: the bar rises with the beat
+                    // and the music cuts in and out under the Deaf mode.
+                    let watch = session.watch();
+                    screen.bar = watch.bar_at(session.visual_beat());
+                    screen.knocked_out = watch.standings().iter().map(|s| s.is_out()).collect();
+                    screen.audible = session.audible();
                     // Once the last note has gone by there is nothing left to sing, so the
                     // screen offers to skip the rest of the instrumental.
                     screen.outro = session.past_last_note();
                     if session.is_finished() && screen.overlay != Overlay::Results {
-                        // Recorded outside the borrow, since writing needs the whole app.
-                        finished_song = true;
-                        // The scores go up rather than the screen closing: in a party the
-                        // result is the point, and popping straight back to the browser
-                        // throws it away before anybody has read it.
-                        screen.overlay = Overlay::Results;
                         session.stop();
+                        if jukebox {
+                            // No score screen and nothing recorded: the next song starts.
+                            // A jukebox that stops to congratulate somebody every four minutes
+                            // is not background music.
+                            next_jukebox_song = true;
+                        } else {
+                            // Recorded outside the borrow, since writing needs the whole app.
+                            finished_song = true;
+                            // The scores go up rather than the screen closing: in a party the
+                            // result is the point, and popping straight back to the browser
+                            // throws it away before anybody has read it.
+                            screen.overlay = Overlay::Results;
+                        }
                     }
                 }
             }
@@ -1775,6 +2159,17 @@ fn main() -> Result<()> {
 
         if finished_song {
             app.record_finished_song();
+        }
+        if next_jukebox_song {
+            // Popped and re-pushed rather than restarted in place: a new song is a new
+            // session, a new video and a new set of notes, and `sing` already does all of it.
+            app.apply(Transition::Pop);
+            app.jukebox = true;
+            if let Some(id) = app.random_song() {
+                app.pending_sing = Some(id);
+            } else {
+                app.jukebox = false;
+            }
         }
 
         list.clear();
@@ -2000,6 +2395,33 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         println!("sing        {} draw commands, 6 singers", list.len());
     }
 
+    // The party screen, at every stage it has.
+    {
+        let mut screen = PartyScreen::new();
+        screen.pool = vec!["Ada".into(), "Grace".into()];
+        screen.party = Some(rungstar_party::Party::new(
+            vec![
+                rungstar_party::Team::new("Team 1", vec!["Ada".into()]),
+                rungstar_party::Team::new("Team 2", vec!["Grace".into()]),
+            ],
+            3,
+        ));
+        screen.offered = Some("Abba - Waterloo".to_owned());
+        app.stack.push(Screen::Party(Box::new(screen)));
+        for stage in [Stage::Setup, Stage::Round, Stage::Finished] {
+            if let Some(Screen::Party(screen)) = app.stack.last_mut() {
+                screen.stage = stage;
+            }
+            list.clear();
+            app.draw(list, area);
+            renderer
+                .render(list, app.style.background)
+                .map_err(|e| anyhow::anyhow!("party: {e}"))?;
+        }
+        println!("party       {} draw commands", list.len());
+        app.stack.pop();
+    }
+
     // And the browser overlays, which have their own layout maths.
     app.stack.push(Screen::Songs(Box::new(SongSelect::new())));
     app.refresh_facets();
@@ -2009,6 +2431,8 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         Input::Sort,
         Input::Sort,
         Input::CycleFilter,
+        Input::CycleFilter,
+        Input::ContextMenu,
         // Into the value column, so the panel is drawn with a real list of genres behind it
         // rather than only its categories.
         Input::Right,
