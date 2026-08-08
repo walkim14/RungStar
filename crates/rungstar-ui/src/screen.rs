@@ -44,6 +44,8 @@ pub enum Route {
     Party,
     /// Songs played back to back with nobody scoring.
     Jukebox,
+    /// The USDB catalog, browsed and downloaded from inside the game.
+    Usdb,
     /// The four statistics views.
     Stats,
     About,

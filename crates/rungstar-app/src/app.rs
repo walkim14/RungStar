@@ -34,9 +34,11 @@ use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
+use rungstar_ui::usdbscreen::{Activity, Local, Row as UsdbRow, UsdbOutcome, UsdbScreen};
 use rungstar_ui::Color;
 
 mod session;
+mod usdbjob;
 
 mod paths {
     use std::path::PathBuf;
@@ -82,6 +84,7 @@ enum Screen {
     Mics(Box<MicScreen>, Box<session::Monitor>),
     Players(Box<PlayerScreen>),
     Party(Box<PartyScreen>),
+    Usdb(Box<UsdbScreen>),
     Stats(Box<StatsScreen>),
     About,
 }
@@ -120,6 +123,11 @@ struct App {
     party_scores: Option<Vec<i32>>,
     /// Whether the jukebox is running: songs play back to back and nothing is scored.
     jukebox: bool,
+    /// The USDB worker, started the first time the browser is opened.
+    ///
+    /// Lazily, because it logs in: somebody who never opens it should not have their password
+    /// read out of the keyring on every launch.
+    usdb: Option<usdbjob::UsdbJob>,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
@@ -267,6 +275,7 @@ impl App {
             party_picking: false,
             party_scores: None,
             jukebox: false,
+            usdb: None,
             pending_mics: false,
             singing: None,
             dropped_video: None,
@@ -620,6 +629,7 @@ impl App {
         match self.stack.last() {
             Some(Screen::Songs(songs)) => songs.wants_text(),
             Some(Screen::Players(screen)) => screen.wants_text(),
+            Some(Screen::Usdb(screen)) => screen.wants_text(),
             _ => false,
         }
     }
@@ -994,6 +1004,7 @@ impl App {
             Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Players(screen)) => screen.gamepad = gamepad,
             Some(Screen::Party(screen)) => screen.gamepad = gamepad,
+            Some(Screen::Usdb(screen)) => screen.gamepad = gamepad,
             Some(Screen::Stats(screen)) => screen.gamepad = gamepad,
             _ => {}
         }
@@ -1103,6 +1114,11 @@ impl App {
                 self.apply_party_outcome(outcome);
                 transition
             }
+            Some(Screen::Usdb(screen)) => {
+                let (transition, outcome) = screen.handle(input);
+                self.apply_usdb_outcome(outcome);
+                transition
+            }
             Some(Screen::Stats(screen)) => screen.handle(input),
             Some(Screen::About) => match input {
                 Input::Back | Input::Confirm => Transition::Pop,
@@ -1204,6 +1220,14 @@ impl App {
                         None => self.status = "there are no songs to play".to_owned(),
                     }
                 }
+                Route::Usdb => {
+                    self.start_usdb();
+                    let mut screen = UsdbScreen::new();
+                    if let Some(job) = &self.usdb {
+                        screen.catalog_size = job.catalog().len();
+                    }
+                    self.stack.push(Screen::Usdb(Box::new(screen)));
+                }
                 Route::Stats => self.stack.push(Screen::Stats(Box::new(StatsScreen::new()))),
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
@@ -1221,6 +1245,191 @@ impl App {
                 self.next_plan = self.plain_plan();
                 self.request_sing(id);
             }
+        }
+    }
+
+    /// Start the USDB worker if it is not already running.
+    fn start_usdb(&mut self) {
+        if self.usdb.is_some() {
+            return;
+        }
+        let songs = self
+            .settings
+            .game
+            .song_roots
+            .first()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.data_dir.join("songs"));
+        let _ = std::fs::create_dir_all(&songs);
+        self.usdb = Some(usdbjob::UsdbJob::start(
+            self.data_dir.clone(),
+            songs,
+            self.settings
+                .network
+                .usdb_user
+                .clone()
+                .filter(|u| !u.is_empty()),
+        ));
+    }
+
+    /// Carry out what the USDB browser asked for.
+    fn apply_usdb_outcome(&mut self, outcome: UsdbOutcome) {
+        use usdbjob::Order_;
+        match outcome {
+            UsdbOutcome::None => {}
+            UsdbOutcome::Search(_) => {}
+            UsdbOutcome::Sync => {
+                self.start_usdb();
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::Sync);
+                }
+            }
+            UsdbOutcome::Download(id) => {
+                self.start_usdb();
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::Download(id));
+                }
+            }
+            UsdbOutcome::Repair => {
+                self.start_usdb();
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::Repair);
+                }
+            }
+            UsdbOutcome::Cancel => {
+                if let Some(job) = &mut self.usdb {
+                    job.cancel();
+                }
+            }
+            UsdbOutcome::LogIn { user, password } => {
+                self.start_usdb();
+                // The username is a setting; the password never is. It goes to the OS keyring
+                // and nowhere else, because a config file that quietly holds somebody's
+                // password is how it ends up in a backup and a bug report.
+                self.settings.network.usdb_user = Some(user.clone());
+                self.save_settings();
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::LogIn { user, password });
+                }
+            }
+            UsdbOutcome::LogOut => {
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::LogOut);
+                }
+            }
+        }
+    }
+
+    /// Read what the USDB worker has said and fill the browser with it.
+    fn refresh_usdb(&mut self) {
+        let Some(job) = &mut self.usdb else {
+            return;
+        };
+        let events = job.poll();
+        let mut catalog_changed = false;
+        let mut rescan = false;
+        let mut doing: Option<(String, Option<f32>)> = None;
+        let mut idle = false;
+        let mut problem: Option<String> = None;
+        let mut signed: Option<Option<String>> = None;
+        let mut catalog_size: Option<usize> = None;
+        for event in events {
+            match event {
+                usdbjob::Event::Doing(what, fraction) => doing = Some((what, fraction)),
+                usdbjob::Event::CatalogChanged(size) => {
+                    catalog_changed = true;
+                    catalog_size = Some(size);
+                }
+                usdbjob::Event::Downloaded(id, folder, outcome) => {
+                    tracing::info!("song {id} finished: {outcome:?}");
+                    if folder.as_os_str().is_empty() {
+                        continue;
+                    }
+                    // The song is on disk; the library has to be told, or it is invisible
+                    // until the next launch.
+                    rescan = true;
+                    doing = Some((
+                        match outcome {
+                            rungstar_download::Outcome::Complete => "downloaded".to_owned(),
+                            rungstar_download::Outcome::Partial => {
+                                "downloaded, without everything".to_owned()
+                            }
+                            rungstar_download::Outcome::Cancelled => "stopped".to_owned(),
+                        },
+                        None,
+                    ));
+                }
+                usdbjob::Event::Fetching(_) => catalog_changed = true,
+                usdbjob::Event::Signed(who) => signed = Some(who),
+                usdbjob::Event::Problem(why) => problem = Some(why),
+                usdbjob::Event::Idle => idle = true,
+            }
+        }
+
+        let queued = job.queued();
+        let fetching = job.fetching();
+        let known: Vec<UsdbRow> = if catalog_changed
+            || matches!(self.stack.last(), Some(Screen::Usdb(s)) if s.needs_rows())
+        {
+            let catalog = job.catalog();
+            let text = match self.stack.last() {
+                Some(Screen::Usdb(screen)) => screen.search_text().to_owned(),
+                _ => String::new(),
+            };
+            catalog
+                .search(&text)
+                .into_iter()
+                .take(500)
+                .map(|song| {
+                    let local = if Some(song.id) == fetching {
+                        Local::Fetching
+                    } else {
+                        Local::Absent
+                    };
+                    UsdbRow::from_catalog(song, local)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let size = catalog_size.unwrap_or_else(|| job.catalog().len());
+
+        if rescan {
+            self.start_scan(false);
+        }
+        if let Some(who) = signed.clone() {
+            self.settings.network.usdb_user = who.clone();
+        }
+
+        let Some(Screen::Usdb(screen)) = self.stack.last_mut() else {
+            return;
+        };
+        screen.catalog_size = size;
+        if catalog_changed || screen.needs_rows() {
+            screen.set_rows(known);
+        }
+        if let Some(who) = signed {
+            screen.user = who;
+            screen.problem.clear();
+        }
+        if let Some((what, fraction)) = doing {
+            screen.activity = Activity {
+                what,
+                fraction,
+                queued,
+            };
+            screen.problem.clear();
+        } else {
+            screen.activity.queued = queued;
+        }
+        if idle {
+            screen.activity = Activity {
+                queued,
+                ..Activity::default()
+            };
+        }
+        if let Some(why) = problem {
+            screen.problem = why;
         }
     }
 
@@ -1724,6 +1933,7 @@ impl App {
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
             Some(Screen::Players(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Party(screen)) => screen.draw(list, area, &self.style),
+            Some(Screen::Usdb(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Stats(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
@@ -2082,6 +2292,7 @@ fn main() -> Result<()> {
         app.refresh_stats();
         app.refresh_facets();
         app.refresh_songs();
+        app.refresh_usdb();
         app.refresh_highscores();
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
@@ -2419,6 +2630,40 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
                 .map_err(|e| anyhow::anyhow!("party: {e}"))?;
         }
         println!("party       {} draw commands", list.len());
+        app.stack.pop();
+    }
+
+    // The USDB browser, empty and full, and its sign-in.
+    {
+        let mut screen = UsdbScreen::new();
+        screen.catalog_size = 2;
+        screen.set_rows(vec![UsdbRow {
+            id: rungstar_usdb::SongId(1),
+            artist: "Abba".into(),
+            title: "Waterloo".into(),
+            language: "English".into(),
+            year: Some(1974),
+            rating: 4.5,
+            golden: true,
+            local: Local::Absent,
+        }]);
+        screen.activity = Activity {
+            what: "fetching".into(),
+            fraction: Some(0.5),
+            queued: 1,
+        };
+        app.stack.push(Screen::Usdb(Box::new(screen)));
+        for step in [Input::Back, Input::Search, Input::Back, Input::CycleFilter] {
+            list.clear();
+            app.draw(list, area);
+            renderer
+                .render(list, app.style.background)
+                .map_err(|e| anyhow::anyhow!("usdb: {e}"))?;
+            if let Some(Screen::Usdb(screen)) = app.stack.last_mut() {
+                screen.handle(step);
+            }
+        }
+        println!("usdb        {} draw commands", list.len());
         app.stack.pop();
     }
 

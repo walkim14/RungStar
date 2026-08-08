@@ -59,6 +59,12 @@ impl MainMenu {
                 quit: false,
             },
             Entry {
+                label: "Get songs",
+                detail: "Browse USDB and download without leaving the game",
+                route: Some(Route::Usdb),
+                quit: false,
+            },
+            Entry {
                 label: "Jukebox",
                 detail: "Play songs back to back with nobody scoring",
                 route: Some(Route::Jukebox),

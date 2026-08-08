@@ -29,6 +29,9 @@ rungstar-library.workspace = true
 rungstar-ui.workspace = true
 rungstar-party.workspace = true
 rungstar-profile.workspace = true
+ureq = { version = "3", features = ["cookies", "gzip"] }
+rungstar-download.workspace = true
+rungstar-usdb.workspace = true
 rungstar-video.workspace = true
 rungstar-score.workspace = true
 sdl3 = { version = "0.18", features = ["unsafe_textures"] }

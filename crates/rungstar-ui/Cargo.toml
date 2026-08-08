@@ -12,6 +12,7 @@ authors.workspace = true
 rungstar-library.workspace = true
 rungstar-party.workspace = true
 rungstar-profile.workspace = true
+rungstar-usdb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
