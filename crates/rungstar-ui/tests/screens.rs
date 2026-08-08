@@ -1059,3 +1059,127 @@ fn a_narrowed_list_says_so() {
         "the filter is not shown: {text}"
     );
 }
+
+/// Put the cursor on the options row whose help begins with `prefix`.
+///
+/// By help text rather than by position, so adding a row above it does not silently move the
+/// test onto a different button.
+fn go_to_row(screen: &mut OptionsScreen, settings: &mut Settings, prefix: &str) {
+    for _ in 0..12 {
+        screen.handle(Input::Confirm, settings);
+        for _ in 0..40 {
+            if screen.help().starts_with(prefix) {
+                return;
+            }
+            screen.handle(Input::Down, settings);
+        }
+        screen.handle(Input::Back, settings);
+        screen.handle(Input::Down, settings);
+    }
+    panic!("no options row whose help starts with {prefix:?}");
+}
+
+const WIPE_HELP: &str = "Wipe every score";
+
+#[test]
+fn deleting_the_statistics_asks_before_doing_it() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    // The press that lands on the button opens the question and runs nothing.
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(screen.confirming());
+
+    // And the answer starts on Cancel, so a second reflex press still deletes nothing. This
+    // is the whole point: the accident is two Enters, not one.
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(!screen.confirming());
+}
+
+#[test]
+fn deleting_the_statistics_runs_once_the_delete_button_is_chosen() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    screen.handle(Input::Confirm, &mut settings);
+    screen.handle(Input::Right, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::Run(Action::WipeStatistics)
+    );
+    assert!(!screen.confirming(), "the question should close behind it");
+}
+
+#[test]
+fn backing_out_of_the_confirmation_deletes_nothing() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    screen.handle(Input::Confirm, &mut settings);
+    screen.handle(Input::Right, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Back, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(!screen.confirming());
+
+    // Reopening must not remember that Delete was the last thing under the cursor.
+    screen.handle(Input::Confirm, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None,
+        "the confirmation reopened with Delete selected"
+    );
+}
+
+#[test]
+fn the_confirmation_says_what_will_be_lost() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+    screen.handle(Input::Confirm, &mut settings);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &settings);
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    assert!(
+        text.iter().any(|t| t == "Delete every score?"),
+        "the question was not drawn: {text:?}"
+    );
+    assert!(text.iter().any(|t| t == "Cancel"));
+    assert!(text.iter().any(|t| t == "Delete"));
+    assert!(
+        text.iter().any(|t| t.contains("no undo")),
+        "the warning did not say it is permanent"
+    );
+    // Nothing from the page behind it, so there is no doubt about what a click will hit.
+    assert!(
+        !text.iter().any(|t| t.starts_with(WIPE_HELP)),
+        "the page was still drawn under the question"
+    );
+}
+
+#[test]
+fn resetting_everything_asks_too() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, "Put every setting back");
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(screen.confirming());
+    assert_eq!(settings, Settings::default(), "asking must change nothing");
+}

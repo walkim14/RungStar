@@ -288,8 +288,36 @@ fn the_buttons_a_page_offers_are_the_ones_a_screen_handles() {
         Action::ManageMicrophones,
         Action::RebindControls,
         Action::ImportUltrastar,
+        Action::WipeStatistics,
         Action::ResetToDefaults,
     ] {
         assert!(buttons.contains(&action), "{action:?} is on no page");
+    }
+}
+
+#[test]
+fn every_action_that_cannot_be_undone_asks_first() {
+    for action in [Action::WipeStatistics, Action::ResetToDefaults] {
+        let Some((question, detail)) = action.confirmation() else {
+            panic!("{action:?} destroys something and does not ask");
+        };
+        assert!(question.ends_with('?'), "{action:?}: {question:?}");
+        assert!(
+            detail.len() > 40,
+            "{action:?} asks without saying what is lost"
+        );
+    }
+    // And the ones that do not destroy anything must not: a confirmation on a harmless
+    // button trains people to press through them.
+    for action in [
+        Action::RescanLibrary,
+        Action::AddSongFolder,
+        Action::ManageMicrophones,
+        Action::ImportUltrastar,
+    ] {
+        assert!(
+            action.confirmation().is_none(),
+            "{action:?} asks and does not need to"
+        );
     }
 }

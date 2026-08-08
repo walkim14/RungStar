@@ -433,3 +433,57 @@ fn a_database_that_is_not_ultrastars_is_refused() {
         "the reason should name what was missing: {error}"
     );
 }
+
+#[test]
+fn wiping_the_scores_empties_the_statistics_and_keeps_the_players() {
+    let mut profiles = store();
+    let ada = profiles.ensure_player("Ada", NOW).unwrap().id;
+    let grace = profiles.ensure_player("Grace", NOW).unwrap().id;
+    profiles
+        .record(&score(ada, "Abba", "Waterloo", 8000))
+        .unwrap();
+    profiles
+        .record(&score(grace, "Abba", "Waterloo", 6000))
+        .unwrap();
+    profiles
+        .record(&score(ada, "Queen", "Radio Ga Ga", 9000))
+        .unwrap();
+
+    assert_eq!(profiles.clear_scores().unwrap(), 3);
+
+    for view in [
+        profiles.best_scores(Order::Best, 10).unwrap().len(),
+        profiles.best_singers(Order::Best, 10).unwrap().len(),
+        profiles.most_sung_songs(Order::Best, 10).unwrap().len(),
+        profiles.most_sung_artists(Order::Best, 10).unwrap().len(),
+    ] {
+        assert_eq!(view, 0, "a statistics view survived the wipe");
+    }
+
+    // The people are still here, with their names and their colours. Clearing a leaderboard
+    // before a party must not also make everybody re-enter their name.
+    let players = profiles.players().unwrap();
+    assert_eq!(players.len(), 2);
+    assert!(players.iter().any(|p| p.name == "Ada"));
+
+    // Repeatable, and honest about having found nothing the second time.
+    assert_eq!(profiles.clear_scores().unwrap(), 0);
+}
+
+#[test]
+fn singing_after_a_wipe_starts_the_history_again() {
+    let mut profiles = store();
+    let ada = profiles.ensure_player("Ada", NOW).unwrap().id;
+    profiles
+        .record(&score(ada, "Abba", "Waterloo", 8000))
+        .unwrap();
+    profiles.clear_scores().unwrap();
+    profiles
+        .record(&score(ada, "Abba", "Waterloo", 4000))
+        .unwrap();
+
+    let best = profiles.best_scores(Order::Best, 10).unwrap();
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].points, 4000, "the wiped score came back");
+    assert_eq!(profiles.history(ada, 10).unwrap().len(), 1);
+}

@@ -221,6 +221,11 @@ pub struct OptionsScreen {
     page_regions: Vec<Rect>,
     /// Item rows from the last frame, with the index each one shows.
     item_regions: Vec<(Rect, usize)>,
+    /// The destructive action waiting for a second press, and the two buttons offering it.
+    pending: Option<Action>,
+    /// Which of the two buttons is under the cursor. Starts on Cancel, every time.
+    confirm_accept: bool,
+    confirm_regions: Vec<(Rect, bool)>,
     pub gamepad: bool,
 }
 
@@ -241,6 +246,9 @@ impl OptionsScreen {
             on_page_list: true,
             page_regions: Vec::new(),
             item_regions: Vec::new(),
+            pending: None,
+            confirm_accept: false,
+            confirm_regions: Vec::new(),
             gamepad: false,
         }
     }
@@ -270,7 +278,15 @@ impl OptionsScreen {
         }
     }
 
+    /// Whether a confirmation is on screen, which changes what every key means.
+    pub fn confirming(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn handle(&mut self, input: Input, settings: &mut Settings) -> OptionsOutcome {
+        if self.pending.is_some() {
+            return self.handle_confirm(input);
+        }
         if let Input::Hover(point) | Input::Click(point) = input {
             let clicked = matches!(input, Input::Click(_));
             if let Some(index) = self.page_regions.iter().position(|r| r.contains(point)) {
@@ -327,6 +343,11 @@ impl OptionsScreen {
             Input::Confirm => {
                 let item = &self.pages[self.page_cursor.index()].items[self.item_cursor.index()];
                 if let Control::Button(action) = item.control {
+                    if action.confirmation().is_some() {
+                        self.pending = Some(action);
+                        self.confirm_accept = false;
+                        return OptionsOutcome::None;
+                    }
                     return OptionsOutcome::Run(action);
                 }
                 // Confirm on a choice steps it forward, so the row can be used without
@@ -340,11 +361,84 @@ impl OptionsScreen {
         OptionsOutcome::None
     }
 
+    /// While a confirmation is up it is the only thing that can be operated.
+    ///
+    /// Deliberately no default-yes: Confirm on a dialog nobody read is exactly the accident
+    /// the dialog exists to stop, so the destructive button has to be moved to.
+    fn handle_confirm(&mut self, input: Input) -> OptionsOutcome {
+        match input {
+            Input::Back | Input::ContextMenu => {
+                self.pending = None;
+                OptionsOutcome::None
+            }
+            Input::Left | Input::Right | Input::Up | Input::Down => {
+                self.confirm_accept = !self.confirm_accept;
+                OptionsOutcome::None
+            }
+            Input::Confirm | Input::Submit => {
+                let action = self.pending.take();
+                match (action, self.confirm_accept) {
+                    (Some(action), true) => OptionsOutcome::Run(action),
+                    _ => OptionsOutcome::None,
+                }
+            }
+            Input::Click(point) => {
+                let hit = self
+                    .confirm_regions
+                    .iter()
+                    .find(|(rect, _)| rect.contains(point))
+                    .map(|(_, accept)| *accept);
+                match hit {
+                    Some(true) => match self.pending.take() {
+                        Some(action) => OptionsOutcome::Run(action),
+                        None => OptionsOutcome::None,
+                    },
+                    Some(false) => {
+                        self.pending = None;
+                        OptionsOutcome::None
+                    }
+                    // A click outside the card is not an answer, so it is ignored rather than
+                    // guessed at.
+                    None => OptionsOutcome::None,
+                }
+            }
+            Input::Hover(point) => {
+                if let Some((_, accept)) = self
+                    .confirm_regions
+                    .iter()
+                    .find(|(rect, _)| rect.contains(point))
+                {
+                    self.confirm_accept = *accept;
+                }
+                OptionsOutcome::None
+            }
+            _ => OptionsOutcome::None,
+        }
+    }
+
     pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style, settings: &Settings) {
         self.page_regions.clear();
         self.item_regions.clear();
+        self.confirm_regions.clear();
         let widgets = Widgets::new(style);
         let body = widgets.header(list, area, "Options", "");
+        if let Some(action) = self.pending {
+            // Drawn instead of the page rather than over a live one: nothing behind it can be
+            // operated, and a scrimmed page that still responds to the mouse is a lie.
+            let hints: &[(&str, &str)] = if self.gamepad {
+                &[("LS", "Choose"), ("A", "Confirm"), ("B", "Cancel")]
+            } else {
+                &[
+                    ("\u{2190}\u{2192}", "Choose"),
+                    ("Enter", "Confirm"),
+                    ("Esc", "Cancel"),
+                ]
+            };
+            let body = widgets.footer(list, body, hints);
+            self.draw_confirm(list, body, style, action);
+            return;
+        }
+
         let hints: &[(&str, &str)] = match (self.on_page_list, self.gamepad) {
             (true, true) => &[("A", "Open"), ("B", "Back")],
             (true, false) => &[("Enter", "Open"), ("Esc", "Back")],
@@ -370,6 +464,71 @@ impl OptionsScreen {
         let (pages_area, items_area) = body.cut_left((body.w * 0.28).min(420.0));
         self.draw_pages(list, pages_area.inset(style.gap(1.5)), style);
         self.draw_items(list, items_area.inset(style.gap(1.5)), style, settings);
+    }
+
+    fn draw_confirm(&mut self, list: &mut DrawList, area: Rect, style: &Style, action: Action) {
+        let Some((title, detail)) = action.confirmation() else {
+            return;
+        };
+        let widgets = Widgets::new(style);
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.5).min(760.0),
+            style.gap(18.0),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(2.5));
+
+        let (heading, rest) = inner.cut_top(style.gap(4.0));
+        list.text(
+            heading,
+            title,
+            TextStyle::new(style.scaled_text(1.2), style.text)
+                .bold()
+                .centered(),
+        );
+        let (body, buttons) = rest.cut_bottom(style.gap(5.0));
+        list.text(
+            body,
+            detail,
+            TextStyle::new(style.text_size(), style.muted).centered(),
+        );
+
+        // Cancel on the left, the destructive one on the right, because that is the order
+        // every other dialog on both target platforms uses.
+        let gap = style.gap(1.5);
+        let width = (buttons.w - gap) / 2.0;
+        for (index, (label, accept)) in [("Cancel", false), ("Delete", true)].iter().enumerate() {
+            let rect = Rect::new(
+                buttons.x + (width + gap) * index as f32,
+                buttons.y + gap,
+                width,
+                buttons.h - gap * 2.0,
+            );
+            self.confirm_regions.push((rect, *accept));
+            let selected = self.confirm_accept == *accept;
+            let fill = match (selected, accept) {
+                (true, true) => style.danger,
+                (true, false) => style.accent,
+                (false, _) => style.surface,
+            };
+            list.panel(rect, fill, style.metrics.radius);
+            list.text(
+                rect,
+                *label,
+                TextStyle::new(
+                    style.text_size(),
+                    if selected {
+                        style.on_accent
+                    } else {
+                        style.text
+                    },
+                )
+                .centered()
+                .bold(),
+            );
+        }
     }
 
     fn draw_pages(&mut self, list: &mut DrawList, area: Rect, style: &Style) {

@@ -280,6 +280,17 @@ impl Profiles {
         Ok(())
     }
 
+    /// Delete every score, leaving the players themselves alone.
+    ///
+    /// Returns how many were deleted, because "wiped" and "there was nothing to wipe" are
+    /// different outcomes and a player who just lost a year of singing deserves the number.
+    ///
+    /// Players survive on purpose: clearing the leaderboard before a party is a normal thing
+    /// to want, and it should not also delete everybody's name and colour.
+    pub fn clear_scores(&mut self) -> Result<usize, ProfileError> {
+        Ok(self.connection.execute("DELETE FROM score", [])?)
+    }
+
     /// Record a finished song.
     pub fn record(&mut self, score: &Score) -> Result<(), ProfileError> {
         self.connection.execute(

@@ -40,6 +40,8 @@ pub enum PlayerOutcome {
     Remove(i64),
     /// Who is singing, in order. Empty means nobody has been chosen.
     Singers(Vec<i64>),
+    /// Start the song this screen was opened for.
+    Start,
 }
 
 /// What the screen is doing.
@@ -60,6 +62,14 @@ pub struct PlayerScreen {
     pub singers: Vec<i64>,
     /// How many microphones are assigned, which is how many can sing.
     pub microphones: usize,
+    /// The song this screen was opened to choose singers for.
+    ///
+    /// When set, the screen is a step on the way into a song rather than a place to manage
+    /// profiles, and it grows a Start row. Asking who is singing *before* the song is the
+    /// only moment the answer is worth anything — afterwards the score has nowhere to go.
+    pub for_song: Option<String>,
+    /// Whether that song is a duet, so the two parts can be named against the singers.
+    pub duet: Option<(String, String)>,
     pub gamepad: bool,
     cursor: usize,
     mode: Mode,
@@ -79,6 +89,8 @@ impl PlayerScreen {
             players: Vec::new(),
             singers: Vec::new(),
             microphones: 1,
+            for_song: None,
+            duet: None,
             gamepad: false,
             cursor: 0,
             mode: Mode::default(),
@@ -97,8 +109,13 @@ impl PlayerScreen {
         self.players.len()
     }
 
+    /// The Start row, when this screen is a step into a song.
+    fn start_row(&self) -> Option<usize> {
+        self.for_song.as_ref().map(|_| self.players.len() + 1)
+    }
+
     fn rows(&self) -> usize {
-        self.players.len() + 1
+        self.players.len() + 1 + usize::from(self.for_song.is_some())
     }
 
     /// Which singer number a profile is, if they are singing.
@@ -131,6 +148,11 @@ impl PlayerScreen {
                 }
             }
             Input::Confirm | Input::Submit => {
+                if Some(self.cursor) == self.start_row() {
+                    // Starting with nobody chosen is allowed: somebody may just want to sing
+                    // without a profile, and refusing would be the game arguing.
+                    return (Transition::None, PlayerOutcome::Start);
+                }
                 if self.cursor == self.add_row() {
                     self.keyboard = Keyboard::new().limit(24);
                     self.mode = Mode::Naming { renaming: false };
@@ -261,7 +283,11 @@ impl PlayerScreen {
             0 => format!("{} microphones", self.microphones),
             n => format!("{n} of {} singing", self.microphones.max(1)),
         };
-        let body = widgets.header(list, area, "Singers", &status);
+        let title = match &self.for_song {
+            Some(song) => song.as_str(),
+            None => "Singers",
+        };
+        let body = widgets.header(list, area, title, &status);
         let hints: &[(&str, &str)] = match (self.mode, self.gamepad) {
             (Mode::Naming { .. }, true) => &[("A", "Press key"), ("B", "Done")],
             (Mode::Naming { .. }, false) => &[("Enter", "Done"), ("Esc", "Cancel")],
@@ -301,6 +327,42 @@ impl PlayerScreen {
         .inset_xy(0.0, style.gap(0.3));
         self.regions.push((add, self.add_row()));
         widgets.row(list, add, "Add a singer", "", self.cursor == self.add_row());
+
+        if let Some(row) = self.start_row() {
+            let start = Rect::new(inner.x, inner.y + row_h * (row as f32), inner.w, row_h)
+                .inset_xy(0.0, style.gap(0.3));
+            self.regions.push((start, row));
+            let selected = self.cursor == row;
+            list.panel(
+                start,
+                if selected {
+                    style.accent
+                } else {
+                    style.surface
+                },
+                style.metrics.radius,
+            );
+            let label = match (&self.duet, self.singers.len()) {
+                (Some((one, two)), n) if n >= 2 => format!("Sing \u{2014} {one} and {two}"),
+                (Some(_), _) => "Sing \u{2014} a duet wants two singers".to_owned(),
+                (None, 0) => "Sing without a profile".to_owned(),
+                (None, _) => "Sing".to_owned(),
+            };
+            list.text(
+                start,
+                label,
+                TextStyle::new(
+                    style.text_size(),
+                    if selected {
+                        style.on_accent
+                    } else {
+                        style.text
+                    },
+                )
+                .centered()
+                .bold(),
+            );
+        }
 
         if self.players.is_empty() && self.mode == Mode::Browsing {
             let hint = Rect::new(

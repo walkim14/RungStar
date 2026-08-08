@@ -28,7 +28,30 @@ pub enum Action {
     RebindControls,
     /// Read an existing UltraStar Deluxe database, so a returning player keeps their history.
     ImportUltrastar,
+    /// Delete every score, leaving the players themselves.
+    WipeStatistics,
     ResetToDefaults,
+}
+
+impl Action {
+    /// What to ask before doing it, for the ones that cannot be undone.
+    ///
+    /// A button that destroys a year of scores sits two rows below one that rescans the
+    /// library, and the cursor passes over it on the way. Asking is the difference between a
+    /// misplaced Enter and a lost evening.
+    pub fn confirmation(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::WipeStatistics => Some((
+                "Delete every score?",
+                "All four statistics views go back to empty and every highscore is lost.                  Players, their names and their colours stay. There is no undo.",
+            )),
+            Self::ResetToDefaults => Some((
+                "Reset every setting?",
+                "Every option goes back to how it shipped, including your microphone                  assignment. Songs, players and scores are untouched.",
+            )),
+            _ => None,
+        }
+    }
 }
 
 /// How one item is edited.
@@ -574,6 +597,11 @@ impl Page {
                     label: "Controls",
                     help: "Rebind the keyboard and controller.",
                     control: Control::Button(Action::RebindControls),
+                },
+                Item {
+                    label: "Delete all statistics",
+                    help: "Wipe every score and highscore, so the statistics start again from                            nothing. Useful before a party you want a fresh leaderboard for.                            Players are kept; it asks first.",
+                    control: Control::Button(Action::WipeStatistics),
                 },
                 Item {
                     label: "Reset everything",

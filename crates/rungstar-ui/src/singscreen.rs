@@ -878,77 +878,113 @@ impl SingScreen {
 
         // What each singer sang, over the top and clipped to this line. It stays on screen
         // until the line turns, which is the point: you can look at what you just did.
-        //
-        // Where two singers hit the same note at the same moment, one bar is drawn in a
-        // shared colour rather than one on top of the other. Stacking meant the topmost
-        // singer's colour won, and since player two's is red it read as a miss — the picture
-        // saying the opposite of what happened.
-        struct Mark {
+        struct Span {
             start: f64,
             end: f64,
             pitch: i32,
             hit: bool,
-            singers: Vec<usize>,
+            singer: usize,
+            golden: bool,
         }
-        let mut marks: Vec<Mark> = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
         for (index, singer) in self.singers.iter().enumerate() {
-            for sung in &singer.sung {
-                let sung_end = sung.start + sung.duration;
+            let last = singer.sung.len().saturating_sub(1);
+            for (position, sung) in singer.sung.iter().enumerate() {
+                let mut sung_end = sung.start + sung.duration;
                 if sung_end < line.start || sung.start > line.end {
                     continue;
                 }
-                let pitch = match line.note_at(sung.start) {
-                    Some(target) if sung.hit => target.pitch,
-                    Some(target) => fold_to_octave(sung.pitch, target.pitch),
+                // The newest run is stretched to the playhead while the singer is still on
+                // the note. Scoring runs a microphone-delay behind the picture, so without
+                // this the bar trails the playhead by a fixed gap and grows a beat at a time
+                // — it looks like the game noticing late rather than hearing you now.
+                if position == last && singer.hitting == Some(true) && sung.hit {
+                    sung_end = sung_end.max(beat.min(line.end));
+                }
+                let target = line.note_at(sung.start);
+                let pitch = match target {
+                    Some(note) if sung.hit => note.pitch,
+                    Some(note) => fold_to_octave(sung.pitch, note.pitch),
                     None => sung.pitch,
                 };
-                match marks.iter_mut().find(|m| {
-                    m.pitch == pitch
-                        && m.hit == sung.hit
-                        && m.start < sung_end
-                        && sung.start < m.end
-                }) {
-                    Some(shared) => {
-                        shared.start = shared.start.min(sung.start);
-                        shared.end = shared.end.max(sung_end);
-                        if !shared.singers.contains(&index) {
-                            shared.singers.push(index);
-                        }
-                    }
-                    None => marks.push(Mark {
-                        start: sung.start,
-                        end: sung_end,
-                        pitch,
-                        hit: sung.hit,
-                        singers: vec![index],
-                    }),
-                }
+                spans.push(Span {
+                    start: sung.start.max(line.start),
+                    end: sung_end.min(line.end),
+                    pitch,
+                    hit: sung.hit,
+                    singer: index,
+                    golden: target.is_some_and(|note| note.kind.is_golden()),
+                });
             }
         }
 
-        for mark in &marks {
-            let x = x_of(mark.start.max(line.start));
-            let w = (x_of(mark.end.min(line.end)) - x).max(4.0);
-            let y = y_of(mark.pitch) + (row_h - note_h) / 2.0;
-            if mark.hit {
-                let colour = if mark.singers.len() > 1 {
-                    // Everybody on the note at once. The theme's own accent, so it belongs to
-                    // the interface rather than looking like a third singer wandered in.
-                    style.accent
+        // Split at every boundary and colour each slice by exactly who was singing during it.
+        // Merging on any overlap was the earlier version, and one stray beat from a second
+        // microphone recoloured a whole run as "both of you" — which is a lie told in the one
+        // place the display is supposed to be reporting fact.
+        let mut edges: Vec<f64> = spans.iter().flat_map(|s| [s.start, s.end]).collect();
+        edges.push(line.start);
+        edges.push(line.end);
+        edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        edges.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+
+        for pair in edges.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            if to - from < 0.01 {
+                continue;
+            }
+            let middle = (from + to) / 2.0;
+            // Every span covering this slice, which is who was singing in it.
+            let covering: Vec<&Span> = spans
+                .iter()
+                .filter(|s| s.start <= middle && middle < s.end)
+                .collect();
+            if covering.is_empty() {
+                continue;
+            }
+
+            // One slice per pitch, since two singers on different notes are two marks.
+            let mut pitches: Vec<i32> = covering.iter().map(|s| s.pitch).collect();
+            pitches.sort_unstable();
+            pitches.dedup();
+            for pitch in pitches {
+                let here: Vec<&&Span> = covering.iter().filter(|s| s.pitch == pitch).collect();
+                let hit = here.iter().any(|s| s.hit);
+                let mut singers: Vec<usize> = here
+                    .iter()
+                    .filter(|s| s.hit == hit)
+                    .map(|s| s.singer)
+                    .collect();
+                singers.sort_unstable();
+                singers.dedup();
+
+                let x = x_of(from);
+                let w = (x_of(to) - x).max(3.0);
+                let y = y_of(pitch) + (row_h - note_h) / 2.0;
+                if hit {
+                    let colour = if singers.len() > 1 {
+                        // Everybody on the note at once. The theme's own accent, so it belongs
+                        // to the interface rather than looking like a third singer.
+                        style.accent
+                    } else {
+                        style.player(singers.first().copied().unwrap_or(0))
+                    };
+                    let rect = Rect::new(x, y, w, note_h);
+                    list.panel(rect, colour, note_h / 2.0);
+                    // A golden note is worth double, and covering it with the hit hid the one
+                    // thing worth remembering about it afterwards.
+                    if here.iter().any(|s| s.golden) {
+                        list.outline(rect, style.warning, 2.0, note_h / 2.0);
+                    }
                 } else {
-                    style.player(mark.singers[0])
-                };
-                // A hit fills the bubble it landed in rather than sitting as a bar inside it,
-                // so the two read as one shape lighting up.
-                list.panel(Rect::new(x, y, w, note_h), colour, note_h / 2.0);
-            } else {
-                // A miss stays a thin mark at the pitch actually sung: it belongs to no
-                // bubble, and drawing it as one would claim it did.
-                list.panel(
-                    Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
-                    style.danger,
-                    note_h * 0.24,
-                );
+                    // A miss stays a thin mark at the pitch actually sung: it belongs to no
+                    // bubble, and drawing it as one would claim it did.
+                    list.panel(
+                        Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
+                        style.danger,
+                        note_h * 0.24,
+                    );
+                }
             }
         }
 

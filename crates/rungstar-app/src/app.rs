@@ -28,7 +28,7 @@ use rungstar_ui::micscreen::{MicOutcome, MicScreen};
 use rungstar_ui::options::Action;
 use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
-use rungstar_ui::settings::{ScreenMode, Settings, Switch};
+use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch};
 use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
@@ -100,6 +100,8 @@ struct App {
     status: String,
     /// A song the browser asked for, waiting for the frame loop to open the devices.
     pending_sing: Option<i64>,
+    /// The song the singer picker is open for, if it is open.
+    pending_pick: Option<i64>,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
@@ -240,6 +242,7 @@ impl App {
             data_dir,
             status: String::new(),
             pending_sing: None,
+            pending_pick: None,
             pending_mics: false,
             singing: None,
             dropped_video: None,
@@ -500,7 +503,7 @@ impl App {
             return;
         };
         match action {
-            SongAction::Sing => self.pending_sing = Some(id),
+            SongAction::Sing => self.request_sing(id),
             SongAction::SingFromChorus => {
                 self.pending_sing = Some(id);
                 self.status = "starting from the chorus is not wired up yet".to_owned();
@@ -626,6 +629,13 @@ impl App {
                 self.singers.retain(|s| *s != id);
             }
             PlayerOutcome::Singers(singers) => self.singers = singers,
+            PlayerOutcome::Start => {
+                if let Some(id) = self.pending_pick.take() {
+                    self.stack.pop();
+                    self.pending_sing = Some(id);
+                }
+                return;
+            }
         }
 
         // Taken out and put back, because refreshing needs the store and the screen at once.
@@ -949,6 +959,7 @@ impl App {
             Some(Screen::Sing(screen, session)) => {
                 let (transition, choice) = screen.handle(input);
                 let mut restart = false;
+                let mut record = false;
                 let forced = match choice {
                     Some(PauseChoice::Continue) => {
                         session.resume();
@@ -957,7 +968,18 @@ impl App {
                     // Giving up still earns what was already sung. Dropping straight back to
                     // the browser throws away a score somebody worked for, and a half-sung
                     // song is exactly when you most want to see the number.
-                    Some(PauseChoice::Quit) | Some(PauseChoice::SkipOutro) => {
+                    //
+                    // Skipping the outro *records* it, because the singing is finished and
+                    // only the instrumental is left — the score is the same one the song
+                    // would have ended with. Giving up does not: that is an abandoned song,
+                    // and a partial score in the highscore table is a lie about a whole one.
+                    Some(PauseChoice::SkipOutro) => {
+                        session.stop();
+                        screen.overlay = Overlay::Results;
+                        record = true;
+                        Transition::None
+                    }
+                    Some(PauseChoice::Quit) => {
                         session.stop();
                         screen.overlay = Overlay::Results;
                         Transition::None
@@ -976,6 +998,9 @@ impl App {
                         Transition::None
                     }
                 };
+                if record {
+                    self.record_finished_song();
+                }
                 if restart {
                     self.pending_sing = self.singing;
                 }
@@ -1034,6 +1059,11 @@ impl App {
                     self.settings.clamp();
                     self.save_settings();
                 }
+                if matches!(self.stack.last(), Some(Screen::Players(_))) {
+                    // Backing out of the picker is a change of mind about the song, not just
+                    // about the singers.
+                    self.pending_pick = None;
+                }
                 self.stack.pop();
                 if self.stack.is_empty() {
                     self.running = false;
@@ -1065,8 +1095,44 @@ impl App {
             },
             // Starting a song needs the audio subsystem, which the frame loop owns. It is
             // recorded here and acted on there.
-            Transition::Sing(id) => self.pending_sing = Some(id),
+            Transition::Sing(id) => self.request_sing(id),
         }
+    }
+
+    /// Ask who is singing, when there is anything to ask.
+    ///
+    /// One microphone and one profile leaves nothing to choose, and a screen offering no
+    /// choice is just a keypress in the way. Two microphones is the case that matters: the
+    /// scores have to land on the right people, and afterwards is too late to say who sang.
+    fn request_sing(&mut self, id: i64) {
+        let microphones = usize::from(self.settings.game.players.max(1));
+        let profiles = self.profiles.players().map(|p| p.len()).unwrap_or(0);
+        let duet = self
+            .library
+            .song(id)
+            .ok()
+            .flatten()
+            .is_some_and(|song| song.is_duet);
+        let always = self.settings.game.on_song_click == OnSongClick::SelectPlayers;
+        if profiles == 0 || !(always || microphones > 1 || duet) {
+            self.pending_sing = Some(id);
+            return;
+        }
+
+        let Ok(Some(entry)) = self.library.song(id) else {
+            self.pending_sing = Some(id);
+            return;
+        };
+        let mut screen = PlayerScreen::new();
+        screen.microphones = microphones;
+        screen.singers = self.singers.clone();
+        screen.for_song = Some(entry.display_name());
+        // A duet names its parts, so the two rows above the Start button say who is singing
+        // what rather than just how many are singing.
+        screen.duet = entry.is_duet.then(|| duet_parts(&entry.path));
+        self.refresh_players(&mut screen);
+        self.pending_pick = Some(id);
+        self.stack.push(Screen::Players(Box::new(screen)));
     }
 
     /// Start singing a song.
@@ -1112,11 +1178,20 @@ impl App {
             .filter(|_| self.settings.graphics.video_enabled == Switch::On)
             .and_then(|name| resolve_beside(&directory, name));
 
+        // How many sing is who is singing, when anybody has been chosen. Two microphones are
+        // assigned and one person turned up is an ordinary evening, and a second empty staff
+        // scoring zero is not a useful thing to show them.
+        let microphones = usize::from(self.settings.game.players.max(1));
+        let players = match self.singers.len() {
+            0 => microphones,
+            chosen => chosen.min(microphones),
+        };
+
         let session = session::Session::start(
             audio,
             &parsed.song,
             &audio_path,
-            self.settings.game.players as usize,
+            players,
             match self.settings.game.difficulty {
                 rungstar_ui::settings::Difficulty::Easy => rungstar_score::Difficulty::Easy,
                 rungstar_ui::settings::Difficulty::Medium => rungstar_score::Difficulty::Medium,
@@ -1194,6 +1269,12 @@ impl App {
                 self.status = "rebinding arrives with the input screen".to_owned()
             }
             Action::ImportUltrastar => self.import_ultrastar(),
+            Action::WipeStatistics => match self.profiles.clear_scores() {
+                Ok(0) => self.status = "there were no scores to delete".to_owned(),
+                Ok(1) => self.status = "deleted 1 score".to_owned(),
+                Ok(count) => self.status = format!("deleted {count} scores"),
+                Err(error) => self.status = error.to_string(),
+            },
         }
     }
 
@@ -1250,6 +1331,25 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The two part names of a duet, for the singer picker.
+///
+/// Read from the file rather than the index: the index records that a song *is* a duet but not
+/// what its parts are called, and the real names are worth a file read that happens once, at
+/// the moment somebody is deciding who sings which.
+fn duet_parts(path: &Path) -> (String, String) {
+    let parsed = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| rungstar_song::SongTxt::parse_bytes(&bytes).ok());
+    let Some(parsed) = parsed else {
+        return ("Part 1".to_owned(), "Part 2".to_owned());
+    };
+    let headers = &parsed.song.headers;
+    (
+        headers.p1.clone().unwrap_or_else(|| "Part 1".to_owned()),
+        headers.p2.clone().unwrap_or_else(|| "Part 2".to_owned()),
+    )
 }
 
 /// Find a file beside the song, tolerating a case mismatch in the header.
