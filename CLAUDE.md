@@ -338,5 +338,42 @@ with packaging.
   arriving at all, audio too quiet to clear the pitch gate, and audio that is fine but on the
   wrong note.
 
-Later phases in the plan: audio/graphics/input bring-up, library index, sing screen, song
-select and themes, profiles, game modes, USDB browser and downloads, editor, packaging.
+- **Phase 7 - profiles, statistics, filters**: done. `rungstar-profile` is players, per-song
+  highscores, the four statistics views and an importer for an existing `Ultrastar.db`. Plus
+  the singer picker, the browser's filter panel, and a statistics wipe.
+
+  **Who is singing is asked before the song, not after.** When more than one microphone is
+  assigned, or the song is a duet, starting a song opens the singer screen first. Afterwards
+  is too late: the score has nowhere to go. With exactly one profile and nobody chosen, that
+  profile is the singer - otherwise somebody who made a profile and never opened the screen
+  sings as "Player 1" and their score is discarded, which is indistinguishable from the
+  highscore table not working.
+
+  The panel count comes from `Session::players()` rather than from the microphone count. They
+  disagree the moment somebody picks fewer singers than there are microphones, and a panel
+  with no scorer behind it sits at zero for the whole song.
+
+  **The browser filters on what the index already held.** Genre, language, decade, edition,
+  folder and creator, values within a category OR and the categories AND. Values come from the
+  library, and counts are of the whole library rather than of the current results - a filter
+  list that empties itself as you use it cannot widen a search again. Decade is computed
+  rather than stored and is the one facet ordered newest first, because a decade list is a
+  timeline.
+
+  **The song list has ends.** It used to wrap, so the last song sat above the first, holding a
+  direction never arrived anywhere, and a library smaller than the view drew the same song
+  twice. The slots past either end are now empty, which is what says you have reached the end
+  rather than gone round again.
+
+  **Sung marks ease along a per-singer frontier.** Scoring lands a whole beat at a time and a
+  beat is a wide piece of a staff, so a mark drawn straight from the score steps across the
+  screen. Two things were tried and rejected first: extending the newest mark to the playhead
+  (hides the microphone delay, then lurches back when detection lands) and easing each run's
+  end separately (leaves the last few units to snap on when the next run starts). The ease is
+  in beats, not frames.
+
+  Skipping the outro records the song; giving up does not. The singing is finished when the
+  outro starts, so that score is a whole one; an abandoned song's is not.
+
+Later phases in the plan: game modes and party, USDB browser and downloads, editor,
+packaging, extras.
