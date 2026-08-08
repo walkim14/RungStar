@@ -22,6 +22,7 @@ pub mod singscreen;
 pub mod songselect;
 pub mod statsscreen;
 pub mod theme;
+pub mod usdbscreen;
 
 pub use browse::{Browser, Layout, Placement};
 pub use color::Color;

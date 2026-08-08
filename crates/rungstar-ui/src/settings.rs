@@ -240,9 +240,21 @@ pub struct Settings {
     pub lyrics: LyricSettings,
     pub appearance: AppearanceSettings,
     pub advanced: AdvancedSettings,
+    pub network: NetworkSettings,
     /// Keys this build did not recognise, kept so a downgrade does not discard them.
     #[serde(flatten)]
     pub unknown: toml::Table,
+}
+
+/// Anything to do with the outside world.
+///
+/// The USDB username lives here; the password does not, and will not. It goes to the OS
+/// keyring, because a settings file that quietly contains somebody's password is how it ends
+/// up in a backup, a screenshot and a bug report — and it is a password people reuse.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkSettings {
+    pub usdb_user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

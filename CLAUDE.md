@@ -410,4 +410,55 @@ with packaging.
   being sung, how did that go, who won - so one state machine serves both the party and the
   bracket.
 
-Later phases in the plan: USDB browser and downloads, editor, packaging, extras.
+- **Phase 9 - USDB and downloads**: done bar an account. `rungstar-usdb` is the protocol,
+  `rungstar-download` the pipeline, and the browser is a screen like any other.
+
+  **All the markup knowledge is in `parse.rs`.** USDB is a PHP site from 2008 with no API:
+  everything is `index.php` dispatched by a `link=` parameter, and when it changes that one
+  file breaks. Two facts about it drive everything else:
+
+  - **Errors arrive as HTML bodies with a 200 status.** A request for a song that does not
+    exist returns a perfectly ordinary 200 whose text says so, so every response is checked
+    before it is read. A client that trusts status codes reports an empty catalog.
+  - **The page language follows the account**, so labels are matched against a table detected
+    from the response rather than configured once.
+
+  The transport is a trait, so the whole protocol is tested against usdb_syncer's own saved
+  pages with no network and no credentials. Writing those tests found four things:
+
+  1. An ordinary song page carries "You are not logged in" **inside its comment box**. Treating
+     that as a refusal makes every song unreadable to anybody browsing signed out. Inside a
+     form it is a label; outside one it is the answer.
+  2. A song with no cover still gets an `<img>` pointing at a placeholder, so taking it at face
+     value files a picture of the words "no cover" as the artwork.
+  3. A video link copied from USDB itself is `watch?feature=player_detailpage&v=...`, and old
+     comments use the 2008 `/v/` embed. Requiring `watch?v=` misses both.
+  4. Folding accents before lower-casing means "Ö" never matches the "ö" arm, so "BJÖRK" stops
+     finding Björk.
+
+  **The download order is the feature.** Note file, then audio - at which point the song is
+  singable and moves into the library - then artwork, then video, which is ninety per cent of
+  the bytes. Everything lands in a temporary folder and moves in with one rename, so a
+  download killed halfway leaves nothing for the scanner to index: half a song in the library
+  is worse than none, because it indexes, opens, and somebody tries to sing it.
+
+  **Files are remembered by a blake3 of their contents**, not by filename plus mtime plus
+  source URL. Timestamps drift through cloud sync and the whole library looks changed; a hash
+  also catches an interrupted download, which leaves a file that exists, opens, and plays four
+  seconds of a song. That is what "repair library" checks. Folders with no sidecar are left
+  alone - repairing a song nobody downloaded means deciding what it should have been.
+
+  Rate limited with a token bucket and retried with jittered backoff. The reference sends about
+  a thousand sequential POSTs at one volunteer-run box with neither.
+
+  The USDB password goes to the **OS keyring**, never to `settings.toml`; only the username is
+  a setting. A stored password that stops working is deleted rather than retried silently on
+  every launch.
+
+  Deliberate divergence 12: **a missing optional resource does not fail the song.** The
+  reference refuses to deliver a singable song whose background art 404ed.
+
+  **What still needs the account**: the two requests that fetch a note file, and therefore any
+  real download. Everything above them is finished and tested.
+
+Later phases in the plan: editor, packaging, extras.

@@ -1,6 +1,6 @@
 [package]
-name = "rungstar-ui"
-description = "Theme, layout, widgets and screen state — no graphics API"
+name = "rungstar-download"
+description = "Fetching songs: note file, audio, video and artwork"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rungstar-library.workspace = true
-rungstar-party.workspace = true
-rungstar-profile.workspace = true
+rungstar-song.workspace = true
 rungstar-usdb.workspace = true
+blake3.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
