@@ -886,20 +886,16 @@ impl SingScreen {
             singer: usize,
             golden: bool,
         }
+        //
+        // Drawn where it was actually sung, and never stretched forward to meet the playhead.
+        // Extending it hides the microphone delay, but the bar then lurches as the detection
+        // catches up, which reads as jitter rather than as smoothness.
         let mut spans: Vec<Span> = Vec::new();
         for (index, singer) in self.singers.iter().enumerate() {
-            let last = singer.sung.len().saturating_sub(1);
-            for (position, sung) in singer.sung.iter().enumerate() {
-                let mut sung_end = sung.start + sung.duration;
+            for sung in &singer.sung {
+                let sung_end = sung.start + sung.duration;
                 if sung_end < line.start || sung.start > line.end {
                     continue;
-                }
-                // The newest run is stretched to the playhead while the singer is still on
-                // the note. Scoring runs a microphone-delay behind the picture, so without
-                // this the bar trails the playhead by a fixed gap and grows a beat at a time
-                // — it looks like the game noticing late rather than hearing you now.
-                if position == last && singer.hitting == Some(true) && sung.hit {
-                    sung_end = sung_end.max(beat.min(line.end));
                 }
                 let target = line.note_at(sung.start);
                 let pitch = match target {

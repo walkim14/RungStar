@@ -1575,3 +1575,43 @@ fn an_ordinary_song_is_not_split() {
         "a single part was squeezed into a duet's share: {top} to {bottom}"
     );
 }
+
+#[test]
+fn only_the_singers_the_screen_was_given_get_a_panel() {
+    // The panel count comes from the session, which counts scorers, not from the microphone
+    // assignment. Two microphones with one person singing is one panel; a second one would
+    // sit at zero for the whole song and look like a broken microphone.
+    for count in 1..=4 {
+        let mut screen = sing_screen(count);
+        assert_eq!(screen.singers.len(), count);
+        for (index, singer) in screen.singers.iter_mut().enumerate() {
+            singer.name = format!("Name{index}");
+        }
+        let list = draw(&mut screen, 0.0);
+        let text = strings(&list);
+        for index in 0..count {
+            assert!(
+                text.iter().any(|t| t == &format!("Name{index}")),
+                "singer {index} of {count} had no panel: {text:?}"
+            );
+        }
+        assert!(
+            !text.iter().any(|t| t.starts_with("Name") && t[4..].parse::<usize>().is_ok_and(|n| n >= count)),
+            "a panel was drawn for a singer that does not exist: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_panel_shows_the_profile_name_it_was_given() {
+    let mut screen = sing_screen(2);
+    screen.singers[0].name = "Walki".to_owned();
+    screen.singers[1].name = "Ada".to_owned();
+    let text = strings(&draw(&mut screen, 0.0));
+    assert!(text.iter().any(|t| t == "Walki"));
+    assert!(text.iter().any(|t| t == "Ada"));
+    assert!(
+        !text.iter().any(|t| t.starts_with("Player ")),
+        "a named singer was still labelled generically: {text:?}"
+    );
+}

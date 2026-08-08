@@ -1107,6 +1107,7 @@ impl App {
     fn request_sing(&mut self, id: i64) {
         let microphones = usize::from(self.settings.game.players.max(1));
         let profiles = self.profiles.players().map(|p| p.len()).unwrap_or(0);
+        self.assume_the_only_singer();
         let duet = self
             .library
             .song(id)
@@ -1135,12 +1136,30 @@ impl App {
         self.stack.push(Screen::Players(Box::new(screen)));
     }
 
+    /// With one profile and nobody chosen, the one profile is who is singing.
+    ///
+    /// Otherwise somebody who made a profile and never visited the singer screen sings as
+    /// "Player 1" and their score is thrown away at the end, which looks exactly like the
+    /// highscore table being broken. Two profiles is a real question and is left to be asked.
+    fn assume_the_only_singer(&mut self) {
+        if !self.singers.is_empty() {
+            return;
+        }
+        if let Ok(players) = self.profiles.players() {
+            if let [only] = players.as_slice() {
+                self.singers = vec![only.id];
+            }
+        }
+    }
+
     /// Start singing a song.
     ///
     /// Everything that touches a device lives in the session; the screen is pure and draws
     /// what it is handed. That is why this is a screen on the same stack as the browser
     /// rather than a second window.
     fn sing(&mut self, id: i64, audio: &sdl3::AudioSubsystem, capture: SdlCapture) {
+        // Also here, not only in the picker: a song can be started without passing through it.
+        self.assume_the_only_singer();
         let Ok(Some(entry)) = self.library.song(id) else {
             self.status = "that song is no longer in the library".to_owned();
             return;
@@ -1178,14 +1197,10 @@ impl App {
             .filter(|_| self.settings.graphics.video_enabled == Switch::On)
             .and_then(|name| resolve_beside(&directory, name));
 
-        // How many sing is who is singing, when anybody has been chosen. Two microphones are
-        // assigned and one person turned up is an ordinary evening, and a second empty staff
-        // scoring zero is not a useful thing to show them.
-        let microphones = usize::from(self.settings.game.players.max(1));
-        let players = match self.singers.len() {
-            0 => microphones,
-            chosen => chosen.min(microphones),
-        };
+        let players = singing_players(
+            self.singers.len(),
+            usize::from(self.settings.game.players.max(1)),
+        );
 
         let session = session::Session::start(
             audio,
@@ -1211,11 +1226,7 @@ impl App {
             }
         };
 
-        let mut screen = SingScreen::new(
-            &entry.artist,
-            &entry.title,
-            self.settings.game.players as usize,
-        );
+        let mut screen = SingScreen::new(&entry.artist, &entry.title, session.players());
         // Real names and their chosen colours, so the panels say who is who rather than
         // "Player 1". This is the whole reason profiles exist.
         for (index, singer) in screen.singers.iter_mut().enumerate() {
@@ -1331,6 +1342,19 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// How many people are being scored this song.
+///
+/// Who is singing, when anybody has been chosen. Two microphones assigned and one person who
+/// turned up is an ordinary evening, and a second panel scoring zero all the way through is
+/// not a useful thing to show them. Nobody chosen falls back to the microphone count, because
+/// singing without a profile has to keep working.
+fn singing_players(chosen: usize, microphones: usize) -> usize {
+    match chosen {
+        0 => microphones.max(1),
+        chosen => chosen.min(microphones.max(1)),
+    }
 }
 
 /// The two part names of a duet, for the singer picker.
@@ -1969,6 +1993,23 @@ const _: Option<Color> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_number_singing_follows_who_was_chosen() {
+        // Nobody chosen: everybody with a microphone sings, which is how it worked before
+        // profiles existed and has to keep working.
+        assert_eq!(singing_players(0, 2), 2);
+        assert_eq!(singing_players(0, 0), 1);
+
+        // One person chosen with two microphones assigned is one panel, not two. This is the
+        // case that showed up as a second player scoring zero for the whole song.
+        assert_eq!(singing_players(1, 2), 1);
+        assert_eq!(singing_players(2, 2), 2);
+
+        // And more chosen than there are microphones cannot conjure one: the extra singer
+        // would have nothing to sing into.
+        assert_eq!(singing_players(4, 2), 2);
+    }
 
     #[test]
     fn typing_keys_are_told_apart_from_command_keys() {
