@@ -591,8 +591,24 @@ impl OptionsScreen {
                     (style.text, style.muted)
                 };
                 let inner = row.inset_xy(style.gap(1.2), 0.0);
+                // The label and the value get their own columns. They used to be drawn into
+                // the same full-width box, one from each end, and an ellipsis only clips at
+                // the edge of the box it is given, so a long value -- a song folder path --
+                // ran back underneath the label instead of being cut off.
+                //
+                // A slider row keeps a narrower label column, because its bar starts further
+                // left than a plain value does and its labels are short.
+                let has_bar = item.fraction(settings).is_some();
+                let label_box = inner
+                    .cut_left(inner.w * if has_bar { 0.34 } else { 0.44 })
+                    .0;
                 list.text(
-                    inner,
+                    Rect::new(
+                        label_box.x,
+                        label_box.y,
+                        (label_box.w - style.gap(1.0)).max(0.0),
+                        label_box.h,
+                    ),
                     item.label,
                     TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
                 );
@@ -617,18 +633,24 @@ impl OptionsScreen {
                     }
                     None if item.is_button() => {
                         list.text(
-                            inner,
+                            inner.cut_left(inner.w * 0.44).1,
                             "\u{203a}",
                             TextStyle::new(style.text_size(), secondary).align(Align::End),
                         );
                     }
                     None => {
                         list.text(
-                            inner,
+                            inner.cut_left(inner.w * 0.44).1,
                             &value,
                             TextStyle::new(style.text_size(), text)
                                 .align(Align::End)
-                                .overflow(Overflow::Ellipsis),
+                                // A path is cut from the front: every folder on the machine
+                                // starts the same way, and the last one is the answer.
+                                .overflow(if item.is_text() {
+                                    Overflow::EllipsisStart
+                                } else {
+                                    Overflow::Ellipsis
+                                }),
                         );
                     }
                 }

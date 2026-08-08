@@ -77,9 +77,34 @@ impl<'a> Widgets<'a> {
     pub fn header(&self, list: &mut DrawList, area: Rect, title: &str, status: &str) -> Rect {
         let (bar, rest) = area.cut_top(self.style.gap(5.0));
         let inner = bar.inset_xy(self.style.gap(2.0), 0.0);
-        list.text(inner, title, self.heading(1.5));
+        // The title takes the room it needs and the status is cut off, not the other way
+        // round: which screen this is matters more than how many songs are on it. Sharing one
+        // box would let a long status run back under the title.
+        let (title_box, status_box) = if status.is_empty() {
+            (inner, inner)
+        } else {
+            let (left, right) = inner.cut_left(inner.w * 0.62);
+            (
+                Rect::new(
+                    left.x,
+                    left.y,
+                    (left.w - self.style.gap(1.0)).max(0.0),
+                    left.h,
+                ),
+                right,
+            )
+        };
+        list.text(
+            title_box,
+            title,
+            self.heading(1.5).overflow(Overflow::Ellipsis),
+        );
         if !status.is_empty() {
-            list.text(inner, status, self.muted().align(Align::End));
+            list.text(
+                status_box,
+                status,
+                self.muted().align(Align::End).overflow(Overflow::Ellipsis),
+            );
         }
         // A hairline rather than a filled bar: the header should separate, not compete.
         let line = Rect::new(inner.x, bar.bottom() - 1.5, inner.w, 1.5);
@@ -135,8 +160,25 @@ impl<'a> Widgets<'a> {
             self.style.text
         };
         let inner = rect.inset_xy(self.style.gap(1.2), 0.0);
+        // Two columns rather than two strings in one box. An ellipsis is applied at the edge
+        // of the rectangle it is given, so a label and a value sharing one rectangle overlap
+        // in the middle instead of either of them being cut off.
+        let (label_box, value_box) = if value.is_empty() {
+            (inner, inner)
+        } else {
+            let (left, right) = inner.cut_left(inner.w * 0.6);
+            (
+                Rect::new(
+                    left.x,
+                    left.y,
+                    (left.w - self.style.gap(1.0)).max(0.0),
+                    left.h,
+                ),
+                right,
+            )
+        };
         list.text(
-            inner,
+            label_box,
             label,
             TextStyle::new(self.style.text_size(), text_color).overflow(Overflow::Ellipsis),
         );
@@ -147,9 +189,11 @@ impl<'a> Widgets<'a> {
                 self.style.muted
             };
             list.text(
-                inner,
+                value_box,
                 value,
-                TextStyle::new(self.style.text_size(), value_color).align(Align::End),
+                TextStyle::new(self.style.text_size(), value_color)
+                    .align(Align::End)
+                    .overflow(Overflow::Ellipsis),
             );
         }
     }

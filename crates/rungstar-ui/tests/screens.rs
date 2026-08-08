@@ -1183,3 +1183,117 @@ fn resetting_everything_asks_too() {
     assert!(screen.confirming());
     assert_eq!(settings, Settings::default(), "asking must change nothing");
 }
+
+/// Fail if two strings on the same line are drawn into boxes that overlap.
+///
+/// A label and a value that share one rectangle look fine until one of them is long: the
+/// ellipsis is applied at the edge of the *box*, so neither is cut off and they collide in the
+/// middle. Boxes that do not overlap cannot do that, whatever the strings turn out to be.
+fn no_side_by_side_text_overlaps(list: &DrawList, what: &str) {
+    let texts: Vec<(String, Rect)> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Text { rect, text, .. } if !text.is_empty() => Some((text.clone(), *rect)),
+            _ => None,
+        })
+        .collect();
+
+    for (index, (a_text, a)) in texts.iter().enumerate() {
+        for (b_text, b) in texts.iter().skip(index + 1) {
+            let shared = (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0);
+            // Same line only: boxes that barely graze each other vertically are a caption
+            // under a label, which is the other test's business.
+            if shared < a.h.min(b.h) * 0.5 {
+                continue;
+            }
+            let across = (a.right().min(b.right()) - a.x.max(b.x)).max(0.0);
+            assert!(
+                across <= 1.0,
+                "{what}: {a_text:?} and {b_text:?} share {across:.0} units of the same line\n  \
+                 {a:?}\n  {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_long_value_is_cut_off_rather_than_drawn_under_its_label() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut settings = Settings::default();
+    // The real thing that showed this up: a song folder nested five deep.
+    settings.game.song_roots = vec![
+        "C:/Users/somebody/Projects/UltraStarPlaySongConverter/UltraStarPlaySongsToBeConverted"
+            .to_owned(),
+    ];
+
+    // Narrow as well as wide: the columns are fractions, so the tight case is the small one.
+    for (w, h) in [(1778.0, 1000.0), (1600.0, 1000.0), (1333.0, 1000.0)] {
+        let mut screen = OptionsScreen::new();
+        for page in 0..6 {
+            screen.handle(Input::Confirm, &mut settings);
+            for row in 0..30 {
+                let mut list = DrawList::new();
+                screen.draw(&mut list, Rect::new(0.0, 0.0, w, h), &style, &settings);
+                no_side_by_side_text_overlaps(&list, &format!("{w}x{h} page {page} row {row}"));
+                screen.handle(Input::Down, &mut settings);
+            }
+            screen.handle(Input::Back, &mut settings);
+            screen.handle(Input::Down, &mut settings);
+        }
+    }
+}
+
+#[test]
+fn a_long_song_title_is_cut_off_before_it_reaches_its_score() {
+    use rungstar_profile::stats::View;
+    use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
+
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let long = "Panic! At The Disco - There\u{2019}s A Good Reason These Tables Are Numbered                 Honey, You Just Haven\u{2019}t Thought Of It Yet";
+
+    for (w, h) in [(1778.0, 1000.0), (1333.0, 1000.0)] {
+        let mut screen = StatsScreen::new();
+        for _ in 0..View::ALL.len() {
+            screen.set_rows(
+                (0..12)
+                    .map(|i| StatRow {
+                        label: format!("{long} ({i})"),
+                        detail: "Somebody With A Long Name On A Long Evening".to_owned(),
+                        value: "10000".to_owned(),
+                    })
+                    .collect(),
+            );
+            let mut list = DrawList::new();
+            screen.draw(&mut list, Rect::new(0.0, 0.0, w, h), &style);
+            assert!(list.is_balanced());
+            no_side_by_side_text_overlaps(&list, &format!("statistics at {w}x{h}"));
+            screen.handle(Input::Right);
+        }
+    }
+}
+
+#[test]
+fn a_long_microphone_name_is_cut_off_before_its_value() {
+    use rungstar_ui::micscreen::{Device, MicScreen};
+
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = MicScreen::new();
+    screen.devices = vec![
+        Device {
+            name: "Realtek(R) Audio High Definition Microphone Array (Front Panel, Pink)"
+                .to_owned(),
+            assignment: vec![1, 2],
+            levels: vec![0.4, 0.2],
+            heard: vec![true, false],
+        };
+        3
+    ];
+    let mut list = DrawList::new();
+    screen.draw(&mut list, Rect::new(0.0, 0.0, 1333.0, 1000.0), &style);
+    assert!(list.is_balanced());
+    no_side_by_side_text_overlaps(&list, "microphones");
+}

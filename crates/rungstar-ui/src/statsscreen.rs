@@ -176,8 +176,10 @@ impl StatsScreen {
         let (heading, table) = inner.cut_top(style.gap(2.6));
         let (left, right) = self.view.columns();
         let label_style = TextStyle::new(style.scaled_text(0.75), style.muted);
-        list.text(heading, left, label_style.clone());
-        list.text(heading, right, label_style.align(Align::End));
+        // Split where the rows split, so each heading sits over its own column.
+        let (value_heading, label_heading) = heading.cut_right(heading.w * 0.22);
+        list.text(label_heading, left, label_style.clone());
+        list.text(value_heading, right, label_style.align(Align::End));
         list.fill(
             Rect::new(heading.x, heading.bottom() - 1.0, heading.w, 1.0),
             style.muted.alpha(0.2),
@@ -219,6 +221,9 @@ impl StatsScreen {
                     .bold(),
                 );
 
+                // The number keeps its own column, so a long song title is cut off before it
+                // reaches the score rather than being drawn underneath it.
+                let (value_box, rest) = rest.cut_right(rest.w * 0.22);
                 let (top, bottom) =
                     rest.cut_top(rest.h * (if row.detail.is_empty() { 1.0 } else { 0.58 }));
                 list.text(
@@ -242,7 +247,7 @@ impl StatsScreen {
                     );
                 }
                 list.text(
-                    cell,
+                    value_box,
                     &row.value,
                     TextStyle::new(style.text_size(), style.text).align(Align::End),
                 );

@@ -102,6 +102,11 @@ impl Item {
     }
 
     /// Whether left/right do anything, or whether this row is pressed instead.
+    /// Whether the value is free text rather than a choice or a number.
+    pub fn is_text(&self) -> bool {
+        matches!(self.control, Control::Text { .. })
+    }
+
     pub fn is_button(&self) -> bool {
         matches!(self.control, Control::Button(_))
     }

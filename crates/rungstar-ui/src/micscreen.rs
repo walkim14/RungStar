@@ -381,8 +381,16 @@ impl MicScreen {
         let inner = rect.inset_xy(style.gap(1.2), style.gap(0.4));
         let (top, bottom) = inner.cut_top(inner.h * 0.55);
 
+        // Device names are long and full of parentheses, so the name gets its own column and
+        // is cut off at the edge of it rather than running under the assignment.
+        let (name_box, assignment_box) = top.cut_left(top.w * 0.72);
         list.text(
-            top,
+            Rect::new(
+                name_box.x,
+                name_box.y,
+                (name_box.w - style.gap(1.0)).max(0.0),
+                name_box.h,
+            ),
             name,
             TextStyle::new(style.text_size(), style.text)
                 .valign(VAlign::Bottom)
@@ -394,7 +402,7 @@ impl MicScreen {
             format!("Player {player}")
         };
         list.text(
-            top,
+            assignment_box,
             assignment,
             TextStyle::new(style.text_size(), colour)
                 .align(Align::End)
