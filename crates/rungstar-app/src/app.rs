@@ -19,15 +19,19 @@ use rungstar_library::{
 use rungstar_platform::font::FontSet;
 use rungstar_platform::render::Renderer;
 use rungstar_platform::{Playback, SdlCapture};
+use rungstar_profile::stats::View;
+use rungstar_profile::{Profiles, Score};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::micscreen::{MicOutcome, MicScreen};
 use rungstar_ui::options::Action;
+use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
-use rungstar_ui::settings::{ScreenMode, Settings, Switch};
+use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch};
 use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
-use rungstar_ui::songselect::{Input, SongAction, SongSelect};
+use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
+use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
 use rungstar_ui::Color;
 
@@ -75,6 +79,8 @@ enum Screen {
     Sing(Box<SingScreen>, Box<session::Session>),
     /// Microphone setup, with capture running so the meters are live.
     Mics(Box<MicScreen>, Box<session::Monitor>),
+    Players(Box<PlayerScreen>),
+    Stats(Box<StatsScreen>),
     About,
 }
 
@@ -84,6 +90,9 @@ struct App {
     theme: Theme,
     style: Style,
     library: Database,
+    profiles: Profiles,
+    /// Who is singing, by profile id, in singer order.
+    singers: Vec<i64>,
     stack: Vec<Screen>,
     covers: CoverCache,
     data_dir: PathBuf,
@@ -91,6 +100,8 @@ struct App {
     status: String,
     /// A song the browser asked for, waiting for the frame loop to open the devices.
     pending_sing: Option<i64>,
+    /// The song the singer picker is open for, if it is open.
+    pending_pick: Option<i64>,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
@@ -215,17 +226,23 @@ impl App {
 
         std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
         let library = Database::open(data_dir.join("library.db")).context("opening the index")?;
+        // Its own file, because the index is a cache that can be rebuilt and this is not.
+        let profiles =
+            Profiles::open(data_dir.join("profiles.db")).context("opening the profiles")?;
 
         Ok(Self {
             settings,
             theme,
             style,
             library,
+            profiles,
+            singers: Vec::new(),
             stack: vec![Screen::Main(MainMenu::new())],
             covers: CoverCache::new(),
             data_dir,
             status: String::new(),
             pending_sing: None,
+            pending_pick: None,
             pending_mics: false,
             singing: None,
             dropped_video: None,
@@ -486,13 +503,34 @@ impl App {
             return;
         };
         match action {
-            SongAction::Sing => self.pending_sing = Some(id),
+            SongAction::Sing => self.request_sing(id),
             SongAction::SingFromChorus => {
                 self.pending_sing = Some(id);
                 self.status = "starting from the chorus is not wired up yet".to_owned();
             }
             SongAction::ToggleFavourite => {
-                self.status = "favourites arrive with player profiles".to_owned();
+                // A favourite belongs to somebody, so there has to be a somebody. Whoever is
+                // singing first, or the only profile if there is one.
+                let owner = self
+                    .singers
+                    .first()
+                    .copied()
+                    .or_else(|| self.profiles.players().ok()?.first().map(|p| p.id));
+                let Some(owner) = owner else {
+                    self.status =
+                        "add a singer first, so the favourite belongs to somebody".to_owned();
+                    return;
+                };
+                if let Ok(Some(song)) = self.library.song(id) {
+                    match self
+                        .profiles
+                        .toggle_favourite(owner, &song.artist, &song.title)
+                    {
+                        Ok(true) => self.status = format!("favourited {}", song.display_name()),
+                        Ok(false) => self.status = format!("unfavourited {}", song.display_name()),
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
             }
             SongAction::ShowDetails => {
                 if let Ok(Some(song)) = self.library.song(id) {
@@ -536,7 +574,225 @@ impl App {
 
     /// Whether the screen on top is editing text.
     fn wants_text(&self) -> bool {
-        matches!(self.stack.last(), Some(Screen::Songs(songs)) if songs.wants_text())
+        match self.stack.last() {
+            Some(Screen::Songs(songs)) => songs.wants_text(),
+            Some(Screen::Players(screen)) => screen.wants_text(),
+            _ => false,
+        }
+    }
+
+    /// Reload the player list, with each profile's own history beside their name.
+    fn refresh_players(&self, screen: &mut PlayerScreen) {
+        let Ok(players) = self.profiles.players() else {
+            return;
+        };
+        screen.players = players
+            .into_iter()
+            .map(|player| {
+                // A profile is worth having because it remembers; showing what it remembers is
+                // what makes that visible rather than a claim.
+                let history = self.profiles.history(player.id, 1_000).unwrap_or_default();
+                Entry {
+                    id: player.id,
+                    name: player.name,
+                    colour: player.colour,
+                    songs: history.len() as i64,
+                    best: history.iter().map(|s| s.points).max().unwrap_or(0),
+                }
+            })
+            .collect();
+        // A profile that no longer exists cannot be singing.
+        let present: Vec<i64> = screen.players.iter().map(|p| p.id).collect();
+        screen.singers.retain(|id| present.contains(id));
+    }
+
+    /// Carry out what the player screen asked for.
+    fn apply_player_outcome(&mut self, outcome: PlayerOutcome) {
+        let now = unix_now();
+        match outcome {
+            PlayerOutcome::None => return,
+            PlayerOutcome::Add(name) => {
+                if let Err(error) = self.profiles.ensure_player(&name, now) {
+                    self.status = error.to_string();
+                }
+            }
+            PlayerOutcome::Rename(id, name) => {
+                if let Err(error) = self.profiles.rename_player(id, &name) {
+                    self.status = error.to_string();
+                }
+            }
+            PlayerOutcome::Recolour(id, colour) => {
+                let _ = self.profiles.set_colour(id, colour);
+            }
+            PlayerOutcome::Remove(id) => {
+                let _ = self.profiles.remove_player(id);
+                self.singers.retain(|s| *s != id);
+            }
+            PlayerOutcome::Singers(singers) => self.singers = singers,
+            PlayerOutcome::Start => {
+                if let Some(id) = self.pending_pick.take() {
+                    self.stack.pop();
+                    self.pending_sing = Some(id);
+                }
+                return;
+            }
+        }
+
+        // Taken out and put back, because refreshing needs the store and the screen at once.
+        if let Some(Screen::Players(screen)) = self.stack.last_mut() {
+            let mut taken = std::mem::take(screen);
+            self.refresh_players(&mut taken);
+            self.singers.clone_from(&taken.singers);
+            if let Some(Screen::Players(slot)) = self.stack.last_mut() {
+                *slot = taken;
+            }
+        }
+    }
+
+    /// Fill the statistics screen for whichever view it is showing.
+    fn refresh_stats(&mut self) {
+        let Some(Screen::Stats(screen)) = self.stack.last() else {
+            return;
+        };
+        if !screen.needs_rows() {
+            return;
+        }
+        let (view, order) = (screen.view, screen.order);
+        const LIMIT: usize = 200;
+        let rows: Vec<StatRow> = match view {
+            View::Scores => self
+                .profiles
+                .best_scores(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: format!("{} \u{2013} {}", e.artist, e.title),
+                    detail: e.player,
+                    value: e.points.to_string(),
+                })
+                .collect(),
+            View::Singers => self
+                .profiles
+                .best_singers(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: e.name,
+                    detail: format!("{} songs, best {}", e.songs, e.best),
+                    value: e.average.to_string(),
+                })
+                .collect(),
+            View::Songs => self
+                .profiles
+                .most_sung_songs(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: format!("{} \u{2013} {}", e.artist, e.title),
+                    detail: format!("best {}", e.best),
+                    value: e.times.to_string(),
+                })
+                .collect(),
+            View::Artists => self
+                .profiles
+                .most_sung_artists(order, LIMIT)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| StatRow {
+                    label: e.artist,
+                    detail: String::new(),
+                    value: e.times.to_string(),
+                })
+                .collect(),
+        };
+        if let Some(Screen::Stats(screen)) = self.stack.last_mut() {
+            screen.set_rows(rows);
+        }
+    }
+
+    /// Write down the song that has just ended, if there is one on top.
+    fn record_finished_song(&mut self) {
+        let Some(Screen::Sing(screen, _)) = self.stack.last() else {
+            return;
+        };
+        // Cloned so the store can be borrowed mutably; a handful of singers, once a song.
+        let artist = screen.artist.clone();
+        let title = screen.title.clone();
+        let scores: Vec<i32> = screen.singers.iter().map(|s| s.score).collect();
+        self.record_scores(&artist, &title, &scores);
+    }
+
+    /// Write down what everybody scored, once a song is over.
+    ///
+    /// Only for singers who have a profile: an unnamed player's score has nowhere to go and
+    /// recording it under a placeholder is how UltraStar's tables end up full of "Player 1".
+    fn record_scores(&mut self, artist: &str, title: &str, scores: &[i32]) {
+        let now = unix_now();
+        for (index, points) in scores.iter().enumerate() {
+            let Some(player_id) = self.singers.get(index).copied() else {
+                continue;
+            };
+            let score = Score {
+                player_id,
+                artist: artist.to_owned(),
+                title: title.to_owned(),
+                difficulty: match self.settings.game.difficulty {
+                    rungstar_ui::settings::Difficulty::Easy => 0,
+                    rungstar_ui::settings::Difficulty::Medium => 1,
+                    rungstar_ui::settings::Difficulty::Hard => 2,
+                },
+                points: *points,
+                notes: 0,
+                golden: 0,
+                line_bonus: 0,
+                sung_at: now,
+            };
+            if let Err(error) = self.profiles.record(&score) {
+                tracing::warn!("score not saved: {error}");
+            }
+        }
+    }
+
+    /// Read an existing UltraStar database, from wherever it usually lives.
+    fn import_ultrastar(&mut self) {
+        let found = rungstar_profile::import::likely_ultrastar_paths()
+            .into_iter()
+            .find(|path| path.is_file());
+        let Some(path) = found else {
+            self.status = "no UltraStar database found in the usual places".to_owned();
+            return;
+        };
+        match rungstar_profile::import_ultrastar(&mut self.profiles, &path, unix_now()) {
+            Ok(report) => self.status = report.summary(),
+            Err(error) => self.status = format!("import failed: {error}"),
+        }
+    }
+
+    /// Keep the browser's highscore panel in step with the cursor.
+    fn refresh_highscores(&mut self) {
+        let wanted = match self.stack.last() {
+            Some(Screen::Songs(songs)) => songs
+                .selected()
+                .map(|song| (song.artist.clone(), song.title.clone())),
+            _ => None,
+        };
+        let Some((artist, title)) = wanted else {
+            return;
+        };
+        let scores = self.highscores(&artist, &title);
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.highscores = scores;
+        }
+    }
+
+    /// The song's table, for the browser to show beside it.
+    fn highscores(&self, artist: &str, title: &str) -> Vec<(String, i32)> {
+        self.profiles
+            .best_for(artist, title, None, 5)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.player, entry.points))
+            .collect()
     }
 
     /// Whether a scan is running, for the screens that say so.
@@ -589,6 +845,33 @@ impl App {
         let preview_volume = self.preview_volume();
         if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
             playback.set_volume(preview_volume);
+        }
+    }
+
+    /// Fill the browser's filter lists from the index.
+    ///
+    /// Once, and again after a scan. Seven `GROUP BY` queries over eight thousand rows is a
+    /// few milliseconds, and doing it when the panel opens instead would put that on the
+    /// keypress that opens it.
+    fn refresh_facets(&mut self) {
+        let Some(Screen::Songs(songs)) = self.stack.last() else {
+            return;
+        };
+        if !songs.needs_facets() {
+            return;
+        }
+        let mut values = FacetValues::new();
+        for facet in Facet::ALL {
+            let Some(column) = facet.column() else {
+                continue;
+            };
+            match self.library.facet(column) {
+                Ok(found) => values.set(facet, found),
+                Err(error) => tracing::warn!("could not list {column}: {error}"),
+            }
+        }
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.set_facets(values);
         }
     }
 
@@ -666,6 +949,8 @@ impl App {
             Some(Screen::Options(options)) => options.gamepad = gamepad,
             Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
+            Some(Screen::Players(screen)) => screen.gamepad = gamepad,
+            Some(Screen::Stats(screen)) => screen.gamepad = gamepad,
             _ => {}
         }
     }
@@ -701,6 +986,7 @@ impl App {
             Some(Screen::Sing(screen, session)) => {
                 let (transition, choice) = screen.handle(input);
                 let mut restart = false;
+                let mut record = false;
                 let forced = match choice {
                     Some(PauseChoice::Continue) => {
                         session.resume();
@@ -709,7 +995,18 @@ impl App {
                     // Giving up still earns what was already sung. Dropping straight back to
                     // the browser throws away a score somebody worked for, and a half-sung
                     // song is exactly when you most want to see the number.
-                    Some(PauseChoice::Quit) | Some(PauseChoice::SkipOutro) => {
+                    //
+                    // Skipping the outro *records* it, because the singing is finished and
+                    // only the instrumental is left — the score is the same one the song
+                    // would have ended with. Giving up does not: that is an abandoned song,
+                    // and a partial score in the highscore table is a lie about a whole one.
+                    Some(PauseChoice::SkipOutro) => {
+                        session.stop();
+                        screen.overlay = Overlay::Results;
+                        record = true;
+                        Transition::None
+                    }
+                    Some(PauseChoice::Quit) => {
                         session.stop();
                         screen.overlay = Overlay::Results;
                         Transition::None
@@ -728,6 +1025,9 @@ impl App {
                         Transition::None
                     }
                 };
+                if record {
+                    self.record_finished_song();
+                }
                 if restart {
                     self.pending_sing = self.singing;
                 }
@@ -749,6 +1049,12 @@ impl App {
                 }
                 transition
             }
+            Some(Screen::Players(screen)) => {
+                let (transition, outcome) = screen.handle(input);
+                self.apply_player_outcome(outcome);
+                transition
+            }
+            Some(Screen::Stats(screen)) => screen.handle(input),
             Some(Screen::About) => match input {
                 Input::Back | Input::Confirm => Transition::Pop,
                 _ => Transition::None,
@@ -780,6 +1086,11 @@ impl App {
                     self.settings.clamp();
                     self.save_settings();
                 }
+                if matches!(self.stack.last(), Some(Screen::Players(_))) {
+                    // Backing out of the picker is a change of mind about the song, not just
+                    // about the singers.
+                    self.pending_pick = None;
+                }
                 self.stack.pop();
                 if self.stack.is_empty() {
                     self.running = false;
@@ -798,12 +1109,73 @@ impl App {
                 Route::Options | Route::OptionsPage(_) => self
                     .stack
                     .push(Screen::Options(Box::new(OptionsScreen::new()))),
+                Route::Players => {
+                    let mut screen = PlayerScreen::new();
+                    screen.microphones = self.settings.game.players as usize;
+                    screen.singers = self.singers.clone();
+                    self.refresh_players(&mut screen);
+                    self.stack.push(Screen::Players(Box::new(screen)));
+                }
+                Route::Stats => self.stack.push(Screen::Stats(Box::new(StatsScreen::new()))),
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
             },
             // Starting a song needs the audio subsystem, which the frame loop owns. It is
             // recorded here and acted on there.
-            Transition::Sing(id) => self.pending_sing = Some(id),
+            Transition::Sing(id) => self.request_sing(id),
+        }
+    }
+
+    /// Ask who is singing, when there is anything to ask.
+    ///
+    /// One microphone and one profile leaves nothing to choose, and a screen offering no
+    /// choice is just a keypress in the way. Two microphones is the case that matters: the
+    /// scores have to land on the right people, and afterwards is too late to say who sang.
+    fn request_sing(&mut self, id: i64) {
+        let microphones = usize::from(self.settings.game.players.max(1));
+        let profiles = self.profiles.players().map(|p| p.len()).unwrap_or(0);
+        self.assume_the_only_singer();
+        let duet = self
+            .library
+            .song(id)
+            .ok()
+            .flatten()
+            .is_some_and(|song| song.is_duet);
+        let always = self.settings.game.on_song_click == OnSongClick::SelectPlayers;
+        if profiles == 0 || !(always || microphones > 1 || duet) {
+            self.pending_sing = Some(id);
+            return;
+        }
+
+        let Ok(Some(entry)) = self.library.song(id) else {
+            self.pending_sing = Some(id);
+            return;
+        };
+        let mut screen = PlayerScreen::new();
+        screen.microphones = microphones;
+        screen.singers = self.singers.clone();
+        screen.for_song = Some(entry.display_name());
+        // A duet names its parts, so the two rows above the Start button say who is singing
+        // what rather than just how many are singing.
+        screen.duet = entry.is_duet.then(|| duet_parts(&entry.path));
+        self.refresh_players(&mut screen);
+        self.pending_pick = Some(id);
+        self.stack.push(Screen::Players(Box::new(screen)));
+    }
+
+    /// With one profile and nobody chosen, the one profile is who is singing.
+    ///
+    /// Otherwise somebody who made a profile and never visited the singer screen sings as
+    /// "Player 1" and their score is thrown away at the end, which looks exactly like the
+    /// highscore table being broken. Two profiles is a real question and is left to be asked.
+    fn assume_the_only_singer(&mut self) {
+        if !self.singers.is_empty() {
+            return;
+        }
+        if let Ok(players) = self.profiles.players() {
+            if let [only] = players.as_slice() {
+                self.singers = vec![only.id];
+            }
         }
     }
 
@@ -813,6 +1185,8 @@ impl App {
     /// what it is handed. That is why this is a screen on the same stack as the browser
     /// rather than a second window.
     fn sing(&mut self, id: i64, audio: &sdl3::AudioSubsystem, capture: SdlCapture) {
+        // Also here, not only in the picker: a song can be started without passing through it.
+        self.assume_the_only_singer();
         let Ok(Some(entry)) = self.library.song(id) else {
             self.status = "that song is no longer in the library".to_owned();
             return;
@@ -850,11 +1224,16 @@ impl App {
             .filter(|_| self.settings.graphics.video_enabled == Switch::On)
             .and_then(|name| resolve_beside(&directory, name));
 
+        let players = singing_players(
+            self.singers.len(),
+            usize::from(self.settings.game.players.max(1)),
+        );
+
         let session = session::Session::start(
             audio,
             &parsed.song,
             &audio_path,
-            self.settings.game.players as usize,
+            players,
             match self.settings.game.difficulty {
                 rungstar_ui::settings::Difficulty::Easy => rungstar_score::Difficulty::Easy,
                 rungstar_ui::settings::Difficulty::Medium => rungstar_score::Difficulty::Medium,
@@ -874,11 +1253,18 @@ impl App {
             }
         };
 
-        let mut screen = SingScreen::new(
-            &entry.artist,
-            &entry.title,
-            self.settings.game.players as usize,
-        );
+        let mut screen = SingScreen::new(&entry.artist, &entry.title, session.players());
+        // Real names and their chosen colours, so the panels say who is who rather than
+        // "Player 1". This is the whole reason profiles exist.
+        for (index, singer) in screen.singers.iter_mut().enumerate() {
+            if let Some(profile) = self
+                .singers
+                .get(index)
+                .and_then(|id| self.profiles.player(*id).ok().flatten())
+            {
+                singer.name = profile.name;
+            }
+        }
         screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
         screen.effect = self.settings.lyrics.effect;
         screen.duration = session.duration();
@@ -920,6 +1306,13 @@ impl App {
             Action::RebindControls => {
                 self.status = "rebinding arrives with the input screen".to_owned()
             }
+            Action::ImportUltrastar => self.import_ultrastar(),
+            Action::WipeStatistics => match self.profiles.clear_scores() {
+                Ok(0) => self.status = "there were no scores to delete".to_owned(),
+                Ok(1) => self.status = "deleted 1 score".to_owned(),
+                Ok(count) => self.status = format!("deleted {count} scores"),
+                Err(error) => self.status = error.to_string(),
+            },
         }
     }
 
@@ -962,10 +1355,52 @@ impl App {
                 screen.draw(list, area, &self.style, &parts, beat);
             }
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
+            Some(Screen::Players(screen)) => screen.draw(list, area, &self.style),
+            Some(Screen::Stats(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
         }
     }
+}
+
+/// Seconds since the epoch, for anything that records when it happened.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// How many people are being scored this song.
+///
+/// Who is singing, when anybody has been chosen. Two microphones assigned and one person who
+/// turned up is an ordinary evening, and a second panel scoring zero all the way through is
+/// not a useful thing to show them. Nobody chosen falls back to the microphone count, because
+/// singing without a profile has to keep working.
+fn singing_players(chosen: usize, microphones: usize) -> usize {
+    match chosen {
+        0 => microphones.max(1),
+        chosen => chosen.min(microphones.max(1)),
+    }
+}
+
+/// The two part names of a duet, for the singer picker.
+///
+/// Read from the file rather than the index: the index records that a song *is* a duet but not
+/// what its parts are called, and the real names are worth a file read that happens once, at
+/// the moment somebody is deciding who sings which.
+fn duet_parts(path: &Path) -> (String, String) {
+    let parsed = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| rungstar_song::SongTxt::parse_bytes(&bytes).ok());
+    let Some(parsed) = parsed else {
+        return ("Part 1".to_owned(), "Part 2".to_owned());
+    };
+    let headers = &parsed.song.headers;
+    (
+        headers.p1.clone().unwrap_or_else(|| "Part 1".to_owned()),
+        headers.p2.clone().unwrap_or_else(|| "Part 2".to_owned()),
+    )
 }
 
 /// Find a file beside the song, tolerating a case mismatch in the header.
@@ -1276,9 +1711,13 @@ fn main() -> Result<()> {
             songs.scanning = scanning;
         }
         app.handle_song_menu();
+        app.refresh_stats();
+        app.refresh_facets();
         app.refresh_songs();
+        app.refresh_highscores();
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
+        let mut finished_song = false;
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
                 songs.tick(dt);
@@ -1321,6 +1760,8 @@ fn main() -> Result<()> {
                     // screen offers to skip the rest of the instrumental.
                     screen.outro = session.past_last_note();
                     if session.is_finished() && screen.overlay != Overlay::Results {
+                        // Recorded outside the borrow, since writing needs the whole app.
+                        finished_song = true;
                         // The scores go up rather than the screen closing: in a party the
                         // result is the point, and popping straight back to the browser
                         // throws it away before anybody has read it.
@@ -1330,6 +1771,10 @@ fn main() -> Result<()> {
                 }
             }
             _ => {}
+        }
+
+        if finished_song {
+            app.record_finished_song();
         }
 
         list.clear();
@@ -1400,7 +1845,10 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
     ];
     for (name, screen) in screens {
         app.stack.push(screen);
+        app.refresh_stats();
+        app.refresh_facets();
         app.refresh_songs();
+        app.refresh_highscores();
         list.clear();
         app.draw(list, area);
         if !list.is_balanced() {
@@ -1411,6 +1859,54 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
             .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         println!("{name:<12}{} draw commands", list.len());
         app.stack.pop();
+    }
+
+    // The two profile screens, with a profile and a table so the layouts are exercised rather
+    // than only their empty states.
+    {
+        let mut screen = PlayerScreen::new();
+        screen.microphones = 2;
+        screen.players = vec![
+            Entry {
+                id: 1,
+                name: "Walki".into(),
+                colour: 0,
+                songs: 12,
+                best: 8800,
+            },
+            Entry {
+                id: 2,
+                name: "Anna".into(),
+                colour: 1,
+                songs: 3,
+                best: 9100,
+            },
+        ];
+        screen.singers = vec![1];
+        list.clear();
+        screen.draw(list, area, &app.style);
+        renderer
+            .render(list, app.style.background)
+            .map_err(|e| anyhow::anyhow!("players: {e}"))?;
+        println!("players     {} draw commands", list.len());
+    }
+    {
+        let mut screen = StatsScreen::new();
+        screen.set_rows(
+            (0..6)
+                .map(|i| StatRow {
+                    label: format!("Artist {i} \u{2013} Song {i}"),
+                    detail: "Walki".into(),
+                    value: (9000 - i * 100).to_string(),
+                })
+                .collect(),
+        );
+        list.clear();
+        screen.draw(list, area, &app.style);
+        renderer
+            .render(list, app.style.background)
+            .map_err(|e| anyhow::anyhow!("stats: {e}"))?;
+        println!("statistics  {} draw commands", list.len());
     }
 
     // The microphone screen, with a device that has never produced a sample -- the state a
@@ -1504,9 +2000,20 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         println!("sing        {} draw commands, 6 singers", list.len());
     }
 
-    // And the two browser overlays, which have their own layout maths.
+    // And the browser overlays, which have their own layout maths.
     app.stack.push(Screen::Songs(Box::new(SongSelect::new())));
-    for overlay in [Input::Search, Input::Search, Input::Sort] {
+    app.refresh_facets();
+    for overlay in [
+        Input::Search,
+        Input::Search,
+        Input::Sort,
+        Input::Sort,
+        Input::CycleFilter,
+        // Into the value column, so the panel is drawn with a real list of genres behind it
+        // rather than only its categories.
+        Input::Right,
+        Input::Down,
+    ] {
         app.handle(overlay, area);
         list.clear();
         app.draw(list, area);
@@ -1526,6 +2033,23 @@ const _: Option<Color> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_number_singing_follows_who_was_chosen() {
+        // Nobody chosen: everybody with a microphone sings, which is how it worked before
+        // profiles existed and has to keep working.
+        assert_eq!(singing_players(0, 2), 2);
+        assert_eq!(singing_players(0, 0), 1);
+
+        // One person chosen with two microphones assigned is one panel, not two. This is the
+        // case that showed up as a second player scoring zero for the whole song.
+        assert_eq!(singing_players(1, 2), 1);
+        assert_eq!(singing_players(2, 2), 2);
+
+        // And more chosen than there are microphones cannot conjure one: the extra singer
+        // would have nothing to sing into.
+        assert_eq!(singing_players(4, 2), 2);
+    }
 
     #[test]
     fn typing_keys_are_told_apart_from_command_keys() {

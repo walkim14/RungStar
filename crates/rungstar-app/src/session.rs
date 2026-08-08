@@ -478,6 +478,15 @@ impl Session {
         &self.singer_part
     }
 
+    /// How many people this session is scoring.
+    ///
+    /// The screen takes its panel count from here rather than from the settings, because the
+    /// two disagree the moment somebody picks fewer singers than there are microphones, and a
+    /// panel with no scorer behind it sits at zero for the whole song.
+    pub fn players(&self) -> usize {
+        self.scorers.len()
+    }
+
     /// The notes of the line being sung, and the beats it spans.
     pub fn current_line(&self, part: usize, beat: f64) -> NoteLine {
         let Some(index) = self.line_at(part, beat) else {

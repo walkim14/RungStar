@@ -26,7 +26,32 @@ pub enum Action {
     AddSongFolder,
     ManageMicrophones,
     RebindControls,
+    /// Read an existing UltraStar Deluxe database, so a returning player keeps their history.
+    ImportUltrastar,
+    /// Delete every score, leaving the players themselves.
+    WipeStatistics,
     ResetToDefaults,
+}
+
+impl Action {
+    /// What to ask before doing it, for the ones that cannot be undone.
+    ///
+    /// A button that destroys a year of scores sits two rows below one that rescans the
+    /// library, and the cursor passes over it on the way. Asking is the difference between a
+    /// misplaced Enter and a lost evening.
+    pub fn confirmation(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::WipeStatistics => Some((
+                "Delete every score?",
+                "All four statistics views go back to empty and every highscore is lost.                  Players, their names and their colours stay. There is no undo.",
+            )),
+            Self::ResetToDefaults => Some((
+                "Reset every setting?",
+                "Every option goes back to how it shipped, including your microphone                  assignment. Songs, players and scores are untouched.",
+            )),
+            _ => None,
+        }
+    }
 }
 
 /// How one item is edited.
@@ -77,6 +102,11 @@ impl Item {
     }
 
     /// Whether left/right do anything, or whether this row is pressed instead.
+    /// Whether the value is free text rather than a choice or a number.
+    pub fn is_text(&self) -> bool {
+        matches!(self.control, Control::Text { .. })
+    }
+
     pub fn is_button(&self) -> bool {
         matches!(self.control, Control::Button(_))
     }
@@ -564,9 +594,19 @@ impl Page {
                     "Draw the frame rate in the corner."
                 ),
                 Item {
+                    label: "Import UltraStar scores",
+                    help: "Read the highscores from an existing UltraStar Deluxe                            installation. Additive and safe to run twice: nothing already                            here is replaced or duplicated.",
+                    control: Control::Button(Action::ImportUltrastar),
+                },
+                Item {
                     label: "Controls",
                     help: "Rebind the keyboard and controller.",
                     control: Control::Button(Action::RebindControls),
+                },
+                Item {
+                    label: "Delete all statistics",
+                    help: "Wipe every score and highscore, so the statistics start again from                            nothing. Useful before a party you want a fresh leaderboard for.                            Players are kept; it asks first.",
+                    control: Control::Button(Action::WipeStatistics),
                 },
                 Item {
                     label: "Reset everything",

@@ -457,6 +457,10 @@ impl Renderer {
                 requested,
                 self.elide(text, style.font, requested, available),
             ),
+            Overflow::EllipsisStart => (
+                requested,
+                self.elide_start(text, style.font, requested, available),
+            ),
         }
     }
 
@@ -482,6 +486,33 @@ impl Renderer {
         }
         kept.push(ELLIPSIS);
         kept
+    }
+
+    /// Cut a string down from the front until it fits, starting with an ellipsis.
+    ///
+    /// The mirror of [`Self::elide`], for strings whose tail is the informative part. Every
+    /// song folder on a machine begins the same way, so eliding the end of one shows that
+    /// same prefix on every row and says nothing about which folder it actually is.
+    fn elide_start(&self, text: &str, font: Font, size: f32, available: f32) -> String {
+        let quantised = AtlasCache::quantise(size) as f32;
+        let ellipsis_width = self.fonts.width(font, "\u{2026}", quantised);
+        let room = available - ellipsis_width;
+        if room <= 0.0 {
+            return String::new();
+        }
+        let mut kept: Vec<char> = Vec::new();
+        let mut used = 0.0;
+        for c in text.chars().rev() {
+            let advance = self.fonts.width(font, &c.to_string(), quantised);
+            if used + advance > room {
+                break;
+            }
+            used += advance;
+            kept.push(c);
+        }
+        let mut out = String::from(ELLIPSIS);
+        out.extend(kept.into_iter().rev());
+        out
     }
 
     /// Draw a string at a pixel baseline, filling the atlas as it goes.

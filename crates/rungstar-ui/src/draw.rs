@@ -50,6 +50,9 @@ pub enum Overflow {
     Clip,
     /// Cut and append an ellipsis. Song titles in a list.
     Ellipsis,
+    /// Cut from the *front*, keeping the end. For a file path, where every one on the machine
+    /// starts the same way and the part worth reading is the last folder.
+    EllipsisStart,
     /// Shrink until it fits, down to 60% of the requested size. Used where the whole string
     /// matters more than its size — a player name, a score.
     Shrink,

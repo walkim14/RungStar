@@ -166,22 +166,22 @@ impl Browser {
         self.lag = 0.0;
     }
 
-    /// Move the cursor, wrapping at both ends, and leave the view behind to catch up.
+    /// Move the cursor, stopping at both ends, and leave the view behind to catch up.
+    ///
+    /// The list has a beginning and an end. Wrapping makes eight thousand songs feel like a
+    /// loop with no position in it: you cannot tell whether you have seen everything, and
+    /// holding a direction never arrives anywhere.
     pub fn move_by(&mut self, delta: isize) {
         if self.count == 0 || delta == 0 {
             return;
         }
         let count = self.count as isize;
-        let next = (self.cursor as isize + delta).rem_euclid(count);
-        // Wrapping the long way round would send the view scrolling through the whole library.
-        // Animate the short way and let the wrap happen instantly.
-        let visual_delta = if delta.unsigned_abs() <= self.count / 2 {
-            delta as f32
-        } else {
-            0.0
-        };
+        let next = (self.cursor as isize + delta).clamp(0, count - 1);
+        // The animation follows what actually happened, so a page-down that only had two rows
+        // left to give slides by two rather than by a page.
+        let moved = (next - self.cursor as isize) as f32;
         self.cursor = next as usize;
-        self.lag = (self.lag - visual_delta).clamp(-MAX_LAG, MAX_LAG);
+        self.lag = (self.lag - moved).clamp(-MAX_LAG, MAX_LAG);
     }
 
     /// Advance the animation.
@@ -233,22 +233,18 @@ impl Browser {
             .map(|p| p.index)
     }
 
-    /// Resolve a relative offset from the cursor into a real index, wrapping.
+    /// Resolve a relative offset from the cursor into a real index.
     ///
-    /// Wrapping matters for more than tidiness: with fewer items than slots the same song
-    /// would otherwise appear several times in one view, and clicking the second copy would
-    /// select the first.
+    /// Nothing wraps. Past either end there is simply no song, and the slot is left empty --
+    /// which is what tells you that you have reached the end of the library rather than gone
+    /// round it again. It also means a library smaller than the view cannot draw the same song
+    /// twice, where clicking the second copy would have selected the first.
     fn index_at(&self, offset: isize) -> Option<usize> {
-        let count = self.count as isize;
-        // The window has to be `count` *consecutive* offsets, not `-count..count`: with two
-        // songs, offsets -1 and +1 both wrap to the same one, and it would be drawn above and
-        // below the cursor at once.
-        let lowest = -((count - 1) / 2);
-        let highest = count / 2;
-        if offset < lowest || offset > highest {
+        let index = self.cursor as isize + offset;
+        if index < 0 || index >= self.count as isize {
             return None;
         }
-        Some((self.cursor as isize + offset).rem_euclid(count) as usize)
+        Some(index as usize)
     }
 
     fn list_placements(&self, area: Rect) -> Vec<Placement> {

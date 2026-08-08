@@ -10,7 +10,7 @@ use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::options::Action;
 use rungstar_ui::screen::{Route, Transition};
 use rungstar_ui::settings::Settings;
-use rungstar_ui::songselect::{Input, Mode, SongSelect};
+use rungstar_ui::songselect::{Facet, FacetValues, Input, Mode, SongSelect};
 use rungstar_ui::theme::Theme;
 use rungstar_ui::Layout;
 
@@ -331,22 +331,40 @@ fn paging_moves_by_a_screenful_in_every_layout() {
 #[test]
 fn the_main_menu_routes_to_every_screen_it_offers() {
     let mut menu = MainMenu::new();
+    let mut seen = Vec::new();
+    // Walk the menu until it comes back to the top, confirming each row leads somewhere.
+    // Looping a fixed number of times would silently stop testing rows as the menu grows.
+    for step in 0..16 {
+        match menu.handle(Input::Confirm) {
+            Transition::Push(route) => seen.push(route),
+            Transition::Quit => seen.push(Route::Main),
+            other => panic!("a menu row produced {other:?}"),
+        }
+        menu.handle(Input::Down);
+        if menu.cursor() == 0 {
+            break;
+        }
+        assert!(step < 15, "the menu never wrapped");
+    }
+    for wanted in [
+        Route::SongSelect,
+        Route::Players,
+        Route::Stats,
+        Route::Options,
+        Route::About,
+    ] {
+        assert!(
+            seen.contains(&wanted),
+            "{wanted:?} is on no menu row: {seen:?}"
+        );
+    }
+    assert!(seen.contains(&Route::Main), "there is no way to quit");
+    assert_eq!(menu.cursor(), 0, "the menu did not wrap");
     assert_eq!(
-        menu.handle(Input::Confirm),
-        Transition::Push(Route::SongSelect)
+        seen.len(),
+        seen.iter().collect::<std::collections::HashSet<_>>().len(),
+        "two menu rows go to the same place: {seen:?}"
     );
-    menu.handle(Input::Down);
-    assert_eq!(
-        menu.handle(Input::Confirm),
-        Transition::Push(Route::Options)
-    );
-    menu.handle(Input::Down);
-    assert_eq!(menu.handle(Input::Confirm), Transition::Push(Route::About));
-    menu.handle(Input::Down);
-    assert_eq!(menu.handle(Input::Confirm), Transition::Quit);
-    // And it wraps, so the last entry is not a dead end.
-    menu.handle(Input::Down);
-    assert_eq!(menu.cursor(), 0);
 }
 
 #[test]
@@ -785,11 +803,12 @@ fn the_pointer_works_on_the_main_menu_and_the_options() {
             _ => None,
         })
         .collect();
-    assert!(rows.len() >= 4, "the menu did not draw four rows");
-    assert_eq!(
+    assert!(rows.len() >= 5, "the menu did not draw its rows");
+    // The second row, whatever it now is, must be reachable by clicking it.
+    assert!(matches!(
         menu.handle(Input::Click(rows[1].center())),
-        Transition::Push(Route::Options)
-    );
+        Transition::Push(_)
+    ));
 
     let mut screen = OptionsScreen::new();
     let mut settings = Settings::default();
@@ -983,6 +1002,48 @@ fn the_on_screen_keyboard_still_presses_keys_with_confirm() {
     assert_eq!(screen.mode(), Mode::Searching);
 }
 
+/// Open the filter panel and put the cursor on the category with this title.
+fn open_filters(screen: &mut SongSelect, area: Rect, category: &str) {
+    if screen.mode() != Mode::Filtering {
+        screen.handle(Input::CycleFilter, area);
+    }
+    assert_eq!(screen.mode(), Mode::Filtering);
+    // Back to the category column, then to the top of it, wherever the last test step left it.
+    screen.handle(Input::Left, area);
+    for _ in 0..Facet::ALL.len() {
+        screen.handle(Input::Up, area);
+    }
+    for _ in 0..Facet::ALL.len() {
+        if screen.facet_title() == category {
+            return;
+        }
+        screen.handle(Input::Down, area);
+    }
+    panic!("no filter category called {category:?}");
+}
+
+/// Facet lists as the application would supply them.
+fn facets() -> FacetValues {
+    let mut values = FacetValues::new();
+    values.set(
+        Facet::Genre,
+        vec![("Rock".to_owned(), 12), ("Schlager".to_owned(), 4)],
+    );
+    values.set(
+        Facet::Language,
+        vec![
+            ("English".to_owned(), 30),
+            ("German".to_owned(), 9),
+            ("Swedish".to_owned(), 2),
+        ],
+    );
+    values.set(
+        Facet::Decade,
+        vec![("1980".to_owned(), 7), ("1970".to_owned(), 3)],
+    );
+    values
+}
+
 #[test]
 fn the_list_can_be_narrowed_to_duets() {
     // Searching the word "duet" happens to work because the text is indexed, but only for
@@ -993,7 +1054,10 @@ fn the_list_can_be_narrowed_to_duets() {
     assert_eq!(screen.narrow(), Narrow::Everything);
     assert_eq!(screen.filters().duet, None);
 
-    screen.handle(Input::CycleFilter, area);
+    open_filters(&mut screen, area, "Kind");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.narrow(), Narrow::Duets);
     assert_eq!(screen.filters().duet, Some(true));
     assert!(
@@ -1001,42 +1065,379 @@ fn the_list_can_be_narrowed_to_duets() {
         "narrowing did not ask for a new query"
     );
 
+    // One kind at a time: "duets only" and "solos only" together is an empty list.
     screen.set_results(vec![]);
-    screen.handle(Input::CycleFilter, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.filters().duet, Some(false), "solos only");
 
-    // Round the loop and back to everything.
-    for _ in 0..3 {
-        screen.set_results(vec![]);
-        screen.handle(Input::CycleFilter, area);
-    }
+    // And choosing the one already chosen turns it off rather than doing nothing.
+    screen.set_results(vec![]);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.narrow(), Narrow::Everything);
     assert!(screen.filters().is_empty());
 }
 
 #[test]
+fn values_within_a_category_are_any_of_and_categories_are_all_of() {
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+
+    // Two languages: either one will do.
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.filters().languages, vec!["English", "German"]);
+
+    // Plus a decade, which narrows further rather than widening.
+    screen.handle(Input::Left, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    let filters = screen.filters();
+    assert_eq!(filters.languages, vec!["English", "German"]);
+    assert_eq!(filters.decades, vec![1980], "a decade is stored as a year");
+
+    // Choosing a value again removes it.
+    screen.handle(Input::Confirm, area);
+    assert!(screen.filters().decades.is_empty());
+}
+
+#[test]
+fn every_filter_can_be_cleared_at_once() {
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+
+    open_filters(&mut screen, area, "Genre");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.active_filters(), 2);
+
+    screen.handle(Input::Search, area);
+    assert_eq!(screen.active_filters(), 0);
+    assert!(screen.filters().is_empty());
+    assert!(screen.needs_query(), "clearing did not ask for a new query");
+}
+
+#[test]
+fn a_value_that_left_the_library_stops_being_chosen() {
+    // A rescan can remove the last Swedish song. Leaving it chosen leaves the browser empty
+    // with no visible reason why.
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.filters().languages, vec!["Swedish"]);
+
+    let mut fewer = FacetValues::new();
+    fewer.set(Facet::Language, vec![("English".to_owned(), 30)]);
+    screen.set_facets(fewer);
+    assert!(screen.filters().languages.is_empty());
+}
+
+#[test]
+fn the_filter_panel_lists_what_the_library_has() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    for expected in ["Filter", "Language", "English", "German", "Swedish", "30"] {
+        assert!(
+            text.iter().any(|t| t == expected),
+            "the panel did not show {expected:?}: {text:?}"
+        );
+    }
+
+    // A decade reads as a decade, not as a bare year.
+    open_filters(&mut screen, area, "Decade");
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    assert!(strings(&list).iter().any(|t| t == "1980s"));
+}
+
+#[test]
 fn a_narrowed_list_says_so() {
     // A list quietly missing songs is indistinguishable from a library missing them.
-    use rungstar_ui::songselect::Narrow;
     let theme = Theme::builtin();
     let style = theme.resolve_default();
     let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
 
     let mut screen = loaded(20);
+    screen.set_facets(facets());
     let mut list = DrawList::new();
     screen.draw(&mut list, area, &style, &|_| None);
     assert!(
-        !strings(&list).join(" ").contains("only"),
+        !strings(&list).join(" ").contains("German"),
         "an unfiltered list claimed to be filtered"
     );
 
-    screen.handle(Input::CycleFilter, area);
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    screen.handle(Input::Back, area);
+    screen.handle(Input::Back, area);
+    assert_eq!(screen.mode(), Mode::Browsing);
     screen.set_results(vec![]);
+
     let mut list = DrawList::new();
     screen.draw(&mut list, area, &style, &|_| None);
     let text = strings(&list).join(" ");
-    assert!(
-        text.contains(Narrow::Duets.label()),
-        "the filter is not shown: {text}"
+    assert!(text.contains("German"), "the filter is not shown: {text}");
+}
+
+/// Put the cursor on the options row whose help begins with `prefix`.
+///
+/// By help text rather than by position, so adding a row above it does not silently move the
+/// test onto a different button.
+fn go_to_row(screen: &mut OptionsScreen, settings: &mut Settings, prefix: &str) {
+    for _ in 0..12 {
+        screen.handle(Input::Confirm, settings);
+        for _ in 0..40 {
+            if screen.help().starts_with(prefix) {
+                return;
+            }
+            screen.handle(Input::Down, settings);
+        }
+        screen.handle(Input::Back, settings);
+        screen.handle(Input::Down, settings);
+    }
+    panic!("no options row whose help starts with {prefix:?}");
+}
+
+const WIPE_HELP: &str = "Wipe every score";
+
+#[test]
+fn deleting_the_statistics_asks_before_doing_it() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    // The press that lands on the button opens the question and runs nothing.
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
     );
+    assert!(screen.confirming());
+
+    // And the answer starts on Cancel, so a second reflex press still deletes nothing. This
+    // is the whole point: the accident is two Enters, not one.
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(!screen.confirming());
+}
+
+#[test]
+fn deleting_the_statistics_runs_once_the_delete_button_is_chosen() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    screen.handle(Input::Confirm, &mut settings);
+    screen.handle(Input::Right, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::Run(Action::WipeStatistics)
+    );
+    assert!(!screen.confirming(), "the question should close behind it");
+}
+
+#[test]
+fn backing_out_of_the_confirmation_deletes_nothing() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+
+    screen.handle(Input::Confirm, &mut settings);
+    screen.handle(Input::Right, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Back, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(!screen.confirming());
+
+    // Reopening must not remember that Delete was the last thing under the cursor.
+    screen.handle(Input::Confirm, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None,
+        "the confirmation reopened with Delete selected"
+    );
+}
+
+#[test]
+fn the_confirmation_says_what_will_be_lost() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    go_to_row(&mut screen, &mut settings, WIPE_HELP);
+    screen.handle(Input::Confirm, &mut settings);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &settings);
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    assert!(
+        text.iter().any(|t| t == "Delete every score?"),
+        "the question was not drawn: {text:?}"
+    );
+    assert!(text.iter().any(|t| t == "Cancel"));
+    assert!(text.iter().any(|t| t == "Delete"));
+    assert!(
+        text.iter().any(|t| t.contains("no undo")),
+        "the warning did not say it is permanent"
+    );
+    // Nothing from the page behind it, so there is no doubt about what a click will hit.
+    assert!(
+        !text.iter().any(|t| t.starts_with(WIPE_HELP)),
+        "the page was still drawn under the question"
+    );
+}
+
+#[test]
+fn resetting_everything_asks_too() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    go_to_row(&mut screen, &mut settings, "Put every setting back");
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None
+    );
+    assert!(screen.confirming());
+    assert_eq!(settings, Settings::default(), "asking must change nothing");
+}
+
+/// Fail if two strings on the same line are drawn into boxes that overlap.
+///
+/// A label and a value that share one rectangle look fine until one of them is long: the
+/// ellipsis is applied at the edge of the *box*, so neither is cut off and they collide in the
+/// middle. Boxes that do not overlap cannot do that, whatever the strings turn out to be.
+fn no_side_by_side_text_overlaps(list: &DrawList, what: &str) {
+    let texts: Vec<(String, Rect)> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Text { rect, text, .. } if !text.is_empty() => Some((text.clone(), *rect)),
+            _ => None,
+        })
+        .collect();
+
+    for (index, (a_text, a)) in texts.iter().enumerate() {
+        for (b_text, b) in texts.iter().skip(index + 1) {
+            let shared = (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0);
+            // Same line only: boxes that barely graze each other vertically are a caption
+            // under a label, which is the other test's business.
+            if shared < a.h.min(b.h) * 0.5 {
+                continue;
+            }
+            let across = (a.right().min(b.right()) - a.x.max(b.x)).max(0.0);
+            assert!(
+                across <= 1.0,
+                "{what}: {a_text:?} and {b_text:?} share {across:.0} units of the same line\n  \
+                 {a:?}\n  {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_long_value_is_cut_off_rather_than_drawn_under_its_label() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut settings = Settings::default();
+    // The real thing that showed this up: a song folder nested five deep.
+    settings.game.song_roots = vec![
+        "C:/Users/somebody/Projects/UltraStarPlaySongConverter/UltraStarPlaySongsToBeConverted"
+            .to_owned(),
+    ];
+
+    // Narrow as well as wide: the columns are fractions, so the tight case is the small one.
+    for (w, h) in [(1778.0, 1000.0), (1600.0, 1000.0), (1333.0, 1000.0)] {
+        let mut screen = OptionsScreen::new();
+        for page in 0..6 {
+            screen.handle(Input::Confirm, &mut settings);
+            for row in 0..30 {
+                let mut list = DrawList::new();
+                screen.draw(&mut list, Rect::new(0.0, 0.0, w, h), &style, &settings);
+                no_side_by_side_text_overlaps(&list, &format!("{w}x{h} page {page} row {row}"));
+                screen.handle(Input::Down, &mut settings);
+            }
+            screen.handle(Input::Back, &mut settings);
+            screen.handle(Input::Down, &mut settings);
+        }
+    }
+}
+
+#[test]
+fn a_long_song_title_is_cut_off_before_it_reaches_its_score() {
+    use rungstar_profile::stats::View;
+    use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
+
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let long = "Panic! At The Disco - There\u{2019}s A Good Reason These Tables Are Numbered                 Honey, You Just Haven\u{2019}t Thought Of It Yet";
+
+    for (w, h) in [(1778.0, 1000.0), (1333.0, 1000.0)] {
+        let mut screen = StatsScreen::new();
+        for _ in 0..View::ALL.len() {
+            screen.set_rows(
+                (0..12)
+                    .map(|i| StatRow {
+                        label: format!("{long} ({i})"),
+                        detail: "Somebody With A Long Name On A Long Evening".to_owned(),
+                        value: "10000".to_owned(),
+                    })
+                    .collect(),
+            );
+            let mut list = DrawList::new();
+            screen.draw(&mut list, Rect::new(0.0, 0.0, w, h), &style);
+            assert!(list.is_balanced());
+            no_side_by_side_text_overlaps(&list, &format!("statistics at {w}x{h}"));
+            screen.handle(Input::Right);
+        }
+    }
+}
+
+#[test]
+fn a_long_microphone_name_is_cut_off_before_its_value() {
+    use rungstar_ui::micscreen::{Device, MicScreen};
+
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = MicScreen::new();
+    screen.devices = vec![
+        Device {
+            name: "Realtek(R) Audio High Definition Microphone Array (Front Panel, Pink)"
+                .to_owned(),
+            assignment: vec![1, 2],
+            levels: vec![0.4, 0.2],
+            heard: vec![true, false],
+        };
+        3
+    ];
+    let mut list = DrawList::new();
+    screen.draw(&mut list, Rect::new(0.0, 0.0, 1333.0, 1000.0), &style);
+    assert!(list.is_balanced());
+    no_side_by_side_text_overlaps(&list, "microphones");
 }

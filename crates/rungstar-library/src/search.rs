@@ -357,6 +357,18 @@ impl Database {
     ///
     /// Only columns the tree offers are accepted, so this cannot become an injection point.
     pub fn facet(&self, column: &str) -> Result<Vec<(String, i64)>, DbError> {
+        // Decades are computed rather than stored, and are ordered newest first rather than
+        // by count: a decade list is a timeline and shuffling it by popularity makes it
+        // unreadable.
+        if column == "decade" {
+            let mut statement = self.connection().prepare(
+                "SELECT CAST(year - (year % 10) AS TEXT), COUNT(*) FROM song
+                 WHERE year IS NOT NULL AND year > 0
+                 GROUP BY year - (year % 10) ORDER BY year - (year % 10) DESC",
+            )?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            return Ok(rows.collect::<Result<Vec<_>, _>>()?);
+        }
         let column = match column {
             "artist" | "edition" | "genre" | "language" | "creator" | "folder" => column,
             _ => return Ok(Vec::new()),
