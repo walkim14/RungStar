@@ -1615,3 +1615,171 @@ fn a_panel_shows_the_profile_name_it_was_given() {
         "a named singer was still labelled generically: {text:?}"
     );
 }
+
+/// The widest bar in the first player's colour, which is their sung mark.
+fn mark(screen: &mut SingScreen, line: &NoteLine, beat: f64, style: &rungstar_ui::Style) -> Rect {
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        style,
+        &[PartView {
+            line,
+            syllables: &[],
+            next_line: "",
+        }],
+        beat,
+    );
+    widest(&list, style.player(0))
+}
+
+#[test]
+fn a_mark_grows_in_rather_than_appearing_at_full_width() {
+    // Scoring lands a whole beat at a time, and a beat is a wide piece of a staff, so a mark
+    // drawn straight from the score jumps across the screen in steps. The drawn end eases.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+
+    // The first frame settles the clock; nothing has been sung yet.
+    screen.singers[0].sung = vec![];
+    mark_or_none(&mut screen, &line, 8.0, &style);
+
+    screen.singers[0].sung = vec![Sung {
+        start: 8.0,
+        duration: 4.0,
+        pitch: 60,
+        hit: true,
+    }];
+    let first = mark(&mut screen, &line, 8.1, &style);
+    let second = mark(&mut screen, &line, 8.3, &style);
+    let settled = mark(&mut screen, &line, 12.0, &style);
+
+    assert!(
+        first.w < second.w,
+        "the mark did not grow: {} then {}",
+        first.w,
+        second.w
+    );
+    assert!(second.w < settled.w, "the mark stopped growing early");
+    assert!(
+        first.w < settled.w * 0.75,
+        "the first frame already drew most of it: {} of {}",
+        first.w,
+        settled.w
+    );
+    // The left edge stays where it was sung. Only the end moves.
+    assert!((first.x - settled.x).abs() < 1.0);
+}
+
+#[test]
+fn a_mark_never_reaches_past_what_was_scored() {
+    // The ease approaches the scored end and stops there. Running ahead of it to meet the
+    // playhead is what the previous attempt did, and it lurched back when detection landed.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+    screen.singers[0].sung = vec![Sung {
+        start: 8.0,
+        duration: 2.0,
+        pitch: 60,
+        hit: true,
+    }];
+
+    let mut previous = 0.0;
+    for step in 0..40 {
+        let rect = mark(&mut screen, &line, 8.0 + step as f64 * 0.1, &style);
+        assert!(rect.w + 0.01 >= previous, "the mark went backwards");
+        previous = rect.w;
+    }
+    // Ten beats of frames later it is exactly two beats long, not three.
+    let settled = mark(&mut screen, &line, 20.0, &style);
+    let two_beats = settled.w;
+    screen.singers[0].sung[0].duration = 4.0;
+    let longer = mark(&mut screen, &line, 40.0, &style);
+    assert!(
+        (longer.w - two_beats * 2.0).abs() < two_beats * 0.1,
+        "two beats drew {two_beats} but four drew {}",
+        longer.w
+    );
+}
+
+#[test]
+fn a_finished_mark_does_not_move_when_the_next_one_starts() {
+    // The frontier is per singer rather than per run: a run that the drawing has caught up
+    // with is finished, and must not jump the last few units on when the next run begins.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+    screen.singers[0].sung = vec![Sung {
+        start: 8.0,
+        duration: 2.0,
+        pitch: 60,
+        hit: true,
+    }];
+    let settled = mark(&mut screen, &line, 20.0, &style);
+
+    screen.singers[0].sung.push(Sung {
+        start: 12.0,
+        duration: 2.0,
+        pitch: 62,
+        hit: true,
+    });
+    // Immediately after, the new run has barely started, so the widest bar is still the first.
+    let after = mark(&mut screen, &line, 20.05, &style);
+    assert!(
+        (after.w - settled.w).abs() < 1.0 && (after.x - settled.x).abs() < 1.0,
+        "the finished mark moved: {settled:?} then {after:?}"
+    );
+}
+
+#[test]
+fn a_seek_lands_the_marks_rather_than_scrolling_them_in() {
+    // After a pause or a restart the clock jumps. Easing across that would redraw the whole
+    // line growing in, which looks like the song replaying itself.
+    let style = Theme::builtin().resolve_default();
+    let line = line();
+    let mut screen = sing_screen(1);
+    screen.singers[0].sung = vec![Sung {
+        start: 8.0,
+        duration: 4.0,
+        pitch: 60,
+        hit: true,
+    }];
+    let settled = mark(&mut screen, &line, 40.0, &style);
+
+    // A jump backwards, as a restart does.
+    let after_restart = mark(&mut screen, &line, 9.0, &style);
+    assert!(
+        (after_restart.w - settled.w).abs() < 1.0,
+        "a seek eased instead of landing: {settled:?} then {after_restart:?}"
+    );
+}
+
+/// Draw and return the mark if there is one, for frames where nothing has been sung.
+fn mark_or_none(
+    screen: &mut SingScreen,
+    line: &NoteLine,
+    beat: f64,
+    style: &rungstar_ui::Style,
+) -> Option<Rect> {
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        style,
+        &[PartView {
+            line,
+            syllables: &[],
+            next_line: "",
+        }],
+        beat,
+    );
+    list.commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Rect { rect, color, .. } if *color == style.player(0) => Some(*rect),
+            _ => None,
+        })
+        .max_by(|a, b| a.w.partial_cmp(&b.w).unwrap_or(std::cmp::Ordering::Equal))
+}

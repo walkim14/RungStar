@@ -243,6 +243,16 @@ pub struct SingScreen {
     pub show_input_panel: bool,
     /// How the highlight moves along the line.
     pub effect: LyricEffect,
+    /// Where each singer's newest mark is *drawn* to, easing toward where it was sung.
+    ///
+    /// Scoring produces one whole beat at a time, and a beat is a wide piece of a staff --
+    /// a sixteen-beat line makes it a sixteenth of the width -- so a mark drawn straight from
+    /// the score jumps across the screen in visible steps however fast the beats arrive. The
+    /// number here is what the eye follows; the scored end is what it is heading for.
+    grown: Vec<f64>,
+    /// The beat the marks were last advanced at, so the ease is in song time rather than in
+    /// frames. A frame rate is not a clock.
+    grown_at: f64,
     /// The two parts of a duet, named as the song names them.
     ///
     /// Empty for an ordinary song, which is the difference the layout keys off: a duet gets a
@@ -288,6 +298,13 @@ const RATING_LIFETIME: f32 = 1.4;
 /// nothing you could not already see.
 const LEAD_IN_BEATS: f64 = 16.0;
 
+/// How quickly a mark's drawn end catches up with its scored end, in beats.
+const MARK_EASE_BEATS: f64 = 0.6;
+/// The furthest a drawn end may fall behind before it stops easing and jumps.
+const MARK_MAX_LAG: f64 = 1.5;
+/// An interval longer than this is a seek or a pause, not a frame, and is snapped through.
+const MARK_MAX_STEP: f64 = 4.0;
+
 impl SingScreen {
     pub fn new(artist: impl Into<String>, title: impl Into<String>, singers: usize) -> Self {
         Self {
@@ -306,6 +323,8 @@ impl SingScreen {
             gamepad: false,
             show_input_panel: false,
             effect: LyricEffect::default(),
+            grown: Vec::new(),
+            grown_at: f64::NEG_INFINITY,
             parts: Vec::new(),
             singer_part: Vec::new(),
             pitch_low: 0,
@@ -554,6 +573,7 @@ impl SingScreen {
         let (lyrics_area, staff_area) = middle.cut_bottom(lyric_height);
 
         let merged = self.merge_parts(parts, beat);
+        self.advance_marks(beat);
         self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
 
         // Both parts' words, stacked at the bottom in their own colours, each with its own
@@ -770,6 +790,42 @@ impl SingScreen {
         );
     }
 
+    /// Move each singer's drawn mark end toward where they have actually been scored.
+    ///
+    /// An exponential ease in *beats*, not in frames, so it looks the same at 60 and at 144
+    /// and the same in a slow song as in a fast one. Two guards matter: a mark never starts
+    /// before its own run, so a new run grows out of its beginning rather than sliding in from
+    /// the last one, and it is never allowed to fall more than a beat behind, so a pause or a
+    /// dropped frame is caught up in one step instead of crawling.
+    fn advance_marks(&mut self, beat: f64) {
+        self.grown.resize(self.singers.len(), f64::NEG_INFINITY);
+        // The first frame, and any frame after the clock moved backwards, has no interval to
+        // ease over. Snapping there is right: there is nothing on screen yet to be smooth.
+        let elapsed = beat - self.grown_at;
+        let snap = !(0.0..=MARK_MAX_STEP).contains(&elapsed);
+        self.grown_at = beat;
+
+        for (index, singer) in self.singers.iter().enumerate() {
+            let Some(last) = singer.sung.last() else {
+                continue;
+            };
+            let target = last.start + last.duration;
+            let drawn = &mut self.grown[index];
+            // Past the target means the history was trimmed or the song restarted under it.
+            if snap || *drawn > target {
+                *drawn = target;
+                continue;
+            }
+            // A gap where nobody sang is crossed at once rather than crawled over: there is
+            // nothing to draw in it, and creeping across it would delay the new run.
+            if *drawn < last.start {
+                *drawn = last.start;
+            }
+            *drawn = drawn.max(target - MARK_MAX_LAG);
+            *drawn += (target - *drawn) * (1.0 - (-elapsed / MARK_EASE_BEATS).exp());
+        }
+    }
+
     fn draw_staff(
         &self,
         list: &mut DrawList,
@@ -887,14 +943,20 @@ impl SingScreen {
             golden: bool,
         }
         //
-        // Drawn where it was actually sung, and never stretched forward to meet the playhead.
-        // Extending it hides the microphone delay, but the bar then lurches as the detection
-        // catches up, which reads as jitter rather than as smoothness.
+        // The end of the newest one is eased rather than stepped, but it is never pushed
+        // *past* what was scored to meet the playhead: extending it to the playhead hides the
+        // microphone delay and then lurches back when the detection lands, which is worse
+        // than the delay it was hiding.
         let mut spans: Vec<Span> = Vec::new();
         for (index, singer) in self.singers.iter().enumerate() {
+            // One moving frontier per singer rather than an ease per run: every mark is
+            // clipped to it, so a run grows in from its own beginning, stops exactly where it
+            // was sung, and the one after it starts from nothing. Easing each run's end
+            // separately instead leaves the last few units to snap on when the next begins.
+            let frontier = self.grown.get(index).copied().unwrap_or(f64::INFINITY);
             for sung in &singer.sung {
-                let sung_end = sung.start + sung.duration;
-                if sung_end < line.start || sung.start > line.end {
+                let sung_end = (sung.start + sung.duration).min(frontier);
+                if sung_end <= sung.start || sung_end < line.start || sung.start > line.end {
                     continue;
                 }
                 let target = line.note_at(sung.start);
