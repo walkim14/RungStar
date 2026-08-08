@@ -244,10 +244,10 @@ fn award(scores: &[i32], teams: usize) -> Vec<u32> {
         .map(|i| (i, scores.get(i).copied().unwrap_or(0)))
         .max_by_key(|(_, score)| *score);
     if let Some((_, second_score)) = runner_up {
-        for index in 0..teams {
+        for (index, award) in awarded.iter_mut().enumerate() {
             if !winners.contains(&index) && scores.get(index).copied().unwrap_or(0) == second_score
             {
-                awarded[index] = 1;
+                *award = 1;
             }
         }
     }
