@@ -184,6 +184,41 @@ choice! {
     Tabs { Off = "Off", On = "On" } default Off
 }
 
+/// Window sizes offered, smallest first.
+///
+/// A list rather than two independent numbers: choosing 1281 by 799 is not a thing anybody
+/// wants, and letting it be chosen means every combination has to work. These are the common
+/// 16:9 and 16:10 sizes plus the Steam Deck's own, which is neither.
+pub const RESOLUTIONS: [(u32, u32); 9] = [
+    (1280, 720),
+    (1280, 800),
+    (1366, 768),
+    (1600, 900),
+    (1680, 1050),
+    (1920, 1080),
+    (2560, 1440),
+    (3440, 1440),
+    (3840, 2160),
+];
+
+/// The index of the resolution nearest `(width, height)`.
+///
+/// Nearest rather than exact, because the saved size can come from a display that is no
+/// longer attached, and a settings row that shows nothing is worse than one showing the
+/// closest thing.
+pub fn nearest_resolution(width: u32, height: u32) -> usize {
+    RESOLUTIONS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, (w, h))| {
+            let dw = w.abs_diff(width) as u64;
+            let dh = h.abs_diff(height) as u64;
+            dw * dw + dh * dh
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
 /// Everything, grouped the way the options screens are.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -261,6 +296,17 @@ impl Default for GraphicsSettings {
     }
 }
 
+/// One capture device and which singer each of its channels belongs to.
+///
+/// Stored by name rather than by index, because a device's position in the list moves when
+/// anything else is plugged in — which is how a saved setup ends up pointing at a webcam.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MicAssignment {
+    pub name: String,
+    /// One entry per channel: `0` for off, otherwise a one-based singer number.
+    pub channels: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SoundSettings {
@@ -282,6 +328,8 @@ pub struct SoundSettings {
     pub mic_delay_ms: u32,
     /// Milliseconds the audio lags the picture, for a display with its own processing lag.
     pub av_delay_ms: i32,
+    /// Which singer each microphone channel feeds. Empty means "work it out".
+    pub microphones: Vec<MicAssignment>,
 }
 
 impl Default for SoundSettings {
@@ -300,6 +348,7 @@ impl Default for SoundSettings {
             // audio stack actually costs.
             mic_delay_ms: 140,
             av_delay_ms: 0,
+            microphones: Vec::new(),
         }
     }
 }

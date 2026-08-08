@@ -11,7 +11,11 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
-symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+# Every container and codec Symphonia ships, not a guess at which ones a library uses.
+# A real 8,000 song library turned out to be 99.9% Ogg Vorbis, which the earlier list did not
+# include at all — so almost nothing could be decoded, and the failure looked like "previews
+# are unreliable" rather than "this format is not supported".
+symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
 
 [dev-dependencies]
 tempfile = "3"

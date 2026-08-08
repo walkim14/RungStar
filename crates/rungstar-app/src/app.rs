@@ -22,6 +22,7 @@ use rungstar_platform::{Playback, SdlCapture};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
+use rungstar_ui::micscreen::{MicOutcome, MicScreen};
 use rungstar_ui::options::Action;
 use rungstar_ui::screen::{Route, Transition, Widgets};
 use rungstar_ui::settings::{ScreenMode, Settings, Switch};
@@ -72,6 +73,8 @@ enum Screen {
     Options(Box<OptionsScreen>),
     /// Singing. The session owns the devices; the screen only draws.
     Sing(Box<SingScreen>, Box<session::Session>),
+    /// Microphone setup, with capture running so the meters are live.
+    Mics(Box<MicScreen>, Box<session::Monitor>),
     About,
 }
 
@@ -88,6 +91,8 @@ struct App {
     status: String,
     /// A song the browser asked for, waiting for the frame loop to open the devices.
     pending_sing: Option<i64>,
+    /// Set when the microphone screen has been asked for.
+    pending_mics: bool,
     /// A scan running on another thread, and the last progress it reported.
     scan: Option<ScanJob>,
     /// The clip playing under the browser cursor.
@@ -206,6 +211,7 @@ impl App {
             data_dir,
             status: String::new(),
             pending_sing: None,
+            pending_mics: false,
             scan: None,
             preview: None,
             running: true,
@@ -470,6 +476,11 @@ impl App {
         }
     }
 
+    /// Whether the screen on top is editing text.
+    fn wants_text(&self) -> bool {
+        matches!(self.stack.last(), Some(Screen::Songs(songs)) if songs.wants_text())
+    }
+
     /// Whether a scan is running, for the screens that say so.
     fn scanning(&self) -> bool {
         self.scan.is_some()
@@ -561,6 +572,7 @@ impl App {
             Some(Screen::Songs(songs)) => songs.gamepad = gamepad,
             Some(Screen::Options(options)) => options.gamepad = gamepad,
             Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
+            Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
             _ => {}
         }
     }
@@ -618,6 +630,18 @@ impl App {
                     forced
                 }
             }
+            Some(Screen::Mics(screen, monitor)) => {
+                let (transition, outcome) = screen.handle(input);
+                match outcome {
+                    MicOutcome::Changed => monitor.reassign(&screen.devices),
+                    MicOutcome::Refresh => {
+                        monitor.rescan();
+                        screen.devices = monitor.devices();
+                    }
+                    MicOutcome::None => {}
+                }
+                transition
+            }
             Some(Screen::About) => match input {
                 Input::Back | Input::Confirm => Transition::Pop,
                 _ => Transition::None,
@@ -631,6 +655,12 @@ impl App {
         match transition {
             Transition::None => {}
             Transition::Pop => {
+                if let Some(Screen::Mics(_, monitor)) = self.stack.last_mut() {
+                    let assignment = monitor.saved();
+                    monitor.stop();
+                    self.settings.sound.microphones = assignment;
+                    self.save_settings();
+                }
                 self.stack.pop();
                 if self.stack.is_empty() {
                     self.running = false;
@@ -706,6 +736,7 @@ impl App {
             },
             self.settings.threshold(),
             self.settings.sound.mic_delay_ms as f64,
+            &self.settings.sound.microphones,
             capture,
         );
         let session = match session {
@@ -749,9 +780,8 @@ impl App {
                     self.data_dir.join("settings.toml").display()
                 )
             }
-            Action::ManageMicrophones => {
-                self.status = "microphone setup arrives with multi-singer support".to_owned()
-            }
+            // Needs the audio subsystem, which the frame loop owns.
+            Action::ManageMicrophones => self.pending_mics = true,
             Action::RebindControls => {
                 self.status = "rebinding arrives with the input screen".to_owned()
             }
@@ -786,6 +816,7 @@ impl App {
                     beat,
                 );
             }
+            Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
         }
@@ -861,6 +892,27 @@ fn draw_about(list: &mut DrawList, area: Rect, style: &Style) {
         );
         y += height;
     }
+}
+
+/// Whether a key is one that only ever means an action, never a character.
+///
+/// While a text field has focus the letter shortcuts must not fire, but the arrows, Enter and
+/// Escape still have to work or the on-screen keyboard cannot be used at all.
+fn is_navigation(keycode: Keycode) -> bool {
+    matches!(
+        keycode,
+        Keycode::Up
+            | Keycode::Down
+            | Keycode::Left
+            | Keycode::Right
+            | Keycode::Return
+            | Keycode::KpEnter
+            | Keycode::Escape
+            | Keycode::Backspace
+            | Keycode::PageUp
+            | Keycode::PageDown
+            | Keycode::Tab
+    )
 }
 
 /// Map a key or button to the semantic input the screens understand.
@@ -960,15 +1012,20 @@ fn main() -> Result<()> {
                     keycode: Some(key), ..
                 } => {
                     app.set_control_hints(false);
-                    if let Some(input) = action_for(key) {
-                        app.handle(input, area);
+                    // A screen editing text sees only navigation from the physical keyboard;
+                    // the characters arrive as `TextInput`, which is also the only way to get
+                    // an accented letter or a non-Latin script.
+                    if !app.wants_text() || is_navigation(key) {
+                        if let Some(input) = action_for(key) {
+                            app.handle(input, area);
+                        }
                     }
                 }
                 Event::TextInput { text, .. } => {
-                    // Typed characters only reach the search field; screens that are not
-                    // editing ignore them.
-                    for c in text.chars() {
-                        app.handle(Input::Type(c), area);
+                    if app.wants_text() {
+                        for c in text.chars() {
+                            app.handle(Input::Type(c), area);
+                        }
                     }
                 }
                 Event::MouseMotion { x, y, .. } => {
@@ -1018,6 +1075,18 @@ fn main() -> Result<()> {
 
         // A song the browser asked for. Started here because it needs the audio subsystem,
         // and a fresh capture handle so the microphones belong to this session alone.
+        if std::mem::take(&mut app.pending_mics) {
+            app.stop_preview();
+            let capture = SdlCapture::new(audio_subsystem.clone());
+            let mut monitor = session::Monitor::start(capture, app.settings.game.players as usize);
+            let mut screen = MicScreen::new(app.settings.game.players as usize);
+            screen.gate = app.settings.threshold();
+            screen.devices = monitor.devices();
+            monitor.tick();
+            app.stack
+                .push(Screen::Mics(Box::new(screen), Box::new(monitor)));
+        }
+
         if let Some(id) = app.pending_sing.take() {
             app.stop_preview();
             let capture = SdlCapture::new(audio_subsystem.clone());
@@ -1036,6 +1105,10 @@ fn main() -> Result<()> {
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
                 songs.tick(dt);
+            }
+            Some(Screen::Mics(screen, monitor)) => {
+                monitor.tick();
+                screen.devices = monitor.devices();
             }
             Some(Screen::Sing(screen, session)) => {
                 if let Err(error) = session.tick() {
@@ -1078,6 +1151,8 @@ fn main() -> Result<()> {
         if !app.is_singing() {
             let settled = match app.stack.last() {
                 Some(Screen::Songs(songs)) => !songs.browser.animating(),
+                // The meters move continuously; sleeping would make them stutter.
+                Some(Screen::Mics(..)) => false,
                 _ => true,
             };
             if settled {
@@ -1134,6 +1209,27 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
             .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         println!("{name:<12}{} draw commands", list.len());
         app.stack.pop();
+    }
+
+    // The microphone screen, with a device that has never produced a sample -- the state a
+    // player is in when they open it to find out why nothing is scoring.
+    {
+        let mut screen = rungstar_ui::micscreen::MicScreen::new(2);
+        screen.devices = vec![rungstar_ui::micscreen::Device {
+            name: "Example microphone".to_owned(),
+            assignment: vec![1, 2],
+            levels: vec![0.3, 0.0],
+            heard: vec![true, false],
+        }];
+        list.clear();
+        screen.draw(list, area, &app.style);
+        if !list.is_balanced() {
+            anyhow::bail!("the microphone screen left a clip pushed");
+        }
+        renderer
+            .render(list, app.style.background)
+            .map_err(|e| anyhow::anyhow!("microphones: {e}"))?;
+        println!("microphones {} draw commands", list.len());
     }
 
     // The sing screen, drawn without a session: notes, lyrics and singers are all supplied

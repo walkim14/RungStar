@@ -209,6 +209,15 @@ impl SongSelect {
         self.mode
     }
 
+    /// Whether a text field has focus.
+    ///
+    /// While it does, letter keys are text and nothing else. Without this, typing "r" jumps
+    /// to a random song, "m" opens the context menu and "f" closes the search — every
+    /// single-letter shortcut fires underneath the thing you are typing into.
+    pub fn wants_text(&self) -> bool {
+        self.mode == Mode::Searching
+    }
+
     pub fn songs(&self) -> &[SongEntry] {
         &self.songs
     }

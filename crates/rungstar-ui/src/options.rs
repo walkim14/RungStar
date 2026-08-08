@@ -288,24 +288,39 @@ impl Page {
                     "Window",
                     "Windowed, borderless or exclusive fullscreen."
                 ),
-                number_item!(
-                    graphics.width as u32,
-                    "Width",
-                    "Window width in pixels. Ignored in fullscreen, which uses the display size.",
-                    640.0,
-                    7680.0,
-                    160.0,
-                    plain
-                ),
-                number_item!(
-                    graphics.height as u32,
-                    "Height",
-                    "Window height in pixels. Ignored in fullscreen, which uses the display size.",
-                    480.0,
-                    4320.0,
-                    90.0,
-                    plain
-                ),
+                Item {
+                    label: "Resolution",
+                    help: "Window size. Ignored in fullscreen, which uses whatever the                            display is. A list of sizes rather than two independent numbers,                            because nobody wants 1281 by 799 and offering it means it has to                            work.",
+                    control: Control::Choice {
+                        get: |s: &Settings| {
+                            crate::settings::nearest_resolution(
+                                s.graphics.width,
+                                s.graphics.height,
+                            )
+                        },
+                        labels: || {
+                            crate::settings::RESOLUTIONS
+                                .iter()
+                                .map(|(w, h)| -> &'static str {
+                                    // Leaked, so the labels are `&'static str` like every
+                                    // other choice's. Nine strings, once, for the process.
+                                    Box::leak(format!("{w} x {h}").into_boxed_str())
+                                })
+                                .collect()
+                        },
+                        step: |s: &mut Settings, d: isize| {
+                            let list = crate::settings::RESOLUTIONS;
+                            let current = crate::settings::nearest_resolution(
+                                s.graphics.width,
+                                s.graphics.height,
+                            );
+                            let next =
+                                (current as isize + d).rem_euclid(list.len() as isize) as usize;
+                            s.graphics.width = list[next].0;
+                            s.graphics.height = list[next].1;
+                        },
+                    },
+                },
                 choice_item!(
                     FrameLimit,
                     graphics.frame_limit,

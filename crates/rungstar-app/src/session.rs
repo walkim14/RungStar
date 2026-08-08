@@ -68,6 +68,7 @@ impl Session {
         difficulty: Difficulty,
         threshold: f32,
         mic_delay_ms: f64,
+        saved_microphones: &[rungstar_ui::settings::MicAssignment],
         mut capture: SdlCapture,
     ) -> Result<Self> {
         let clip = AudioClip::open(audio_path).context("could not decode the audio")?;
@@ -80,8 +81,12 @@ impl Session {
             .map_err(|e| anyhow::anyhow!("could not open the output device: {e}"))?;
 
         let players = players.clamp(1, rungstar_audio::capture::MAX_PLAYERS);
-        let devices = choose_devices(&capture, players);
-        let has_microphone = !devices.is_empty();
+        let mut devices = choose_devices(&capture, players);
+        // Whatever the setup screen was told wins over the automatic assignment.
+        apply_saved(&mut devices, saved_microphones);
+        let has_microphone = devices
+            .iter()
+            .any(|d| d.channel_to_player.iter().any(|p| *p != 0));
         if has_microphone {
             if let Err(error) = capture.start(&devices, SAMPLE_RATE) {
                 tracing::warn!("capture could not start: {error}");
@@ -378,6 +383,23 @@ fn looks_virtual(name: &str) -> bool {
     VIRTUAL_DEVICES.iter().any(|bad| lower.contains(bad))
 }
 
+/// Apply a saved assignment to the devices that are actually present.
+///
+/// Matched by name, and anything unrecognised keeps whatever was worked out for it, so
+/// plugging in a new microphone does not discard the setup for the old ones.
+pub fn apply_saved(devices: &mut [DeviceConfig], saved: &[rungstar_ui::settings::MicAssignment]) {
+    for device in devices.iter_mut() {
+        if let Some(entry) = saved.iter().find(|s| s.name == device.name) {
+            // Channel counts can change when a device is re-enumerated; keep whatever fits.
+            for (channel, player) in entry.channels.iter().enumerate() {
+                if channel < device.channel_to_player.len() {
+                    device.channel_to_player[channel] = *player;
+                }
+            }
+        }
+    }
+}
+
 /// Choose devices for `players` singers, one channel each.
 ///
 /// Channels are filled before devices are, so a stereo microphone pair carries two singers.
@@ -412,4 +434,157 @@ pub fn choose_devices(capture: &SdlCapture, players: usize) -> Vec<DeviceConfig>
         });
     }
     configs
+}
+
+/// Capture running purely so the microphone screen can show live meters.
+///
+/// Separate from [`Session`] because it has no song, no clock and no scoring — it exists to
+/// answer "is anything arriving on this channel", which is the one question the setup screen
+/// is for and the one UltraStar's own record screen does not answer.
+pub struct Monitor {
+    capture: SdlCapture,
+    devices: Vec<DeviceConfig>,
+    buffers: PlayerBuffers,
+    /// Peak level per device per channel.
+    levels: Vec<Vec<f32>>,
+    heard: Vec<Vec<bool>>,
+    last_analysis: Instant,
+}
+
+impl Monitor {
+    /// Open every microphone, with each channel routed to its own slot.
+    ///
+    /// Routing is by channel rather than by device, so a stereo pair shows two independent
+    /// meters — which is what makes it obvious that only one of the two microphones is live.
+    pub fn start(capture: SdlCapture, players: usize) -> Self {
+        let mut monitor = Self {
+            capture,
+            devices: Vec::new(),
+            buffers: PlayerBuffers::new(),
+            levels: Vec::new(),
+            heard: Vec::new(),
+            last_analysis: Instant::now(),
+        };
+        monitor.rescan_with(players);
+        monitor
+    }
+
+    /// Look for devices again, keeping the current assignment where the names still match.
+    pub fn rescan(&mut self) {
+        let players = self.devices.len().max(1);
+        self.rescan_with(players);
+    }
+
+    fn rescan_with(&mut self, players: usize) {
+        self.capture.stop();
+        let found = choose_devices(&self.capture, players.max(6));
+        self.levels = found.iter().map(|d| vec![0.0; d.channels()]).collect();
+        self.heard = found.iter().map(|d| vec![false; d.channels()]).collect();
+        self.devices = found;
+        self.restart();
+    }
+
+    /// Apply an assignment the screen has changed.
+    pub fn reassign(&mut self, devices: &[rungstar_ui::micscreen::Device]) {
+        for (config, shown) in self.devices.iter_mut().zip(devices) {
+            config.channel_to_player.clone_from(&shown.assignment);
+        }
+        self.restart();
+    }
+
+    fn restart(&mut self) {
+        self.capture.stop();
+        if self.devices.is_empty() {
+            return;
+        }
+        // Every channel is monitored, whatever it is assigned to, so a channel set to "off"
+        // still shows a level. Otherwise turning a channel off hides the evidence you need to
+        // decide whether it should be on.
+        let monitored: Vec<DeviceConfig> = self
+            .devices
+            .iter()
+            .scan(0u8, |next, device| {
+                let mapping = (0..device.channels())
+                    .map(|_| {
+                        *next += 1;
+                        (*next).min(rungstar_audio::capture::MAX_PLAYERS as u8)
+                    })
+                    .collect();
+                Some(DeviceConfig {
+                    channel_to_player: mapping,
+                    ..device.clone()
+                })
+            })
+            .collect();
+        if let Err(error) = self.capture.start(&monitored, SAMPLE_RATE) {
+            tracing::warn!("microphone monitor could not start: {error}");
+        }
+    }
+
+    /// Read the microphones and update the meters.
+    pub fn tick(&mut self) {
+        self.buffers.clear();
+        let _ = self.capture.drain(&mut self.buffers);
+
+        let mut slot = 0u8;
+        for (device, levels) in self.levels.iter_mut().enumerate() {
+            for (channel, level) in levels.iter_mut().enumerate() {
+                slot += 1;
+                let samples = self.buffers.player(slot);
+                if !samples.is_empty() {
+                    let peak = samples
+                        .iter()
+                        .map(|s| (*s as f32 / i16::MAX as f32).abs())
+                        .fold(0.0f32, f32::max);
+                    *level = level.max(peak);
+                    if peak > 0.0005 {
+                        // "Something arrived once" is a different fact from "something is
+                        // arriving now", and a setup screen needs both: a microphone that has
+                        // never produced a sample is unplugged, not quiet.
+                        self.heard[device][channel] = true;
+                    }
+                }
+            }
+        }
+
+        // The decay runs on its own interval so the meter falls at the same rate whatever the
+        // frame rate is.
+        if self.last_analysis.elapsed() >= ANALYSIS_INTERVAL {
+            self.last_analysis = Instant::now();
+            for levels in &mut self.levels {
+                for level in levels.iter_mut() {
+                    *level *= 0.85;
+                }
+            }
+        }
+    }
+
+    /// What the screen should show.
+    pub fn devices(&self) -> Vec<rungstar_ui::micscreen::Device> {
+        self.devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| rungstar_ui::micscreen::Device {
+                name: device.name.clone(),
+                assignment: device.channel_to_player.clone(),
+                levels: self.levels.get(index).cloned().unwrap_or_default(),
+                heard: self.heard.get(index).cloned().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// The assignment, for saving. A setup that does not survive a restart is not a setup.
+    pub fn saved(&self) -> Vec<rungstar_ui::settings::MicAssignment> {
+        self.devices
+            .iter()
+            .map(|device| rungstar_ui::settings::MicAssignment {
+                name: device.name.clone(),
+                channels: device.channel_to_player.clone(),
+            })
+            .collect()
+    }
+
+    pub fn stop(&mut self) {
+        self.capture.stop();
+    }
 }
