@@ -39,6 +39,7 @@ rungstar-audio = { path = "crates/rungstar-audio" }
 rungstar-platform = { path = "crates/rungstar-platform" }
 rungstar-library = { path = "crates/rungstar-library" }
 rungstar-ui = { path = "crates/rungstar-ui" }
+rungstar-video = { path = "crates/rungstar-video" }
 
 [profile.release]
 opt-level = 3

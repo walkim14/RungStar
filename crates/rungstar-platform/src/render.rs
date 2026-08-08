@@ -131,6 +131,33 @@ impl Renderer {
         Ok(id)
     }
 
+    /// Replace an image's pixels in place, keeping its handle.
+    ///
+    /// A video is a new picture thirty times a second; making a fresh texture for each would
+    /// churn GPU memory and leave the display list holding a handle that changes every frame.
+    /// The size has to match — a video does not change shape part way through.
+    pub fn update_image(
+        &mut self,
+        id: ImageId,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), RenderError> {
+        let Some(image) = self.images.get_mut(&id) else {
+            return Ok(());
+        };
+        if image.width != width || image.height != height {
+            return Err(RenderError::Sdl(format!(
+                "image {id:?} is {}x{} and cannot take a {width}x{height} frame",
+                image.width, image.height
+            )));
+        }
+        image
+            .texture
+            .update(None, rgba, (width * 4) as usize)
+            .map_err(|e| RenderError::Sdl(e.to_string()))
+    }
+
     /// Forget an image. Covers scroll out of the browser and their textures should go with
     /// them, or browsing a large library grows without bound.
     pub fn drop_image(&mut self, id: ImageId) {

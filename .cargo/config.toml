@@ -1,0 +1,9 @@
+# `ffmpeg-sys` finds the vendored headers and import libraries through this. It has to be here
+# rather than in `rungstar-video/build.rs`, because a build script cannot hand an environment
+# variable to another crate's build script — and requiring it be set by hand would mean
+# `cargo build` did not work on a fresh checkout.
+#
+# `relative = true` resolves it against this file's directory, so the path is correct wherever
+# the repository is cloned.
+[env]
+FFMPEG_DIR = { value = "vendor/ffmpeg", relative = true, force = false }

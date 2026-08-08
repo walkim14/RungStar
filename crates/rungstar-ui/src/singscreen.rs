@@ -12,7 +12,7 @@ use crate::color::Color;
 use crate::draw::{Align, DrawList, Font, ImageId, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Point, Rect};
 use crate::screen::{Transition, Widgets};
-use crate::settings::LyricEffect;
+use crate::settings::{LyricEffect, VideoSize};
 use crate::songselect::Input;
 use crate::theme::Style;
 
@@ -218,6 +218,12 @@ pub struct SingScreen {
     pub overlay: Overlay,
     /// Background artwork, when the song has one and backgrounds are on.
     pub background: Option<ImageId>,
+    /// The song's video, which replaces the artwork while it is playing.
+    pub video: Option<ImageId>,
+    /// The video's shape, so it is letterboxed rather than stretched.
+    pub video_aspect: f32,
+    /// How much of the screen the video fills.
+    pub video_size: VideoSize,
     /// Seconds into the song, for the progress bar.
     pub position: f32,
     pub duration: f32,
@@ -269,6 +275,9 @@ impl SingScreen {
                 .collect(),
             overlay: Overlay::None,
             background: None,
+            video: None,
+            video_aspect: 16.0 / 9.0,
+            video_size: VideoSize::default(),
             position: 0.0,
             duration: 0.0,
             gamepad: false,
@@ -388,9 +397,25 @@ impl SingScreen {
         next_line: &str,
         beat: f64,
     ) {
-        if let Some(image) = self.background {
-            // Artwork behind, heavily dimmed: the lyrics have to stay readable over any
-            // picture, including a white one.
+        // The video wins over the artwork while it is playing; both sit behind a scrim,
+        // because the lyrics have to stay readable over any picture, including a white one or
+        // a cut to a flashbulb.
+        if let Some(video) = self.video {
+            let rect = match self.video_size {
+                // Filling the screen crops the edges, which is right for a background: a
+                // border round a music video looks like a mistake.
+                VideoSize::Full => area.cover_aspect(self.video_aspect),
+                // Fitting shows all of it, letterboxed.
+                VideoSize::Fit => area.fit_aspect(self.video_aspect),
+                VideoSize::Half => area
+                    .anchored(Anchor::Center, area.w * 0.55, area.h * 0.55, 0.0)
+                    .fit_aspect(self.video_aspect),
+            };
+            list.clipped(area, |list| {
+                list.image_tinted(rect, video, Color::WHITE, 0.0);
+            });
+            list.fill(area, style.background.alpha(0.5));
+        } else if let Some(image) = self.background {
             list.image_tinted(area, image, Color::WHITE.alpha(0.35), 0.0);
             list.fill(area, style.background.alpha(0.55));
         }

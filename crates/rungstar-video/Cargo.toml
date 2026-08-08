@@ -1,0 +1,20 @@
+[package]
+name = "rungstar-video"
+description = "Song video decoding, on the song's clock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Only what the game links: the containers, the decoders and the colour conversion. Filters
+# and devices are not vendored, so asking for them would fail the build.
+ffmpeg-next = { version = "9", default-features = false, features = [
+    "codec",
+    "format",
+    "software-scaling",
+] }
+thiserror.workspace = true
+tracing.workspace = true

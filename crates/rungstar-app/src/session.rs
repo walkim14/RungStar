@@ -87,6 +87,8 @@ pub struct Session {
     end_secs: Option<f64>,
     /// The last beat any note ends on, for knowing when the outro has started.
     last_note_beat: f64,
+    /// The song's video, when it has one and videos are on.
+    video: Option<rungstar_video::Video>,
     /// The note each singer's last recorded run was scored against.
     ///
     /// Runs merge on the note, not on the pitch. A singer holding one note wobbles across the
@@ -108,6 +110,7 @@ impl Session {
         threshold: f32,
         mic_delay_ms: f64,
         saved_microphones: &[rungstar_ui::settings::MicAssignment],
+        video_path: Option<&Path>,
         mut capture: SdlCapture,
     ) -> Result<Self> {
         let clip = AudioClip::open(audio_path).context("could not decode the audio")?;
@@ -141,6 +144,18 @@ impl Session {
         let last_note_beat = notes.iter().map(Note::end).fold(0.0, f64::max);
         // `#END` is in milliseconds, unlike `#START` and `#PREVIEWSTART` which are seconds.
         // The format is inconsistent about this and it is an easy place to be wrong.
+        // A video that will not open is not worth refusing to sing over.
+        let video = video_path.and_then(|path| {
+            let gap = song.headers.videogap.unwrap_or(0.0);
+            match rungstar_video::Video::open(path, gap) {
+                Ok(video) => Some(video),
+                Err(error) => {
+                    tracing::warn!("no video for this song: {error}");
+                    None
+                }
+            }
+        });
+
         let end_secs = song
             .headers
             .end
@@ -184,6 +199,7 @@ impl Session {
             has_microphone,
             finished: false,
             end_secs,
+            video,
             last_note_beat,
             last_target: vec![None; players],
         })
@@ -347,6 +363,20 @@ impl Session {
             });
         }
         self.last_target[player] = Some(target);
+    }
+
+    /// The video frame belonging to this moment, if the song has a video.
+    ///
+    /// Driven off the audio position rather than a wall clock, so a video that cannot keep up
+    /// drops frames instead of dragging the song out of time with the singing.
+    pub fn video_frame(&mut self) -> Option<&rungstar_video::Frame> {
+        let position = self.playback.position();
+        self.video.as_mut()?.frame_at(position)
+    }
+
+    /// The video's shape, for letterboxing it.
+    pub fn video_aspect(&self) -> Option<f32> {
+        self.video.as_ref()?.aspect()
     }
 
     /// Whether the last note has gone by, so there is nothing left to sing.

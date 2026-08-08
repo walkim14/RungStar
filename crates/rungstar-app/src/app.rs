@@ -95,6 +95,8 @@ struct App {
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
     singing: Option<i64>,
+    /// A video texture whose song has ended, waiting for the frame loop to release it.
+    dropped_video: Option<rungstar_ui::draw::ImageId>,
     /// Set when something changed that the window or the audio has to be told about.
     settings_dirty: bool,
     /// A scan running on another thread, and the last progress it reported.
@@ -226,6 +228,7 @@ impl App {
             pending_sing: None,
             pending_mics: false,
             singing: None,
+            dropped_video: None,
             settings_dirty: true,
             scan: None,
             preview: None,
@@ -758,6 +761,11 @@ impl App {
         match transition {
             Transition::None => {}
             Transition::Pop => {
+                if let Some(Screen::Sing(screen, _)) = self.stack.last() {
+                    // The video texture is this song's; leaving it behind would leak one per
+                    // song sung.
+                    self.dropped_video = screen.video;
+                }
                 if let Some(Screen::Mics(_, monitor)) = self.stack.last_mut() {
                     let assignment = monitor.saved();
                     monitor.stop();
@@ -826,6 +834,13 @@ impl App {
         };
         let audio_path =
             resolve_beside(&directory, &audio_name).unwrap_or_else(|| directory.join(&audio_name));
+        // The video is optional in every sense: the song may not name one, the file may not be
+        // beside it, and the player may have turned videos off.
+        let video = entry
+            .video_file
+            .as_ref()
+            .filter(|_| self.settings.graphics.video_enabled == Switch::On)
+            .and_then(|name| resolve_beside(&directory, name));
 
         let session = session::Session::start(
             audio,
@@ -840,6 +855,7 @@ impl App {
             self.settings.threshold(),
             self.settings.sound.mic_delay_ms as f64,
             &self.settings.sound.microphones,
+            video.as_deref(),
             capture,
         );
         let session = match session {
@@ -864,6 +880,7 @@ impl App {
         if self.settings.graphics.backgrounds == Switch::On {
             screen.background = self.covers.get(entry.id);
         }
+        screen.video_size = self.settings.graphics.video_size;
         let _ = self.library.record_play(id);
         self.stack
             .push(Screen::Sing(Box::new(screen), Box::new(session)));
@@ -1217,6 +1234,9 @@ fn main() -> Result<()> {
             text_input_on = editing;
         }
 
+        if let Some(id) = app.dropped_video.take() {
+            renderer.drop_image(id);
+        }
         app.poll_scan();
         let scanning = app.scanning().then(|| app.status.clone());
         if let Some(Screen::Songs(songs)) = app.stack.last_mut() {
@@ -1235,6 +1255,28 @@ fn main() -> Result<()> {
                 screen.devices = monitor.devices();
             }
             Some(Screen::Sing(screen, session)) => {
+                // The video frame for this moment, uploaded into one texture that is reused
+                // for the whole song rather than a new one thirty times a second.
+                if let Some(frame) = session.video_frame() {
+                    let uploaded = match screen.video {
+                        Some(id) => renderer
+                            .update_image(id, frame.width, frame.height, &frame.rgba)
+                            .map(|()| Some(id)),
+                        None => renderer
+                            .add_image(frame.width, frame.height, &frame.rgba)
+                            .map(Some),
+                    };
+                    match uploaded {
+                        Ok(id) => screen.video = id,
+                        Err(error) => {
+                            tracing::warn!("video frame not shown: {error}");
+                            screen.video = None;
+                        }
+                    }
+                }
+                if let Some(aspect) = session.video_aspect() {
+                    screen.video_aspect = aspect;
+                }
                 if let Err(error) = session.tick() {
                     tracing::warn!("playback stopped: {error}");
                     session.stop();
@@ -1393,6 +1435,22 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
                 golden: false,
             })
             .collect();
+        // A synthetic video frame, so the letterboxing and the scrim are exercised even on a
+        // machine with no songs.
+        let checker: Vec<u8> = (0..64 * 36 * 4)
+            .map(|i| {
+                if (i / 4 / 8 + i / 4 / 64 / 8) % 2 == 0 {
+                    200
+                } else {
+                    40
+                }
+            })
+            .collect();
+        if let Ok(id) = renderer.add_image(64, 36, &checker) {
+            screen.video = Some(id);
+            screen.video_aspect = 16.0 / 9.0;
+        }
+
         for overlay in [Overlay::None, Overlay::Paused, Overlay::Results] {
             screen.overlay = overlay;
             list.clear();
