@@ -739,10 +739,13 @@ impl Monitor {
             .devices
             .iter()
             .scan(0u8, |next, device| {
+                // A slot per channel, with no ceiling. Clamping at the singer limit put every
+                // channel past the sixth into the same slot, so two microphones shared a
+                // meter and the ones after them reported nothing arriving.
                 let mapping = (0..device.channels())
                     .map(|_| {
                         *next += 1;
-                        (*next).min(rungstar_audio::capture::MAX_PLAYERS as u8)
+                        *next
                     })
                     .collect();
                 Some(DeviceConfig {

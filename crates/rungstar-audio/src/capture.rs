@@ -104,9 +104,15 @@ pub fn validate(devices: &[DeviceConfig], player_count: usize) -> Vec<ConfigProb
 }
 
 /// Per-player mono buffers, filled by de-interleaving each device's capture block.
+///
+/// Grown on demand rather than fixed at [`MAX_PLAYERS`]. Six is the limit on *singers*, not on
+/// inputs: the microphone setup screen listens to every channel of every device at once so it
+/// can show a meter for each, and a machine with four capture devices has more channels than
+/// singers. Capping the buffers at six silently merged everything past the sixth into one
+/// slot — two microphones sharing a meter — and left the readers beyond it with nothing.
 #[derive(Debug, Clone, Default)]
 pub struct PlayerBuffers {
-    buffers: [Vec<i16>; MAX_PLAYERS],
+    buffers: Vec<Vec<i16>>,
 }
 
 impl PlayerBuffers {
@@ -143,9 +149,11 @@ impl PlayerBuffers {
             if player == CHANNEL_OFF {
                 continue;
             }
-            let Some(buffer) = self.buffers.get_mut(usize::from(player) - 1) else {
-                continue;
-            };
+            let slot = usize::from(player) - 1;
+            if slot >= self.buffers.len() {
+                self.buffers.resize_with(slot + 1, Vec::new);
+            }
+            let buffer = &mut self.buffers[slot];
             buffer.reserve(frames);
             for frame in 0..frames {
                 buffer.push(interleaved[frame * channels + channel]);
@@ -267,5 +275,73 @@ mod tests {
             assert_eq!(buffers.player(player), &[i16::from(player)]);
         }
         assert!(validate(&[config], 6).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    /// Two stereo microphones and a stereo headset: six channels, and a fourth device takes
+    /// it past the singer limit.
+    fn device(name: &str, first_slot: u8) -> DeviceConfig {
+        DeviceConfig {
+            name: name.to_owned(),
+            input_index: 0,
+            latency_ms: LATENCY_AUTODETECT,
+            channel_to_player: vec![first_slot, first_slot + 1],
+        }
+    }
+
+    #[test]
+    fn more_inputs_than_singers_do_not_share_a_buffer() {
+        // The reported symptom: with several capture devices connected, one microphone shared
+        // a meter with another and the ones after it said nothing was arriving. The buffers
+        // were a fixed six — the limit on singers, wrongly applied to inputs.
+        let mut buffers = PlayerBuffers::new();
+        let devices = [
+            device("karaoke one", 1),
+            device("karaoke two", 3),
+            device("auna", 5),
+            device("headset", 7),
+        ];
+        // Each device sends a block whose samples identify it, so a mix-up is visible.
+        for (index, config) in devices.iter().enumerate() {
+            let left = (index as i16 + 1) * 100;
+            let right = left + 1;
+            buffers.route(config, &[left, right, left, right]);
+        }
+
+        for slot in 1..=8u8 {
+            let samples = buffers.player(slot);
+            assert_eq!(
+                samples.len(),
+                2,
+                "slot {slot} received {} samples",
+                samples.len()
+            );
+            let expected = ((slot as i16 - 1) / 2 + 1) * 100 + ((slot as i16 - 1) % 2);
+            assert!(
+                samples.iter().all(|s| *s == expected),
+                "slot {slot} holds {samples:?}, expected {expected} — inputs were combined"
+            );
+        }
+    }
+
+    #[test]
+    fn a_channel_switched_off_stays_empty() {
+        let mut buffers = PlayerBuffers::new();
+        let config = DeviceConfig {
+            name: "one live channel".to_owned(),
+            input_index: 0,
+            latency_ms: LATENCY_AUTODETECT,
+            channel_to_player: vec![1, CHANNEL_OFF],
+        };
+        buffers.route(&config, &[10, 20, 10, 20]);
+        assert_eq!(buffers.player(1), &[10, 10]);
+        assert!(
+            buffers.player(2).is_empty(),
+            "an off channel wrote somewhere"
+        );
     }
 }

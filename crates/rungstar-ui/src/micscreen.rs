@@ -426,6 +426,9 @@ impl MicScreen {
         );
 
         let (note, tint) = if !heard {
+            // Distinguishes a device that has never produced a sample — unplugged, or an
+            // input the machine lists but nothing is connected to — from one that is simply
+            // being sung into quietly.
             ("nothing arriving", style.danger)
         } else if player == 0 {
             ("not in use", style.muted)
