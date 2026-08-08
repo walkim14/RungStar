@@ -225,6 +225,51 @@ fn facets_report_what_is_available() {
 }
 
 #[test]
+fn decades_are_a_facet_even_though_no_column_holds_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write_song(
+        root,
+        "Pop",
+        "Alpha",
+        "One",
+        "#YEAR:1984
+",
+    );
+    write_song(
+        root,
+        "Pop",
+        "Beta",
+        "Two",
+        "#YEAR:1989
+",
+    );
+    write_song(
+        root,
+        "Pop",
+        "Gamma",
+        "Three",
+        "#YEAR:1972
+",
+    );
+    write_song(root, "Pop", "Delta", "Four", "");
+    let database = library(root);
+
+    // Newest first, because a decade list is a timeline; ordering it by popularity, as the
+    // other facets are, would make it unreadable. A song with no year is in no decade.
+    let decades = database.facet("decade").unwrap();
+    assert_eq!(
+        decades,
+        vec![("1980".to_owned(), 2), ("1970".to_owned(), 1)]
+    );
+
+    // And the count is the number filtering by it actually returns.
+    let mut query = SearchQuery::all();
+    query.filters.decades = vec![1980];
+    assert_eq!(database.search(&query).unwrap().len(), 2);
+}
+
+#[test]
 fn play_counts_survive_a_rescan() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

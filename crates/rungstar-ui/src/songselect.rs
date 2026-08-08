@@ -25,6 +25,8 @@ pub enum Mode {
     Searching,
     /// Choosing what to sort by.
     Sorting,
+    /// The filter panel.
+    Filtering,
     /// The per-song menu.
     Menu,
 }
@@ -140,6 +142,106 @@ impl Narrow {
     }
 }
 
+/// A category the list can be narrowed by, beyond the search text.
+///
+/// These are the questions a song library is actually asked at a party -- "what have we got in
+/// German", "anything from the eighties" -- and they are answers the index already holds. The
+/// values come from the library rather than from a list written here, so a library of nothing
+/// but schlager offers exactly the genres it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Facet {
+    /// Duets, solos, has a video, is playable. One at a time, unlike the others.
+    Kind,
+    Genre,
+    Language,
+    Decade,
+    Edition,
+    Folder,
+    Creator,
+}
+
+impl Facet {
+    pub const ALL: [Facet; 7] = [
+        Facet::Kind,
+        Facet::Genre,
+        Facet::Language,
+        Facet::Decade,
+        Facet::Edition,
+        Facet::Folder,
+        Facet::Creator,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Kind => "Kind",
+            Self::Genre => "Genre",
+            Self::Language => "Language",
+            Self::Decade => "Decade",
+            Self::Edition => "Edition",
+            Self::Folder => "Folder",
+            Self::Creator => "Creator",
+        }
+    }
+
+    /// The library column its values come from, or `None` when the screen supplies them.
+    pub fn column(self) -> Option<&'static str> {
+        match self {
+            Self::Kind => None,
+            Self::Genre => Some("genre"),
+            Self::Language => Some("language"),
+            Self::Decade => Some("decade"),
+            Self::Edition => Some("edition"),
+            Self::Folder => Some("folder"),
+            Self::Creator => Some("creator"),
+        }
+    }
+
+    /// How a stored value is shown. A decade is stored as its first year.
+    pub fn label(self, value: &str) -> String {
+        match self {
+            Self::Decade => format!("{value}s"),
+            _ => value.to_owned(),
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|f| *f == self).unwrap_or(0)
+    }
+}
+
+/// The values each facet has in this library, with how many songs each covers.
+///
+/// Supplied by the application, because the screen has no database. Counts are of the whole
+/// library rather than of the current results: a filter list that empties itself as you use it
+/// cannot be used to widen a search again.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FacetValues {
+    lists: Vec<Vec<(String, i64)>>,
+}
+
+impl FacetValues {
+    pub fn new() -> Self {
+        Self {
+            lists: vec![Vec::new(); Facet::ALL.len()],
+        }
+    }
+
+    pub fn set(&mut self, facet: Facet, values: Vec<(String, i64)>) {
+        if self.lists.len() < Facet::ALL.len() {
+            self.lists = vec![Vec::new(); Facet::ALL.len()];
+        }
+        self.lists[facet.index()] = values;
+    }
+
+    pub fn get(&self, facet: Facet) -> &[(String, i64)] {
+        self.lists.get(facet.index()).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lists.iter().all(Vec::is_empty)
+    }
+}
+
 /// Which fields the search box can be pointed at.
 pub const FIELDS: [(SearchField, &str); 4] = [
     (SearchField::All, "Everything"),
@@ -158,6 +260,10 @@ enum Region {
     Key(usize),
     Sort(usize),
     Menu(usize),
+    /// A row in the filter panel's category column.
+    Category(usize),
+    /// A row in the filter panel's value column.
+    Value(usize),
 }
 
 /// What the per-song menu offers.
@@ -207,6 +313,16 @@ pub struct SongSelect {
     sort_chosen: bool,
     /// What the list is narrowed to.
     narrow: Narrow,
+    /// Values chosen per facet, in `Facet::ALL` order. Empty means no constraint.
+    picked: Vec<Vec<String>>,
+    /// The values each facet offers, filled in by the application.
+    facets: FacetValues,
+    /// Set when the facet lists need fetching, which is once and after every scan.
+    facets_stale: bool,
+    facet_cursor: usize,
+    value_cursor: usize,
+    /// `true` while the value column has focus rather than the category column.
+    on_values: bool,
     field_cursor: usize,
     descending: bool,
     /// Set when the query the application should be running has changed.
@@ -244,6 +360,12 @@ impl SongSelect {
             sort_cursor: 0,
             sort_chosen: false,
             narrow: Narrow::default(),
+            picked: vec![Vec::new(); Facet::ALL.len()],
+            facets: FacetValues::new(),
+            facets_stale: true,
+            facet_cursor: 0,
+            value_cursor: 0,
+            on_values: false,
             field_cursor: 0,
             descending: false,
             stale: true,
@@ -262,6 +384,27 @@ impl SongSelect {
     /// Used when a scan has changed the library underneath the browser.
     pub fn invalidate(&mut self) {
         self.stale = true;
+        // A scan can add a genre that was not there before, so the filter lists go with it.
+        self.facets_stale = true;
+    }
+
+    /// Whether the application should fetch the facet lists.
+    pub fn needs_facets(&self) -> bool {
+        self.facets_stale
+    }
+
+    pub fn set_facets(&mut self, facets: FacetValues) {
+        self.facets = facets;
+        self.facets_stale = false;
+        // A value that no longer exists cannot stay chosen, or the list stays empty with no
+        // visible reason why.
+        for (index, facet) in Facet::ALL.iter().enumerate() {
+            if facet.column().is_none() {
+                continue;
+            }
+            let available = self.facets.get(*facet);
+            self.picked[index].retain(|value| available.iter().any(|(v, _)| v == value));
+        }
     }
 
     /// What is under a point, topmost first — the overlays are recorded last and so win.
@@ -333,8 +476,139 @@ impl SongSelect {
     }
 
     /// The library filters for the current narrowing.
+    ///
+    /// Values within a facet are an "any of these" match and the facets are ANDed, which is
+    /// what the checkboxes look like they do: German *or* Swedish, and from the eighties.
     pub fn filters(&self) -> rungstar_library::Filters {
-        self.narrow.filters()
+        let mut filters = self.narrow.filters();
+        for (index, facet) in Facet::ALL.iter().enumerate() {
+            let chosen = &self.picked[index];
+            if chosen.is_empty() {
+                continue;
+            }
+            match facet {
+                Facet::Kind => {}
+                Facet::Genre => filters.genres.clone_from(chosen),
+                Facet::Language => filters.languages.clone_from(chosen),
+                Facet::Edition => filters.editions.clone_from(chosen),
+                Facet::Folder => filters.folders.clone_from(chosen),
+                Facet::Creator => filters.creators.clone_from(chosen),
+                Facet::Decade => {
+                    filters.decades = chosen.iter().filter_map(|d| d.parse().ok()).collect();
+                }
+            }
+        }
+        filters
+    }
+
+    /// What is being filtered out, in a few words, or `None` when nothing is.
+    ///
+    /// One name and a count rather than a list of every value: "Language +3" fits in a header
+    /// and still says that something is hidden, which is the part that matters.
+    pub fn filter_summary(&self) -> Option<String> {
+        let mut named: Option<String> = None;
+        let mut extra = 0;
+        if self.narrow != Narrow::Everything {
+            named = Some(self.narrow.label().to_owned());
+        }
+        for (index, facet) in Facet::ALL.iter().enumerate() {
+            for value in &self.picked[index] {
+                match &named {
+                    None => named = Some(facet.label(value)),
+                    Some(_) => extra += 1,
+                }
+            }
+        }
+        match (named, extra) {
+            (None, _) => None,
+            (Some(name), 0) => Some(name),
+            (Some(name), n) => Some(format!("{name} +{n}")),
+        }
+    }
+
+    /// How many values are chosen across every facet, for the badge on the filter button.
+    pub fn active_filters(&self) -> usize {
+        let kinds = usize::from(self.narrow != Narrow::Everything);
+        kinds + self.picked.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// Put every filter back to showing everything.
+    pub fn clear_filters(&mut self) {
+        self.narrow = Narrow::Everything;
+        for picked in &mut self.picked {
+            picked.clear();
+        }
+        self.stale = true;
+    }
+
+    /// The rows the filter panel shows for a facet: label, count, and whether it is chosen.
+    fn rows_for(&self, facet: Facet) -> Vec<(String, String, bool)> {
+        match facet {
+            Facet::Kind => Narrow::ALL
+                .iter()
+                .map(|narrow| {
+                    (
+                        narrow.label().to_owned(),
+                        String::new(),
+                        *narrow == self.narrow,
+                    )
+                })
+                .collect(),
+            _ => {
+                let chosen = &self.picked[facet.index()];
+                self.facets
+                    .get(facet)
+                    .iter()
+                    .map(|(value, count)| {
+                        (
+                            facet.label(value),
+                            count.to_string(),
+                            chosen.iter().any(|c| c == value),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Turn the value at `index` of `facet` on or off.
+    fn toggle_value(&mut self, facet: Facet, index: usize) {
+        match facet {
+            // One kind at a time: "duets only" and "solos only" together is an empty list.
+            Facet::Kind => {
+                let Some(narrow) = Narrow::ALL.get(index).copied() else {
+                    return;
+                };
+                // Choosing the one already chosen turns it off rather than doing nothing.
+                self.narrow = if self.narrow == narrow {
+                    Narrow::Everything
+                } else {
+                    narrow
+                };
+            }
+            _ => {
+                let Some((value, _)) = self.facets.get(facet).get(index).cloned() else {
+                    return;
+                };
+                let chosen = &mut self.picked[facet.index()];
+                match chosen.iter().position(|c| *c == value) {
+                    Some(at) => {
+                        chosen.remove(at);
+                    }
+                    None => chosen.push(value),
+                }
+            }
+        }
+        self.stale = true;
+    }
+
+    /// The filter category under the cursor, for tests and for the panel.
+    pub fn facet_title(&self) -> &'static str {
+        self.facet().title()
+    }
+
+    fn facet(&self) -> Facet {
+        Facet::ALL[self.facet_cursor.min(Facet::ALL.len() - 1)]
     }
 
     /// The song under the cursor.
@@ -379,6 +653,7 @@ impl SongSelect {
             Mode::Browsing => self.handle_browsing(input, area),
             Mode::Searching => self.handle_searching(input),
             Mode::Sorting => self.handle_sorting(input),
+            Mode::Filtering => self.handle_filtering(input),
             Mode::Menu => self.handle_menu(input),
         }
     }
@@ -417,8 +692,8 @@ impl SongSelect {
                 self.browser.layout = self.browser.layout.next();
             }
             Input::CycleFilter => {
-                self.narrow = self.narrow.next();
-                self.stale = true;
+                self.mode = Mode::Filtering;
+                self.on_values = false;
             }
             Input::Random => {
                 // Deliberately not a random number: with no source of entropy in this crate,
@@ -486,6 +761,21 @@ impl SongSelect {
                 self.menu_cursor = index;
                 if clicked {
                     return self.handle_menu(Input::Confirm);
+                }
+            }
+            Some(Region::Category(index)) => {
+                if index != self.facet_cursor {
+                    self.facet_cursor = index;
+                    self.value_cursor = 0;
+                }
+                self.on_values = clicked;
+            }
+            Some(Region::Value(index)) => {
+                self.value_cursor = index;
+                self.on_values = true;
+                if clicked {
+                    let facet = self.facet();
+                    self.toggle_value(facet, index);
                 }
             }
             Some(Region::Sort(index)) => {
@@ -589,6 +879,58 @@ impl SongSelect {
         Transition::None
     }
 
+    /// The filter panel: categories on the left, their values on the right.
+    fn handle_filtering(&mut self, input: Input) -> Transition {
+        let rows = self.rows_for(self.facet()).len();
+        match input {
+            Input::Up if self.on_values => {
+                self.value_cursor = self.value_cursor.saturating_sub(1);
+            }
+            Input::Down if self.on_values => {
+                if self.value_cursor + 1 < rows {
+                    self.value_cursor += 1;
+                }
+            }
+            Input::PageUp if self.on_values => {
+                self.value_cursor = self.value_cursor.saturating_sub(8);
+            }
+            Input::PageDown if self.on_values => {
+                self.value_cursor = (self.value_cursor + 8).min(rows.saturating_sub(1));
+            }
+            Input::Up => {
+                self.facet_cursor = self.facet_cursor.saturating_sub(1);
+                self.value_cursor = 0;
+            }
+            Input::Down => {
+                self.facet_cursor = (self.facet_cursor + 1).min(Facet::ALL.len() - 1);
+                self.value_cursor = 0;
+            }
+            Input::Right => self.on_values = true,
+            Input::Left => self.on_values = false,
+            Input::Confirm | Input::Submit => {
+                if self.on_values {
+                    let facet = self.facet();
+                    self.toggle_value(facet, self.value_cursor);
+                } else {
+                    self.on_values = true;
+                }
+            }
+            // The panel is where filters are set, so it is also where they are all undone.
+            // Hunting through seven categories for the one still narrowing the list is the
+            // usual way a filter panel loses somebody.
+            Input::Search => self.clear_filters(),
+            Input::Back | Input::CycleFilter => {
+                if self.on_values {
+                    self.on_values = false;
+                } else {
+                    self.mode = Mode::Browsing;
+                }
+            }
+            _ => {}
+        }
+        Transition::None
+    }
+
     fn handle_sorting(&mut self, input: Input) -> Transition {
         match input {
             Input::Up => {
@@ -641,12 +983,11 @@ impl SongSelect {
         } else {
             format!("{} of {}", self.browser.cursor() + 1, self.songs.len())
         };
-        let status = if self.narrow == Narrow::Everything {
-            counted
-        } else {
-            // Saying what is being hidden, because a list that is quietly missing songs is
-            // indistinguishable from a library that is missing them.
-            format!("{}  ·  {}", self.narrow.label(), counted)
+        // Saying what is being hidden, because a list quietly missing songs is
+        // indistinguishable from a library missing them.
+        let status = match self.filter_summary() {
+            Some(filters) => format!("{filters}  ·  {counted}"),
+            None => counted,
         };
         let body = widgets.header(list, area, "Songs", &status);
         let body = widgets.footer(list, body, &self.hints());
@@ -666,6 +1007,7 @@ impl SongSelect {
         match self.mode {
             Mode::Searching => self.draw_keyboard(list, area, style, &mut overlay),
             Mode::Sorting => self.draw_sort_picker(list, area, style, &mut overlay),
+            Mode::Filtering => self.draw_filters(list, area, style, &mut overlay),
             Mode::Menu => self.draw_menu(list, area, style, &mut overlay),
             Mode::Browsing => {}
         }
@@ -697,6 +1039,12 @@ impl SongSelect {
                 (confirm, "Choose"),
                 ("\u{2190}\u{2192}", "Reverse"),
                 (back, "Back"),
+            ],
+            Mode::Filtering => vec![
+                (confirm, "Toggle"),
+                ("\u{2190}\u{2192}", "Column"),
+                (search, "Clear all"),
+                (back, "Done"),
             ],
             Mode::Menu => vec![(confirm, "Choose"), (back, "Back")],
         }
@@ -1048,6 +1396,189 @@ impl SongSelect {
             .inset_xy(0.0, style.gap(0.2));
             regions.push((row, Region::Menu(index)));
             widgets.row(list, row, action.label(), "", index == self.menu_cursor);
+        }
+    }
+
+    /// The filter panel.
+    ///
+    /// Two columns, because the alternative is one list of every genre, language and edition
+    /// in the library run together -- eight thousand songs is 354 genres and 295 editions, and
+    /// a flat list of that is not a filter, it is a haystack.
+    fn draw_filters(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
+        let widgets = Widgets::new(style);
+        widgets.scrim(list, area);
+
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.62).min(1100.0),
+            (area.h * 0.78).min(760.0),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(1.8));
+
+        let row_h = style.gap(3.0);
+        let (heading, body) = inner.cut_top(row_h * 1.3);
+        list.text(
+            heading,
+            "Filter",
+            TextStyle::new(style.scaled_text(1.2), style.text).bold(),
+        );
+        let active = self.active_filters();
+        list.text(
+            heading,
+            match active {
+                0 => "Everything".to_owned(),
+                1 => "1 filter".to_owned(),
+                n => format!("{n} filters"),
+            },
+            TextStyle::new(
+                style.text_size(),
+                if active > 0 {
+                    style.accent
+                } else {
+                    style.muted
+                },
+            )
+            .align(Align::End),
+        );
+
+        let (categories, values) = body.cut_left((body.w * 0.34).min(320.0));
+
+        for (index, facet) in Facet::ALL.iter().enumerate() {
+            let row = Rect::new(
+                categories.x,
+                categories.y + row_h * index as f32,
+                categories.w - style.gap(1.0),
+                row_h,
+            )
+            .inset_xy(0.0, style.gap(0.2));
+            regions.push((row, Region::Category(index)));
+            let selected = index == self.facet_cursor;
+            // The count of what is chosen in a category, so a filter set three categories ago
+            // is still visible from here.
+            let chosen = match facet {
+                Facet::Kind => usize::from(self.narrow != Narrow::Everything),
+                _ => self.picked[index].len(),
+            };
+            widgets.row(
+                list,
+                row,
+                facet.title(),
+                &if chosen == 0 {
+                    String::new()
+                } else {
+                    chosen.to_string()
+                },
+                selected,
+            );
+            if selected && self.on_values {
+                list.outline(
+                    row,
+                    style.accent,
+                    style.metrics.outline,
+                    style.metrics.radius,
+                );
+            }
+        }
+
+        let rows = self.rows_for(self.facet());
+        if rows.is_empty() {
+            list.text(
+                values,
+                "Nothing in the library has one",
+                TextStyle::new(style.text_size(), style.muted).centered(),
+            );
+            return;
+        }
+
+        let visible = ((values.h / row_h).floor() as usize).max(1);
+        let first = self
+            .value_cursor
+            .saturating_sub(visible.saturating_sub(2))
+            .min(rows.len().saturating_sub(visible.min(rows.len())));
+
+        list.clipped(values, |list| {
+            for (offset, (label, count, chosen)) in
+                rows.iter().skip(first).take(visible).enumerate()
+            {
+                let index = first + offset;
+                let row = Rect::new(values.x, values.y + row_h * offset as f32, values.w, row_h)
+                    .inset_xy(0.0, style.gap(0.2));
+                regions.push((row, Region::Value(index)));
+                let selected = self.on_values && index == self.value_cursor;
+                list.panel(
+                    row,
+                    if selected {
+                        style.accent
+                    } else if *chosen {
+                        style.surface_raised
+                    } else {
+                        style.surface
+                    },
+                    style.metrics.radius,
+                );
+                let text = if selected {
+                    style.on_accent
+                } else {
+                    style.text
+                };
+                let muted = if selected {
+                    style.on_accent
+                } else {
+                    style.muted
+                };
+
+                let cell = row.inset_xy(style.gap(1.2), 0.0);
+                // The tick has its own column so the labels line up whether ticked or not,
+                // which is what makes a long list scannable.
+                let (mark, rest) = cell.cut_left(style.gap(2.2));
+                if *chosen {
+                    list.text(
+                        mark,
+                        "\u{2713}",
+                        TextStyle::new(
+                            style.text_size(),
+                            if selected {
+                                style.on_accent
+                            } else {
+                                style.accent
+                            },
+                        )
+                        .bold(),
+                    );
+                }
+                let (name, number) = rest.cut_left(rest.w * 0.74);
+                list.text(
+                    Rect::new(name.x, name.y, (name.w - style.gap(1.0)).max(0.0), name.h),
+                    label,
+                    TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
+                );
+                list.text(
+                    number,
+                    count,
+                    TextStyle::new(style.scaled_text(0.82), muted).align(Align::End),
+                );
+            }
+        });
+
+        if rows.len() > visible {
+            list.text(
+                Rect::new(
+                    values.x,
+                    values.bottom() - style.gap(2.0),
+                    values.w,
+                    style.gap(2.0),
+                ),
+                format!("{}/{}", self.value_cursor + 1, rows.len()),
+                TextStyle::new(style.scaled_text(0.75), style.muted).align(Align::End),
+            );
         }
     }
 

@@ -10,7 +10,7 @@ use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::options::Action;
 use rungstar_ui::screen::{Route, Transition};
 use rungstar_ui::settings::Settings;
-use rungstar_ui::songselect::{Input, Mode, SongSelect};
+use rungstar_ui::songselect::{Facet, FacetValues, Input, Mode, SongSelect};
 use rungstar_ui::theme::Theme;
 use rungstar_ui::Layout;
 
@@ -1002,6 +1002,48 @@ fn the_on_screen_keyboard_still_presses_keys_with_confirm() {
     assert_eq!(screen.mode(), Mode::Searching);
 }
 
+/// Open the filter panel and put the cursor on the category with this title.
+fn open_filters(screen: &mut SongSelect, area: Rect, category: &str) {
+    if screen.mode() != Mode::Filtering {
+        screen.handle(Input::CycleFilter, area);
+    }
+    assert_eq!(screen.mode(), Mode::Filtering);
+    // Back to the category column, then to the top of it, wherever the last test step left it.
+    screen.handle(Input::Left, area);
+    for _ in 0..Facet::ALL.len() {
+        screen.handle(Input::Up, area);
+    }
+    for _ in 0..Facet::ALL.len() {
+        if screen.facet_title() == category {
+            return;
+        }
+        screen.handle(Input::Down, area);
+    }
+    panic!("no filter category called {category:?}");
+}
+
+/// Facet lists as the application would supply them.
+fn facets() -> FacetValues {
+    let mut values = FacetValues::new();
+    values.set(
+        Facet::Genre,
+        vec![("Rock".to_owned(), 12), ("Schlager".to_owned(), 4)],
+    );
+    values.set(
+        Facet::Language,
+        vec![
+            ("English".to_owned(), 30),
+            ("German".to_owned(), 9),
+            ("Swedish".to_owned(), 2),
+        ],
+    );
+    values.set(
+        Facet::Decade,
+        vec![("1980".to_owned(), 7), ("1970".to_owned(), 3)],
+    );
+    values
+}
+
 #[test]
 fn the_list_can_be_narrowed_to_duets() {
     // Searching the word "duet" happens to work because the text is indexed, but only for
@@ -1012,7 +1054,10 @@ fn the_list_can_be_narrowed_to_duets() {
     assert_eq!(screen.narrow(), Narrow::Everything);
     assert_eq!(screen.filters().duet, None);
 
-    screen.handle(Input::CycleFilter, area);
+    open_filters(&mut screen, area, "Kind");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.narrow(), Narrow::Duets);
     assert_eq!(screen.filters().duet, Some(true));
     assert!(
@@ -1020,44 +1065,143 @@ fn the_list_can_be_narrowed_to_duets() {
         "narrowing did not ask for a new query"
     );
 
+    // One kind at a time: "duets only" and "solos only" together is an empty list.
     screen.set_results(vec![]);
-    screen.handle(Input::CycleFilter, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.filters().duet, Some(false), "solos only");
 
-    // Round the loop and back to everything.
-    for _ in 0..3 {
-        screen.set_results(vec![]);
-        screen.handle(Input::CycleFilter, area);
-    }
+    // And choosing the one already chosen turns it off rather than doing nothing.
+    screen.set_results(vec![]);
+    screen.handle(Input::Confirm, area);
     assert_eq!(screen.narrow(), Narrow::Everything);
     assert!(screen.filters().is_empty());
 }
 
 #[test]
+fn values_within_a_category_are_any_of_and_categories_are_all_of() {
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+
+    // Two languages: either one will do.
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.filters().languages, vec!["English", "German"]);
+
+    // Plus a decade, which narrows further rather than widening.
+    screen.handle(Input::Left, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    let filters = screen.filters();
+    assert_eq!(filters.languages, vec!["English", "German"]);
+    assert_eq!(filters.decades, vec![1980], "a decade is stored as a year");
+
+    // Choosing a value again removes it.
+    screen.handle(Input::Confirm, area);
+    assert!(screen.filters().decades.is_empty());
+}
+
+#[test]
+fn every_filter_can_be_cleared_at_once() {
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+
+    open_filters(&mut screen, area, "Genre");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.active_filters(), 2);
+
+    screen.handle(Input::Search, area);
+    assert_eq!(screen.active_filters(), 0);
+    assert!(screen.filters().is_empty());
+    assert!(screen.needs_query(), "clearing did not ask for a new query");
+}
+
+#[test]
+fn a_value_that_left_the_library_stops_being_chosen() {
+    // A rescan can remove the last Swedish song. Leaving it chosen leaves the browser empty
+    // with no visible reason why.
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    assert_eq!(screen.filters().languages, vec!["Swedish"]);
+
+    let mut fewer = FacetValues::new();
+    fewer.set(Facet::Language, vec![("English".to_owned(), 30)]);
+    screen.set_facets(fewer);
+    assert!(screen.filters().languages.is_empty());
+}
+
+#[test]
+fn the_filter_panel_lists_what_the_library_has() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    for expected in ["Filter", "Language", "English", "German", "Swedish", "30"] {
+        assert!(
+            text.iter().any(|t| t == expected),
+            "the panel did not show {expected:?}: {text:?}"
+        );
+    }
+
+    // A decade reads as a decade, not as a bare year.
+    open_filters(&mut screen, area, "Decade");
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    assert!(strings(&list).iter().any(|t| t == "1980s"));
+}
+
+#[test]
 fn a_narrowed_list_says_so() {
     // A list quietly missing songs is indistinguishable from a library missing them.
-    use rungstar_ui::songselect::Narrow;
     let theme = Theme::builtin();
     let style = theme.resolve_default();
     let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
 
     let mut screen = loaded(20);
+    screen.set_facets(facets());
     let mut list = DrawList::new();
     screen.draw(&mut list, area, &style, &|_| None);
     assert!(
-        !strings(&list).join(" ").contains("only"),
+        !strings(&list).join(" ").contains("German"),
         "an unfiltered list claimed to be filtered"
     );
 
-    screen.handle(Input::CycleFilter, area);
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+    screen.handle(Input::Back, area);
+    screen.handle(Input::Back, area);
+    assert_eq!(screen.mode(), Mode::Browsing);
     screen.set_results(vec![]);
+
     let mut list = DrawList::new();
     screen.draw(&mut list, area, &style, &|_| None);
     let text = strings(&list).join(" ");
-    assert!(
-        text.contains(Narrow::Duets.label()),
-        "the filter is not shown: {text}"
-    );
+    assert!(text.contains("German"), "the filter is not shown: {text}");
 }
 
 /// Put the cursor on the options row whose help begins with `prefix`.

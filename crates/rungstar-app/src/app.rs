@@ -30,7 +30,7 @@ use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
 use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch};
 use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
-use rungstar_ui::songselect::{Input, SongAction, SongSelect};
+use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
 use rungstar_ui::Color;
@@ -845,6 +845,33 @@ impl App {
         let preview_volume = self.preview_volume();
         if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
             playback.set_volume(preview_volume);
+        }
+    }
+
+    /// Fill the browser's filter lists from the index.
+    ///
+    /// Once, and again after a scan. Seven `GROUP BY` queries over eight thousand rows is a
+    /// few milliseconds, and doing it when the panel opens instead would put that on the
+    /// keypress that opens it.
+    fn refresh_facets(&mut self) {
+        let Some(Screen::Songs(songs)) = self.stack.last() else {
+            return;
+        };
+        if !songs.needs_facets() {
+            return;
+        }
+        let mut values = FacetValues::new();
+        for facet in Facet::ALL {
+            let Some(column) = facet.column() else {
+                continue;
+            };
+            match self.library.facet(column) {
+                Ok(found) => values.set(facet, found),
+                Err(error) => tracing::warn!("could not list {column}: {error}"),
+            }
+        }
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.set_facets(values);
         }
     }
 
@@ -1685,6 +1712,7 @@ fn main() -> Result<()> {
         }
         app.handle_song_menu();
         app.refresh_stats();
+        app.refresh_facets();
         app.refresh_songs();
         app.refresh_highscores();
         app.update_preview(&audio_subsystem);
@@ -1818,6 +1846,7 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
     for (name, screen) in screens {
         app.stack.push(screen);
         app.refresh_stats();
+        app.refresh_facets();
         app.refresh_songs();
         app.refresh_highscores();
         list.clear();
@@ -1971,9 +2000,20 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         println!("sing        {} draw commands, 6 singers", list.len());
     }
 
-    // And the two browser overlays, which have their own layout maths.
+    // And the browser overlays, which have their own layout maths.
     app.stack.push(Screen::Songs(Box::new(SongSelect::new())));
-    for overlay in [Input::Search, Input::Search, Input::Sort] {
+    app.refresh_facets();
+    for overlay in [
+        Input::Search,
+        Input::Search,
+        Input::Sort,
+        Input::Sort,
+        Input::CycleFilter,
+        // Into the value column, so the panel is drawn with a real list of genres behind it
+        // rather than only its categories.
+        Input::Right,
+        Input::Down,
+    ] {
         app.handle(overlay, area);
         list.clear();
         app.draw(list, area);

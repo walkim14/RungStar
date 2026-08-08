@@ -60,46 +60,74 @@ fn no_song_is_shown_twice_however_short_the_list() {
 }
 
 #[test]
-fn the_cursor_wraps_at_both_ends() {
+fn the_cursor_stops_at_both_ends() {
+    // The list is not a loop. Holding a direction has to arrive somewhere, and "am I back
+    // where I started or is this a different song with the same name" is not a question a
+    // song browser should raise.
     for layout in Layout::ALL {
         let mut browser = settled(layout, 10);
         assert_eq!(browser.cursor(), 0);
         browser.move_by(-1);
-        assert_eq!(browser.cursor(), 9, "{layout:?} did not wrap backwards");
+        assert_eq!(browser.cursor(), 0, "{layout:?} wrapped backwards");
+        browser.move_by(9);
+        assert_eq!(browser.cursor(), 9);
         browser.move_by(1);
-        assert_eq!(browser.cursor(), 0, "{layout:?} did not wrap forwards");
-        // A jump larger than the list still lands somewhere sensible.
-        browser.move_by(25);
-        assert_eq!(browser.cursor(), 5);
+        assert_eq!(browser.cursor(), 9, "{layout:?} wrapped forwards");
+        // A page that runs off the end stops at the end rather than doing nothing.
+        browser.move_by(-25);
+        assert_eq!(browser.cursor(), 0);
     }
 }
 
 #[test]
-fn a_jump_more_than_half_way_round_does_not_animate_through_the_library() {
-    // The list is circular, so stepping up from the first song genuinely shows the last one
-    // sliding in from above — that animates, and should. What must not animate is a jump
-    // whose shortest visual path is not the path taken: crossing more than half the library
-    // would scroll for several seconds in the wrong direction.
+fn nothing_from_the_far_end_is_drawn_beside_the_near_one() {
+    // The visible slots past either end stay empty. Drawing the last song above the first is
+    // exactly what makes a list feel endless, and it also means the song above the cursor is
+    // not the one that sorts before it.
+    for layout in Layout::ALL {
+        let mut browser = settled(layout, 60);
+        for placement in browser.placements(area()) {
+            assert!(
+                placement.index < 30,
+                "{layout:?} drew song {} while at the top of the list",
+                placement.index
+            );
+        }
+        browser.jump_to(59);
+        for placement in browser.placements(area()) {
+            assert!(
+                placement.index > 30,
+                "{layout:?} drew song {} while at the bottom of the list",
+                placement.index
+            );
+        }
+    }
+}
+
+#[test]
+fn a_jump_across_the_library_lands_rather_than_scrolling_to_it() {
     let mut browser = settled(Layout::List, 30_000);
     browser.move_by(-1);
-    assert_eq!(browser.cursor(), 29_999);
-    assert!(
-        browser.animating(),
-        "a single step should glide, even across the wrap"
-    );
-
-    browser.jump_to(0);
-    browser.move_by(-20_000);
-    assert_eq!(browser.cursor(), 10_000);
+    assert_eq!(browser.cursor(), 0, "there is nothing above the first song");
     assert!(
         !browser.animating(),
-        "a jump across the library should land, not scroll"
+        "a step into the end of the list should not glide anywhere"
     );
+
+    // A jump of twenty thousand rows may not scroll through twenty thousand rows. The view
+    // lags by a bounded amount and eases in from there.
+    browser.jump_to(0);
+    browser.move_by(20_000);
+    assert_eq!(browser.cursor(), 20_000);
+    for _ in 0..120 {
+        browser.tick(1.0 / 60.0);
+    }
+    assert!(!browser.animating(), "the view never caught up");
     let placements = browser.placements(area());
     let cursor = placements.iter().find(|p| p.selected).unwrap();
     assert!(
         (cursor.rect.center().y - area().center().y).abs() < 1.0,
-        "cursor is sliding in from {} instead of being centred",
+        "cursor settled at {} instead of centred",
         cursor.rect.center().y
     );
 }
