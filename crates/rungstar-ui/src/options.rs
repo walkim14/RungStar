@@ -593,6 +593,12 @@ impl Page {
                     "Show frame rate",
                     "Draw the frame rate in the corner."
                 ),
+                choice_item!(
+                    crate::glyphs::Glyphs,
+                    advanced.glyphs,
+                    "Button names",
+                    "What the hints call the controller's buttons. Automatic reads the machine                      \u{2014} a Steam Deck is recognised \u{2014} and only needs changing for a                      PlayStation pad on a desktop."
+                ),
                 Item {
                     label: "Import UltraStar scores",
                     help: "Read the highscores from an existing UltraStar Deluxe                            installation. Additive and safe to run twice: nothing already                            here is replaced or duplicated.",

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A microphone, drawn rather than photographed: an icon has to read at 16 pixels, and the
+     shapes here are the same ones the game draws its note bubbles with. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff4d8d"/>
+      <stop offset="1" stop-color="#d6006b"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#171722"/>
+  <rect x="50" y="22" width="28" height="52" rx="14" fill="url(#body)"/>
+  <path d="M38 62a26 26 0 0 0 52 0" fill="none" stroke="#f2f2f7" stroke-width="7"
+        stroke-linecap="round"/>
+  <rect x="60" y="88" width="8" height="18" rx="4" fill="#f2f2f7"/>
+  <rect x="44" y="102" width="40" height="8" rx="4" fill="#f2f2f7"/>
+</svg>

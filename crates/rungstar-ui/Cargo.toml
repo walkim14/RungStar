@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 rungstar-library.workspace = true
+rungstar-editor.workspace = true
 rungstar-party.workspace = true
 rungstar-profile.workspace = true
 rungstar-usdb.workspace = true

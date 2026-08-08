@@ -1,0 +1,115 @@
+# Building the things people actually download.
+#
+# Separate from CI on purpose. CI runs on every push and has to be fast; this runs on a tag and
+# on demand, and produces artefacts somebody can install. A packaging step that only ever runs
+# at release time is a packaging step that is broken at release time, so `workflow_dispatch` is
+# there to run it whenever.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows portable + installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg-sys generates its bindings with bindgen, which needs libclang. The runner has
+      # LLVM already; naming it explicitly is cheaper than finding out it moved.
+      - name: Point bindgen at libclang
+        run: echo "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release -p rungstar-app
+
+      # The game starts, draws every screen and exits. This is what makes "it builds" and "it
+      # runs" different statements on a machine with nobody in front of it.
+      - name: Self-check
+        run: cargo run --release -p rungstar-app --bin rungstar -- --check
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/windows/portable.ps1 -SkipBuild
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            & $iscc packaging\windows\rungstar.iss
+          } else {
+            Write-Warning "Inno Setup is not on this runner; only the portable zip was built."
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            target/package/*.zip
+            target/package/*.exe
+          if-no-files-found: error
+
+  linux:
+    name: Linux AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libudev-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libswresample-dev pkg-config cmake \
+            libsdl3-dev fuse libfuse2 || true
+
+      - name: appimagetool
+        run: |
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Build the AppImage
+        run: bash packaging/linux/appimage.sh
+        # Not fatal: SDL3 is new enough that not every runner image has it, and a failed
+        # AppImage should not stop the Windows build being published.
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: target/package/*.AppImage
+          if-no-files-found: warn
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo sources for an offline build
+        run: |
+          pip install --quiet aiohttp toml
+          curl -fsSL -o flatpak-cargo-generator.py \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+          python3 flatpak-cargo-generator.py Cargo.lock -o packaging/linux/cargo-sources.json
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: rungstar.flatpak
+          manifest-path: packaging/linux/de.rungstar.RungStar.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+        continue-on-error: true

@@ -475,4 +475,65 @@ with packaging.
   **What still needs the account**: the two requests that fetch a note file, and therefore any
   real download. Everything above them is finished and tested.
 
-Later phases in the plan: editor, packaging, extras.
+- **Phase 10 - the song editor**: done. `rungstar-editor` is the document and the operations;
+  `editorscreen.rs` is a piano roll with the waveform behind it.
+
+  **Undo is by snapshot, not by inverse.** Every operation could carry its own undo, and
+  getting one of them subtly wrong is how an editor silently corrupts an evening's work. A
+  whole song is a few hundred kilobytes and two hundred of them is less than one video frame,
+  so the obviously correct thing is affordable. A test applies every kind of edit, undoes it,
+  and asserts the written file is unchanged to the byte.
+
+  The rules that keep a song singable are enforced by the operations rather than left to the
+  person editing: no note on top of its neighbour, no note shorter than a beat, nothing before
+  beat zero. Each refusal says why, because a rule that stops an edit silently reads as a
+  broken key.
+
+  **`PITCH_RANGE` was guessed wrong first.** A symmetric ±60 refuses to transpose an ordinary
+  song: measured across the 8,134-song library, real pitches run **-12 to 74**, because the
+  format's number is a semitone offset from a baseline each file picks for itself. It is now
+  one byte either way.
+
+  Doubling the tempo scales every timestamp with it, so the notes stay on the same *moment* of
+  the audio - changing `#BPM` alone is how a fixable half-tempo file becomes an unsingable one.
+  `#GAP` is the other control and shifts the whole song instead.
+
+  The waveform is a **peak envelope at 100 buckets a second**, computed once when the editor
+  opens. Ten million samples per song against a thousand-unit staff means ten thousand reads
+  per pixel per frame otherwise. Peak rather than average, or it flattens into a band as you
+  zoom out and stops showing where anything starts.
+
+  Escape with unsaved work offers to save, and Save is what the cursor starts on: somebody who
+  pressed Escape almost always meant to keep it.
+
+- **Phase 11 - packaging**: done. `packaging/` holds four ways out of the build tree.
+
+  Windows: a portable zip assembled by `packaging/windows/portable.ps1` and an Inno Setup
+  installer over the same tree. Verified by running the packaged folder standalone - all six
+  DLLs beside the executable, `--check` green. Linux: a **Flatpak**, which is the only delivery
+  that works on SteamOS's immutable rootfs, plus an AppImage for distributions without it.
+
+  **Settings and songs are never inside the install directory**, portable build included. An
+  uninstall or an unzip-over-the-top must not be able to take somebody's highscores with it.
+
+  The Flatpak asks for what it needs and no more. `--socket=pulseaudio` carries capture as well
+  as output; `--device=all` is required for controllers because `--device=dri` is only the GPU;
+  and `--filesystem=home` is deliberately **not** requested - a karaoke game has no business
+  reading everything, and a folder elsewhere is one `flatpak override` away.
+
+  **A Steam Deck is 1600x1000 design units**, because the design space is a thousand tall and
+  a Deck is 16:10 - so one design unit is 0.8 physical pixels. `tests/deck.rs` draws every
+  screen at that shape and asserts two things: nothing outside the window, since a control half
+  off the bottom is unreachable with no mouse, and no text below twelve physical pixels. There
+  is no Deck layout, only the layout, checked at the Deck's shape.
+
+  **Controller hints name the right buttons.** A Deck's face buttons are an Xbox pad's, but its
+  shoulders are L1/L2 rather than LB/LT and its two menu buttons have no letters at all.
+  Detected from `SteamDeck=1` and `/etc/os-release` rather than configured, with a setting for
+  the case detection cannot cover.
+
+  **No font is committed.** `assets/fonts/` is where a packaged build looks first, and the
+  binary is dropped in at packaging time: a megabyte nobody reviews in a diff, and picking one
+  is a licensing decision. Without it the game borrows a system face and says so.
+
+Later phases in the plan: extras.
