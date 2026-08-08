@@ -1,13 +1,20 @@
-//! Microphone setup: which device each singer uses, with a live level meter.
+//! Microphone setup: which singer each microphone belongs to, with a live level meter.
 //!
-//! UltraStar Deluxe's record screen is a grid of dropdowns and a tiny bar, and it does not
-//! tell you whether the device you picked is producing anything — which is the one question
-//! it exists to answer. Here every channel shows its live level against the gate it has to
+//! UltraStar Deluxe's record screen is a grid of dropdowns and a tiny bar, and it does not tell
+//! you whether the device you picked is producing anything — which is the one question it
+//! exists to answer. Here every microphone shows its live level against the gate it has to
 //! clear, so "my microphone does not work" is answerable without singing a song first.
 //!
-//! Channels, not devices, are assigned to singers. A stereo pair carries two people, which is
-//! how the cheap dual-USB karaoke sets work and the only way to reach six singers without six
-//! separate devices.
+//! **One row per microphone by default, not per channel.** Almost every USB microphone reports
+//! two channels and is mono on both, so a channel list showed two rows for one microphone and
+//! invited putting two singers on it — which cannot work: the capture layer appends each
+//! channel to its player's buffer, so two channels feeding one player would interleave two
+//! streams and wreck the pitch detection.
+//!
+//! The case that genuinely wants a split is the cheap dual-USB karaoke set, where left and
+//! right really are two microphones. That is a real setup and worth supporting, so it is a
+//! setting rather than a deletion — off by default, because for everyone else it is two rows
+//! for one microphone and a way to get it wrong.
 
 use crate::draw::{Align, DrawList, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Rect};
@@ -20,6 +27,8 @@ use crate::theme::Style;
 pub struct Device {
     pub name: String,
     /// One entry per channel: `0` for off, otherwise a one-based singer number.
+    ///
+    /// With channel splitting off only the first entry is used, and the rest are held at zero.
     pub assignment: Vec<u8>,
     /// Live peak level per channel, `0.0..=1.0`.
     pub levels: Vec<f32>,
@@ -42,6 +51,25 @@ impl Device {
             _ => format!("Channel {}", channel + 1),
         }
     }
+
+    /// The singer this microphone belongs to, when channels are not split.
+    pub fn player(&self) -> u8 {
+        self.assignment
+            .iter()
+            .copied()
+            .find(|p| *p != 0)
+            .unwrap_or(0)
+    }
+
+    /// The loudest channel, which is the one worth listening to on a device that only carries
+    /// signal on one of them.
+    pub fn peak(&self) -> f32 {
+        self.levels.iter().copied().fold(0.0, f32::max)
+    }
+
+    pub fn ever_heard(&self) -> bool {
+        self.heard.iter().any(|h| *h)
+    }
 }
 
 /// What the screen wants the application to do.
@@ -50,57 +78,77 @@ pub enum MicOutcome {
     None,
     /// The assignment changed and capture should be restarted with it.
     Changed,
-    /// Rescan for devices that have been plugged in since.
+    /// Look for devices that have been plugged in since.
     Refresh,
+}
+
+/// The most singers the game will run, matching the capture layer's own ceiling.
+pub const MAX_PLAYERS: usize = 6;
+
+/// One selectable row: a whole microphone, or one channel of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Row {
+    device: usize,
+    /// `None` when the row is the whole device.
+    channel: Option<usize>,
 }
 
 /// The microphone setup screen.
 pub struct MicScreen {
     pub devices: Vec<Device>,
-    /// How many singers there are to assign.
-    pub players: usize,
-    /// The level a channel must reach before anything scores.
+    /// The level a microphone must reach before anything scores.
     pub gate: f32,
     pub gamepad: bool,
-    /// Flattened cursor over every channel of every device, plus the refresh row at the end.
+    /// Whether each channel is assigned separately, for a dual-microphone device.
+    pub split_channels: bool,
     cursor: usize,
     regions: Vec<(Rect, usize)>,
 }
 
+impl Default for MicScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MicScreen {
-    pub fn new(players: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             devices: Vec::new(),
-            players: players.max(1),
             gate: 0.1,
             gamepad: false,
+            split_channels: false,
             cursor: 0,
             regions: Vec::new(),
         }
     }
 
-    /// Every selectable row: one per channel, then the refresh button.
-    fn rows(&self) -> usize {
-        self.devices.iter().map(Device::channels).sum::<usize>() + 1
-    }
-
-    /// Resolve a row into the device and channel it points at.
-    fn locate(&self, row: usize) -> Option<(usize, usize)> {
-        let mut seen = 0;
+    /// Every selectable row, in the order they are drawn.
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
         for (device, config) in self.devices.iter().enumerate() {
-            if row < seen + config.channels() {
-                return Some((device, row - seen));
+            if self.split_channels {
+                for channel in 0..config.channels() {
+                    rows.push(Row {
+                        device,
+                        channel: Some(channel),
+                    });
+                }
+            } else {
+                rows.push(Row {
+                    device,
+                    channel: None,
+                });
             }
-            seen += config.channels();
         }
-        None
+        rows
     }
 
     pub fn cursor(&self) -> usize {
         self.cursor
     }
 
-    /// Which singers have at least one channel, so the screen can say who is missing one.
+    /// Singer numbers in use, in order.
     pub fn assigned_players(&self) -> Vec<u8> {
         let mut seen: Vec<u8> = self
             .devices
@@ -113,63 +161,111 @@ impl MicScreen {
         seen
     }
 
-    /// Singers with no channel at all. These are the ones who cannot score.
-    pub fn unassigned_players(&self) -> Vec<u8> {
+    /// How many are playing, which is the highest singer number in use.
+    pub fn singer_count(&self) -> usize {
+        self.assigned_players().last().copied().unwrap_or(0) as usize
+    }
+
+    /// Singer numbers skipped over — player three assigned with no player two.
+    ///
+    /// Not fatal, but almost always a mistake, and silently renumbering somebody would be
+    /// worse than saying so.
+    pub fn skipped_players(&self) -> Vec<u8> {
         let assigned = self.assigned_players();
-        (1..=self.players as u8)
+        (1..=self.singer_count() as u8)
             .filter(|p| !assigned.contains(p))
             .collect()
     }
 
-    /// A singer bound to more than one channel, which would double-count them.
+    /// Singers on more than one input, who would be scored twice.
     pub fn duplicated_players(&self) -> Vec<u8> {
-        let mut counts = [0usize; 8];
+        let mut counts = [0usize; MAX_PLAYERS + 2];
         for device in &self.devices {
             for player in &device.assignment {
-                if (*player as usize) < counts.len() && *player != 0 {
-                    counts[*player as usize] += 1;
+                if *player != 0 {
+                    if let Some(slot) = counts.get_mut(*player as usize) {
+                        *slot += 1;
+                    }
                 }
             }
         }
-        (1..=self.players as u8)
+        (1..=MAX_PLAYERS as u8)
             .filter(|p| counts[*p as usize] > 1)
             .collect()
     }
 
-    pub fn handle(&mut self, input: Input) -> (Transition, MicOutcome) {
+    /// Step the singer on the row under the cursor.
+    fn step(&mut self, forward: bool) -> MicOutcome {
         let rows = self.rows();
-        match input {
-            Input::Up => {
-                self.cursor = (self.cursor + rows - 1) % rows;
-                (Transition::None, MicOutcome::None)
-            }
-            Input::Down => {
-                self.cursor = (self.cursor + 1) % rows;
-                (Transition::None, MicOutcome::None)
-            }
-            Input::Left | Input::Right => {
-                let Some((device, channel)) = self.locate(self.cursor) else {
-                    return (Transition::None, MicOutcome::None);
+        let Some(row) = rows.get(self.cursor).copied() else {
+            return MicOutcome::None;
+        };
+        let steps = MAX_PLAYERS + 1;
+        let device = &mut self.devices[row.device];
+
+        match row.channel {
+            Some(channel) => {
+                let current = device.assignment[channel] as usize;
+                device.assignment[channel] = if forward {
+                    ((current + 1) % steps) as u8
+                } else {
+                    ((current + steps - 1) % steps) as u8
                 };
-                // Cycles off, then singer one, two and so on. Off is included because a
-                // stereo device with only one microphone plugged in must be able to say so.
-                let current = self.devices[device].assignment[channel] as usize;
-                let steps = self.players + 1;
-                let next = if matches!(input, Input::Right) {
+            }
+            None => {
+                // The whole device. The singer goes on whichever channel is actually carrying
+                // signal — some microphones put audio only on the right — and the rest are
+                // held off, because two channels feeding one player would interleave two
+                // copies of the same voice.
+                let current = device
+                    .assignment
+                    .iter()
+                    .copied()
+                    .find(|p| *p != 0)
+                    .unwrap_or(0) as usize;
+                let next = if forward {
                     (current + 1) % steps
                 } else {
                     (current + steps - 1) % steps
                 };
-                self.devices[device].assignment[channel] = next as u8;
-                (Transition::None, MicOutcome::Changed)
+                let loudest = device
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(index, level)| if *level > 0.0 { index } else { 0 })
+                    .unwrap_or(0);
+                for slot in device.assignment.iter_mut() {
+                    *slot = 0;
+                }
+                if let Some(slot) = device.assignment.get_mut(loudest) {
+                    *slot = next as u8;
+                }
             }
+        }
+        MicOutcome::Changed
+    }
+
+    pub fn handle(&mut self, input: Input) -> (Transition, MicOutcome) {
+        let total = self.rows().len() + 1;
+        match input {
+            Input::Up => {
+                self.cursor = (self.cursor + total - 1) % total;
+                (Transition::None, MicOutcome::None)
+            }
+            Input::Down => {
+                self.cursor = (self.cursor + 1) % total;
+                (Transition::None, MicOutcome::None)
+            }
+            Input::Left => (Transition::None, self.step(false)),
+            Input::Right => (Transition::None, self.step(true)),
             Input::Confirm => {
-                if self.cursor + 1 == rows {
+                if self.cursor + 1 == total {
                     (Transition::None, MicOutcome::Refresh)
                 } else {
-                    // Confirm on a channel steps it, so the row works without learning that
-                    // left and right are the ones that do anything.
-                    self.handle(Input::Right)
+                    // Confirm steps it, so a row works without learning that left and right
+                    // are the ones that do anything.
+                    (Transition::None, self.step(true))
                 }
             }
             Input::Back => (Transition::Pop, MicOutcome::None),
@@ -189,7 +285,12 @@ impl MicScreen {
     pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
         self.regions.clear();
         let widgets = Widgets::new(style);
-        let status = format!("{} singers", self.players);
+        let count = self.singer_count();
+        let status = match count {
+            0 => "nobody assigned".to_owned(),
+            1 => "1 singer".to_owned(),
+            n => format!("{n} singers"),
+        };
         let body = widgets.header(list, area, "Microphones", &status);
         let hints: &[(&str, &str)] = if self.gamepad {
             &[("A", "Assign"), ("LS", "Change"), ("B", "Back")]
@@ -206,62 +307,54 @@ impl MicScreen {
         self.draw_warnings(list, warning_area, style);
 
         let inner = body.inset(style.gap(2.0));
+        let row_h = style.gap(4.0);
+        let rows = self.rows();
+
         if self.devices.is_empty() {
             widgets.empty_state(
                 list,
                 inner,
                 "No microphones found",
                 "Plug one in and choose Look again. Devices that only loop audio back — \
-                 Steam's streaming microphone and the like — are skipped, because they \
-                 deliver silence forever and look exactly like a broken setup.",
+                 Steam's streaming microphone and the like — are skipped, because they deliver \
+                 silence forever and look exactly like a broken setup.",
             );
-            // The refresh row still has to be reachable with nothing listed.
-            let row = inner.anchored(Anchor::Bottom, inner.w.min(600.0), style.gap(3.4), 0.0);
+            let row = inner.anchored(Anchor::Bottom, inner.w.min(600.0), row_h, 0.0);
             self.regions.push((row, 0));
             widgets.row(list, row, "Look again", "", true);
             return;
         }
 
-        let row_h = style.gap(3.6);
-        let mut y = inner.y;
-        let mut row = 0;
-        for device in &self.devices {
-            let header = Rect::new(inner.x, y, inner.w, style.gap(2.6));
-            list.text(
-                header,
-                &device.name,
-                TextStyle::new(style.scaled_text(0.95), style.muted)
-                    .bold()
-                    .valign(VAlign::Bottom)
-                    .overflow(Overflow::Ellipsis),
-            );
-            y += header.h;
-
-            for channel in 0..device.channels() {
-                let rect = Rect::new(inner.x, y, inner.w, row_h).inset_xy(0.0, style.gap(0.25));
-                self.regions.push((rect, row));
-                self.draw_channel(list, rect, style, device, channel, row == self.cursor);
-                y += row_h;
-                row += 1;
-            }
-            y += style.gap(1.0);
+        for (index, row) in rows.iter().enumerate() {
+            let rect = Rect::new(inner.x, inner.y + row_h * index as f32, inner.w, row_h)
+                .inset_xy(0.0, style.gap(0.3));
+            self.regions.push((rect, index));
+            self.draw_row(list, rect, style, *row, index == self.cursor);
         }
 
-        let refresh = Rect::new(inner.x, y, inner.w, row_h).inset_xy(0.0, style.gap(0.25));
-        self.regions.push((refresh, row));
-        widgets.row(list, refresh, "Look again", "", row == self.cursor);
+        let refresh = Rect::new(inner.x, inner.y + row_h * rows.len() as f32, inner.w, row_h)
+            .inset_xy(0.0, style.gap(0.3));
+        self.regions.push((refresh, rows.len()));
+        widgets.row(list, refresh, "Look again", "", self.cursor == rows.len());
     }
 
-    fn draw_channel(
-        &self,
-        list: &mut DrawList,
-        rect: Rect,
-        style: &Style,
-        device: &Device,
-        channel: usize,
-        selected: bool,
-    ) {
-        let player = device.assignment.get(channel).copied().unwrap_or(0);
+    fn draw_row(&self, list: &mut DrawList, rect: Rect, style: &Style, row: Row, selected: bool) {
+        let device = &self.devices[row.device];
+        let (player, level, heard, name) = match row.channel {
+            Some(channel) => (
+                device.assignment.get(channel).copied().unwrap_or(0),
+                device.levels.get(channel).copied().unwrap_or(0.0),
+                device.heard.get(channel).copied().unwrap_or(false),
+                format!("{}  ·  {}", device.name, device.channel_name(channel)),
+            ),
+            None => (
+                device.player(),
+                device.peak(),
+                device.ever_heard(),
+                device.name.clone(),
+            ),
+        };
+
         let colour = if player == 0 {
             style.muted
         } else {
@@ -285,32 +378,36 @@ impl MicScreen {
             );
         }
 
-        let inner = rect.inset_xy(style.gap(1.2), 0.0);
-        let (label_box, rest) = inner.cut_left(inner.w * 0.22);
+        let inner = rect.inset_xy(style.gap(1.2), style.gap(0.4));
+        let (top, bottom) = inner.cut_top(inner.h * 0.55);
+
         list.text(
-            label_box,
-            device.channel_name(channel),
-            TextStyle::new(style.text_size(), style.text),
+            top,
+            name,
+            TextStyle::new(style.text_size(), style.text)
+                .valign(VAlign::Bottom)
+                .overflow(Overflow::Ellipsis),
+        );
+        let assignment = if player == 0 {
+            "Not in use".to_owned()
+        } else {
+            format!("Player {player}")
+        };
+        list.text(
+            top,
+            assignment,
+            TextStyle::new(style.text_size(), colour)
+                .align(Align::End)
+                .valign(VAlign::Bottom),
         );
 
-        // The live meter, against the gate it has to clear. This is the whole point of the
-        // screen: a device that is selected but silent is otherwise indistinguishable from a
-        // device that is working and a room that is quiet.
-        let (assign_box, meter_box) = rest.cut_right(rest.w * 0.34);
-        let track = meter_box.inset_xy(style.gap(0.5), 0.0).anchored(
-            Anchor::Center,
-            meter_box.w - style.gap(1.0),
-            style.gap(0.6),
-            0.0,
-        );
+        // The live meter against the gate it has to clear. This is the whole point of the
+        // screen: a microphone that is selected but silent is otherwise indistinguishable from
+        // one that works in a quiet room.
+        let (meter, label) = bottom.cut_left(bottom.w * 0.62);
+        let track = meter.anchored(Anchor::Left, meter.w - style.gap(1.0), style.gap(0.6), 0.0);
         list.panel(track, style.surface_sunken, track.h / 2.0);
-
-        let level = device
-            .levels
-            .get(channel)
-            .copied()
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0);
+        let level = level.clamp(0.0, 1.0);
         if level > 0.0 {
             list.panel(
                 Rect::new(track.x, track.y, track.w * level, track.h),
@@ -328,66 +425,55 @@ impl MicScreen {
             style.warning,
         );
 
-        let heard = device.heard.get(channel).copied().unwrap_or(false);
-        let note = if player == 0 {
-            "off".to_owned()
-        } else if !heard {
-            "silent".to_owned()
+        let (note, tint) = if !heard {
+            ("nothing arriving", style.danger)
+        } else if player == 0 {
+            ("not in use", style.muted)
         } else if level < self.gate {
-            "too quiet".to_owned()
+            ("too quiet", style.warning)
         } else {
-            "singing".to_owned()
-        };
-        let note_colour = if player == 0 {
-            style.muted
-        } else if !heard {
-            style.danger
-        } else if level < self.gate {
-            style.warning
-        } else {
-            style.success
+            ("hearing you", style.success)
         };
         list.text(
-            Rect::new(track.x, rect.y, track.w, rect.h),
+            label,
             note,
-            TextStyle::new(style.scaled_text(0.72), note_colour)
-                .align(Align::End)
-                .valign(VAlign::Top),
-        );
-
-        let assignment = if player == 0 {
-            "\u{2014}".to_owned()
-        } else {
-            format!("Player {player}")
-        };
-        list.text(
-            assign_box,
-            assignment,
-            TextStyle::new(style.text_size(), colour).align(Align::End),
+            TextStyle::new(style.scaled_text(0.78), tint).align(Align::End),
         );
     }
 
     fn draw_warnings(&self, list: &mut DrawList, area: Rect, style: &Style) {
-        let missing = self.unassigned_players();
+        let skipped = self.skipped_players();
         let doubled = self.duplicated_players();
+        let count = self.singer_count();
         let (text, colour) = if !doubled.is_empty() {
             (
                 format!(
-                    "Player {} is on more than one channel and would be scored twice.",
+                    "Player {} is on more than one input and would be scored twice.",
                     join_players(&doubled)
                 ),
                 style.danger,
             )
-        } else if !missing.is_empty() {
+        } else if !skipped.is_empty() {
             (
                 format!(
-                    "Player {} has no microphone and cannot score.",
-                    join_players(&missing)
+                    "Player {} is skipped. Numbering should start at one and leave no gaps.",
+                    join_players(&skipped)
                 ),
                 style.warning,
             )
+        } else if count == 0 {
+            (
+                "No microphone is assigned, so nothing will score.".to_owned(),
+                style.warning,
+            )
         } else {
-            ("Every singer has a channel.".to_owned(), style.success)
+            (
+                format!(
+                    "{count} singer{}. That is how many the game will score.",
+                    if count == 1 { "" } else { "s" }
+                ),
+                style.success,
+            )
         };
         list.text(
             area.inset_xy(style.gap(2.0), 0.0),

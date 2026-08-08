@@ -603,7 +603,8 @@ impl App {
         let query = SearchQuery::all()
             .text(songs.search_text())
             .field(songs.field())
-            .sort(songs.sort(), songs.descending());
+            .sort(songs.sort(), songs.descending())
+            .filters(songs.filters());
         // No limit: the browser is the whole library, and a cap silently truncates it. Eight
         // thousand rows is a few megabytes, and the scroll is O(1) in the list length.
         match self.library.search(&query) {
@@ -766,10 +767,17 @@ impl App {
                     // song sung.
                     self.dropped_video = screen.video;
                 }
-                if let Some(Screen::Mics(_, monitor)) = self.stack.last_mut() {
+                if let Some(Screen::Mics(screen, monitor)) = self.stack.last_mut() {
                     let assignment = monitor.saved();
+                    // The number of singers follows the assignment rather than the other way
+                    // round: you decided how many are playing by giving them channels.
+                    let singers = screen.singer_count();
                     monitor.stop();
                     self.settings.sound.microphones = assignment;
+                    if singers > 0 {
+                        self.settings.game.players = singers as u8;
+                    }
+                    self.settings.clamp();
                     self.save_settings();
                 }
                 self.stack.pop();
@@ -1062,6 +1070,7 @@ fn action_for(keycode: Keycode) -> Option<Input> {
         Keycode::F3 => Input::Sort,
         Keycode::M => Input::ContextMenu,
         Keycode::R => Input::Random,
+        Keycode::D => Input::CycleFilter,
         Keycode::PageUp => Input::PageUp,
         Keycode::PageDown => Input::PageDown,
         Keycode::Backspace => Input::Backspace,
@@ -1201,6 +1210,7 @@ fn main() -> Result<()> {
                         Button::North => Some(Input::Sort),
                         Button::Back => Some(Input::ContextMenu),
                         Button::LeftShoulder => Some(Input::CycleLayout),
+                        Button::LeftStick => Some(Input::CycleFilter),
                         Button::RightShoulder => Some(Input::CycleLayout),
                         _ => None,
                     };
@@ -1222,7 +1232,10 @@ fn main() -> Result<()> {
                 app.settings.game.players as usize,
                 &app.settings.sound.microphones,
             );
-            let mut screen = MicScreen::new(app.settings.game.players as usize);
+            // Always the full ceiling: the player count is set *by* assigning channels here,
+            // so capping the cycle at the current count would make it impossible to grow.
+            let mut screen = MicScreen::new();
+            screen.split_channels = app.settings.sound.split_channels == Switch::On;
             screen.gate = app.settings.threshold();
             screen.devices = monitor.devices();
             monitor.tick();
@@ -1403,7 +1416,7 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
     // The microphone screen, with a device that has never produced a sample -- the state a
     // player is in when they open it to find out why nothing is scoring.
     {
-        let mut screen = rungstar_ui::micscreen::MicScreen::new(2);
+        let mut screen = rungstar_ui::micscreen::MicScreen::new();
         screen.devices = vec![rungstar_ui::micscreen::Device {
             name: "Example microphone".to_owned(),
             assignment: vec![1, 2],
@@ -1436,6 +1449,7 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
                 } else {
                     rungstar_ui::singscreen::NoteKind::Normal
                 },
+                part: 0,
             })
             .collect();
         screen.pitch_low = 60;

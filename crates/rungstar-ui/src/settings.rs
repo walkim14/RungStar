@@ -330,6 +330,12 @@ pub struct SoundSettings {
     pub av_delay_ms: i32,
     /// Which singer each microphone channel feeds. Empty means "work it out".
     pub microphones: Vec<MicAssignment>,
+    /// Assign each channel of a microphone separately.
+    ///
+    /// Off by default: almost every USB microphone reports two channels and is mono on both,
+    /// so splitting shows two rows for one microphone and invites putting two singers on it.
+    /// On for the dual-USB karaoke sets where left and right really are two microphones.
+    pub split_channels: Switch,
 }
 
 impl Default for SoundSettings {
@@ -349,6 +355,7 @@ impl Default for SoundSettings {
             mic_delay_ms: 140,
             av_delay_ms: 0,
             microphones: Vec::new(),
+            split_channels: Switch::Off,
         }
     }
 }

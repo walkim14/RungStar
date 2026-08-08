@@ -27,6 +27,7 @@ fn line() -> NoteLine {
                 3 => NoteKind::Freestyle,
                 _ => NoteKind::Normal,
             },
+            part: 0,
         })
         .collect();
     NoteLine {
@@ -472,6 +473,7 @@ fn a_note_sits_at_the_same_height_whatever_else_is_on_screen() {
             duration: 3.0,
             pitch: 62,
             kind: NoteKind::Normal,
+            part: 0,
         }];
         for (index, pitch) in others.iter().enumerate() {
             notes.push(Note {
@@ -479,6 +481,7 @@ fn a_note_sits_at_the_same_height_whatever_else_is_on_screen() {
                 duration: 3.0,
                 pitch: *pitch,
                 kind: NoteKind::Normal,
+                part: 0,
             });
         }
         let line = NoteLine {
@@ -668,6 +671,7 @@ fn a_narrow_line_does_not_fill_the_staff() {
             duration: 3.0,
             pitch: *pitch,
             kind: NoteKind::Normal,
+            part: 0,
         })
         .collect();
     let line = NoteLine {
@@ -756,6 +760,7 @@ fn a_sung_note_an_octave_out_is_drawn_on_the_note_it_scored() {
             duration: 3.0,
             pitch: 60,
             kind: NoteKind::Normal,
+            part: 0,
         }],
     };
 
@@ -862,6 +867,7 @@ fn a_hit_is_drawn_on_the_note_even_when_it_was_a_semitone_off() {
             duration: 3.0,
             pitch: 60,
             kind: NoteKind::Normal,
+            part: 0,
         }],
     };
 
@@ -973,6 +979,7 @@ fn a_hit_fills_the_bubble_it_landed_in() {
             duration: 3.0,
             pitch: 60,
             kind: NoteKind::Normal,
+            part: 0,
         }],
     };
 
@@ -1328,9 +1335,10 @@ fn shift_keeps_the_syllable_being_sung_in_the_middle() {
 }
 
 #[test]
-fn a_duet_gets_a_staff_and_words_each() {
-    // Both parts on one staff is unreadable exactly when it matters, which is when the two
-    // singers are on different notes.
+fn a_duet_shares_one_staff_and_colours_the_notes_by_part() {
+    // Two stacked staves was the first attempt. It halves the height of both, and a duet
+    // spends most of its time with only one part singing, so half the screen sits empty while
+    // the other half is cramped. One staff, coloured by whose the note is, reads better.
     let theme = Theme::builtin();
     let style = theme.resolve_default();
     let mut screen = sing_screen(2);
@@ -1338,21 +1346,48 @@ fn a_duet_gets_a_staff_and_words_each() {
     screen.singer_part = vec![0, 1];
     assert!(screen.is_duet());
 
-    let first = line();
-    let second = NoteLine {
+    // Two parts at different pitches, plus one beat they both sing.
+    let mine = NoteLine {
         start: 8.0,
-        end: 40.0,
-        notes: (0..9)
-            .map(|i| Note {
-                start: 8.0 + i as f64 * 4.0,
+        end: 20.0,
+        notes: vec![
+            Note {
+                start: 8.0,
                 duration: 3.0,
-                pitch: 64 + (i % 3),
+                pitch: 60,
                 kind: NoteKind::Normal,
-            })
-            .collect(),
+                part: 0,
+            },
+            Note {
+                start: 16.0,
+                duration: 3.0,
+                pitch: 62,
+                kind: NoteKind::Normal,
+                part: 0,
+            },
+        ],
     };
-    let words_a = syllables();
-    let words_b = syllables();
+    let theirs = NoteLine {
+        start: 8.0,
+        end: 20.0,
+        notes: vec![
+            Note {
+                start: 12.0,
+                duration: 3.0,
+                pitch: 65,
+                kind: NoteKind::Normal,
+                part: 0,
+            },
+            Note {
+                start: 16.0,
+                duration: 3.0,
+                pitch: 62,
+                kind: NoteKind::Normal,
+                part: 0,
+            },
+        ],
+    };
+    let words = syllables();
 
     let mut list = DrawList::new();
     screen.draw(
@@ -1361,13 +1396,13 @@ fn a_duet_gets_a_staff_and_words_each() {
         &style,
         &[
             PartView {
-                line: &first,
-                syllables: &words_a,
+                line: &mine,
+                syllables: &words,
                 next_line: "one",
             },
             PartView {
-                line: &second,
-                syllables: &words_b,
+                line: &theirs,
+                syllables: &words,
                 next_line: "two",
             },
         ],
@@ -1375,28 +1410,95 @@ fn a_duet_gets_a_staff_and_words_each() {
     );
     assert!(list.is_balanced());
 
-    // Each part is named, in a colour, so neither singer watches the wrong staff.
-    let text = strings(&list);
+    // Each part's own notes are in that singer's colour, and the beat they share is in
+    // neither — two bubbles at the same pitch on the same beat is one bubble with a seam.
+    let colours: Vec<rungstar_ui::Color> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Rect { rect, color, .. } if rect.h < 40.0 && rect.w > 40.0 => Some(*color),
+            _ => None,
+        })
+        .collect();
     assert!(
-        text.iter().any(|t| t == "Freddie"),
-        "part one unlabelled: {text:?}"
+        colours.contains(&style.player(0).alpha(0.75)),
+        "part one's notes are not in its colour"
     );
-    assert!(text.iter().any(|t| t == "Bowie"), "part two unlabelled");
+    assert!(
+        colours.contains(&style.player(1).alpha(0.75)),
+        "part two's notes are not in its colour"
+    );
+    assert!(
+        colours.contains(&style.text.alpha(0.85)),
+        "the shared note is not drawn as shared"
+    );
+}
 
-    // And the two staves occupy different halves of the screen.
-    let notes = bars(&list, &style);
-    let top = notes
-        .iter()
-        .filter(|r| r.center().y < area().h / 2.0)
-        .count();
-    let bottom = notes
-        .iter()
-        .filter(|r| r.center().y >= area().h / 2.0)
-        .count();
-    assert!(
-        top > 0 && bottom > 0,
-        "the parts did not split: {top} above, {bottom} below"
+#[test]
+fn a_duet_shows_both_sets_of_words_in_their_own_colours() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(2);
+    screen.parts = vec!["Freddie".to_owned(), "Bowie".to_owned()];
+    screen.singer_part = vec![0, 1];
+
+    let first = line();
+    let words = syllables();
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        area(),
+        &style,
+        &[
+            PartView {
+                line: &first,
+                syllables: &words,
+                next_line: "one",
+            },
+            PartView {
+                line: &first,
+                syllables: &words,
+                next_line: "two",
+            },
+        ],
+        11.0,
     );
+
+    // The syllable being sung is highlighted in each part's own colour, so a singer finds
+    // their line by its colour rather than by guessing which is theirs.
+    let highlights: Vec<rungstar_ui::Color> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Text { text, style, .. } if text == "ver " => Some(style.color),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        highlights.contains(&style.player(0)),
+        "part one's words are not in its colour: {highlights:?}"
+    );
+    assert!(
+        highlights.contains(&style.player(1)),
+        "part two's words are not in its colour"
+    );
+
+    // And both lines are at the bottom rather than one being up by the staff.
+    let lyric_rows: Vec<f32> = list
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Text { text, rect, .. } if text == "ver " => Some(rect.center().y),
+            _ => None,
+        })
+        .collect();
+    assert!(lyric_rows.len() >= 2);
+    for y in &lyric_rows {
+        assert!(
+            *y > area().h * 0.5,
+            "a lyric line was drawn at {y}, not at the bottom"
+        );
+    }
 }
 
 #[test]
@@ -1420,7 +1522,7 @@ fn an_ordinary_song_is_not_split() {
         }],
         11.0,
     );
-    // One staff, using the full height rather than the top half of it.
+    // One staff, using the full height.
     let notes = bars(&list, &style);
     let (top, bottom) = notes.iter().fold((f32::MAX, f32::MIN), |(t, b), r| {
         (t.min(r.y), b.max(r.bottom()))

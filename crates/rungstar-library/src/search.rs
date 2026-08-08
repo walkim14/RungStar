@@ -83,6 +83,12 @@ impl SearchQuery {
         self
     }
 
+    /// Narrow to a subset — duets only, songs with a video, and so on.
+    pub fn filters(mut self, filters: Filters) -> Self {
+        self.filters = filters;
+        self
+    }
+
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self

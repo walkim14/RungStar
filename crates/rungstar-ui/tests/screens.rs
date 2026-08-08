@@ -982,3 +982,61 @@ fn the_on_screen_keyboard_still_presses_keys_with_confirm() {
     );
     assert_eq!(screen.mode(), Mode::Searching);
 }
+
+#[test]
+fn the_list_can_be_narrowed_to_duets() {
+    // Searching the word "duet" happens to work because the text is indexed, but only for
+    // songs that say so somewhere. A filter asks the question properly.
+    use rungstar_ui::songselect::Narrow;
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    assert_eq!(screen.narrow(), Narrow::Everything);
+    assert_eq!(screen.filters().duet, None);
+
+    screen.handle(Input::CycleFilter, area);
+    assert_eq!(screen.narrow(), Narrow::Duets);
+    assert_eq!(screen.filters().duet, Some(true));
+    assert!(
+        screen.needs_query(),
+        "narrowing did not ask for a new query"
+    );
+
+    screen.set_results(vec![]);
+    screen.handle(Input::CycleFilter, area);
+    assert_eq!(screen.filters().duet, Some(false), "solos only");
+
+    // Round the loop and back to everything.
+    for _ in 0..3 {
+        screen.set_results(vec![]);
+        screen.handle(Input::CycleFilter, area);
+    }
+    assert_eq!(screen.narrow(), Narrow::Everything);
+    assert!(screen.filters().is_empty());
+}
+
+#[test]
+fn a_narrowed_list_says_so() {
+    // A list quietly missing songs is indistinguishable from a library missing them.
+    use rungstar_ui::songselect::Narrow;
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    let mut screen = loaded(20);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    assert!(
+        !strings(&list).join(" ").contains("only"),
+        "an unfiltered list claimed to be filtered"
+    );
+
+    screen.handle(Input::CycleFilter, area);
+    screen.set_results(vec![]);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let text = strings(&list).join(" ");
+    assert!(
+        text.contains(Narrow::Duets.label()),
+        "the filter is not shown: {text}"
+    );
+}

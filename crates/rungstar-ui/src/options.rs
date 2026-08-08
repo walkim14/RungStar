@@ -421,6 +421,10 @@ impl Page {
                         format: seconds,
                     },
                 },
+                choice_item!(
+                    Switch, sound.split_channels, "Split microphone channels",
+                    "Treat each channel of a microphone as a separate singer. Off for normal                      microphones, which report two channels and are mono on both. On for the                      dual-USB karaoke sets where left and right really are two microphones."
+                ),
                 Item {
                     label: "Microphones",
                     help: "Which device each singer uses. One stereo device can carry two \

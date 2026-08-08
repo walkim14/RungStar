@@ -43,6 +43,8 @@ pub enum Input {
     Search,
     /// Cycle the browse layout.
     CycleLayout,
+    /// Cycle what the list is narrowed to.
+    CycleFilter,
     /// Open the sort picker.
     Sort,
     /// Open the menu for the song under the cursor.
@@ -82,6 +84,61 @@ pub const SORTS: [(SortKey, &str); 12] = [
     (SortKey::LastPlayed, "Last played"),
     (SortKey::Difficulty, "Difficulty"),
 ];
+
+/// What the list is narrowed to, beyond the search text.
+///
+/// One cycling control rather than a tree of checkboxes: these are the three questions people
+/// actually ask of a song list, and a filter you have to go looking for is a filter nobody
+/// uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Narrow {
+    #[default]
+    Everything,
+    Duets,
+    Solos,
+    /// Songs with a video, which is what most people mean by "the good ones".
+    WithVideo,
+    /// Songs whose audio file is actually there.
+    Playable,
+}
+
+impl Narrow {
+    pub const ALL: [Narrow; 5] = [
+        Narrow::Everything,
+        Narrow::Duets,
+        Narrow::Solos,
+        Narrow::WithVideo,
+        Narrow::Playable,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Everything => "Everything",
+            Self::Duets => "Duets only",
+            Self::Solos => "Solos only",
+            Self::WithVideo => "With a video",
+            Self::Playable => "Playable only",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|n| *n == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// Turn this into the library's own filter.
+    pub fn filters(self) -> rungstar_library::Filters {
+        let mut filters = rungstar_library::Filters::default();
+        match self {
+            Self::Everything => {}
+            Self::Duets => filters.duet = Some(true),
+            Self::Solos => filters.duet = Some(false),
+            Self::WithVideo => filters.has_video = Some(true),
+            Self::Playable => filters.playable = Some(true),
+        }
+        filters
+    }
+}
 
 /// Which fields the search box can be pointed at.
 pub const FIELDS: [(SearchField, &str); 4] = [
@@ -148,6 +205,8 @@ pub struct SongSelect {
     sort_cursor: usize,
     /// Whether the player chose the sort, as opposed to it being the default.
     sort_chosen: bool,
+    /// What the list is narrowed to.
+    narrow: Narrow,
     field_cursor: usize,
     descending: bool,
     /// Set when the query the application should be running has changed.
@@ -181,6 +240,7 @@ impl SongSelect {
             mode: Mode::Browsing,
             sort_cursor: 0,
             sort_chosen: false,
+            narrow: Narrow::default(),
             field_cursor: 0,
             descending: false,
             stale: true,
@@ -263,6 +323,16 @@ impl SongSelect {
         self.descending
     }
 
+    /// What the list is narrowed to.
+    pub fn narrow(&self) -> Narrow {
+        self.narrow
+    }
+
+    /// The library filters for the current narrowing.
+    pub fn filters(&self) -> rungstar_library::Filters {
+        self.narrow.filters()
+    }
+
     /// The song under the cursor.
     pub fn selected(&self) -> Option<&SongEntry> {
         self.songs.get(self.browser.cursor())
@@ -341,6 +411,10 @@ impl SongSelect {
             }
             Input::CycleLayout => {
                 self.browser.layout = self.browser.layout.next();
+            }
+            Input::CycleFilter => {
+                self.narrow = self.narrow.next();
+                self.stale = true;
             }
             Input::Random => {
                 // Deliberately not a random number: with no source of entropy in this crate,
@@ -494,6 +568,7 @@ impl SongSelect {
             // Nothing here reaches past the dialog. Cycling the browse layout behind an open
             // search box is a change you cannot see and did not ask for.
             Input::CycleLayout
+            | Input::CycleFilter
             | Input::Random
             | Input::PageUp
             | Input::PageDown
@@ -557,10 +632,17 @@ impl SongSelect {
     ) {
         self.regions.clear();
         let widgets = Widgets::new(style);
-        let status = if self.songs.is_empty() {
+        let counted = if self.songs.is_empty() {
             String::new()
         } else {
             format!("{} of {}", self.browser.cursor() + 1, self.songs.len())
+        };
+        let status = if self.narrow == Narrow::Everything {
+            counted
+        } else {
+            // Saying what is being hidden, because a list that is quietly missing songs is
+            // indistinguishable from a library that is missing them.
+            format!("{}  ·  {}", self.narrow.label(), counted)
         };
         let body = widgets.header(list, area, "Songs", &status);
         let body = widgets.footer(list, body, &self.hints());
@@ -604,6 +686,7 @@ impl SongSelect {
                 (search, "Search"),
                 (sort, "Sort"),
                 (layout, "Layout"),
+                (if pad { "LT" } else { "D" }, "Filter"),
             ],
             Mode::Searching => vec![(confirm, "Press key"), (back, "Done"), (sort, "Search in")],
             Mode::Sorting => vec![

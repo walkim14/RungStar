@@ -44,6 +44,8 @@ pub struct Note {
     pub duration: f64,
     pub pitch: i32,
     pub kind: NoteKind,
+    /// Which part of a duet this belongs to. Always `0` for an ordinary song.
+    pub part: usize,
 }
 
 impl Note {
@@ -269,6 +271,9 @@ pub struct SingScreen {
     results_card: Option<Rect>,
 }
 
+/// A note both parts of a duet sing, marked so it can be drawn in its own colour.
+pub const BOTH_PARTS: usize = usize::MAX;
+
 /// Semitones shown on the staff either side of the song's own range.
 const STAFF_MARGIN: i32 = 2;
 
@@ -417,6 +422,39 @@ impl SingScreen {
         style.player(singer)
     }
 
+    /// Both parts' notes on one line, tagged with whose they are.
+    ///
+    /// A beat both parts sing is drawn once, in a third colour, because two bubbles at the
+    /// same pitch on the same beat is a thicker bubble with a seam down it.
+    fn merge_parts(&self, parts: &[PartView<'_>]) -> NoteLine {
+        if parts.len() < 2 {
+            return parts.first().map(|p| p.line.clone()).unwrap_or_default();
+        }
+        let mut notes: Vec<Note> = Vec::new();
+        for (index, part) in parts.iter().enumerate() {
+            for note in &part.line.notes {
+                match notes
+                    .iter_mut()
+                    .find(|other| other.start == note.start && other.pitch == note.pitch)
+                {
+                    Some(shared) => shared.part = BOTH_PARTS,
+                    None => notes.push(Note {
+                        part: index,
+                        ..*note
+                    }),
+                }
+            }
+        }
+        notes.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let start = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
+        let end = notes.iter().map(Note::end).fold(f64::MIN, f64::max);
+        NoteLine { notes, start, end }
+    }
+
     /// Draw a frame.
     ///
     /// `parts` carries one entry per part being sung — one for an ordinary song, two for a
@@ -453,7 +491,10 @@ impl SingScreen {
             list.clipped(area, |list| {
                 list.image_tinted(rect, video, Color::WHITE, 0.0);
             });
-            list.fill(area, style.background.alpha(0.5));
+            // Lighter than the artwork's scrim. A video is the background you actually chose
+            // to watch, and dimming it to the point where the panels read as the picture
+            // defeats having it.
+            list.fill(area, style.background.alpha(0.3));
         } else if let Some(image) = self.background {
             list.image_tinted(area, image, Color::WHITE.alpha(0.35), 0.0);
             list.fill(area, style.background.alpha(0.55));
@@ -468,51 +509,23 @@ impl SingScreen {
         let (panels, middle) = body.cut_right(panel_w);
         self.draw_panels(list, panels.inset(style.gap(1.0)), style);
 
-        // One part fills the middle; two share it, stacked, each with its own staff above its
-        // own words. Splitting rather than overlaying is the point — a duet where both parts
-        // share a staff is unreadable exactly when it matters, which is when the two are
-        // singing different notes.
-        let rows = middle.rows(parts.len().max(1), style.gap(1.0));
-        for (index, (part, row)) in parts.iter().zip(rows).enumerate() {
-            let lyric_height = if parts.len() > 1 {
-                style.gap(5.5)
-            } else {
-                style.gap(9.0)
-            };
-            let (lyrics_area, staff_area) = row.cut_bottom(lyric_height);
-            self.draw_staff(
-                list,
-                staff_area.inset(style.gap(1.5)),
-                style,
-                part.line,
-                beat,
-            );
-            self.draw_lyrics(
-                list,
-                lyrics_area,
-                style,
-                part.syllables,
-                part.next_line,
-                beat,
-            );
+        // One staff whatever the part count, with a duet's notes coloured by whose they are.
+        // Two stacked staves was the first attempt and reads worse: it halves the height of
+        // both, and a duet spends most of its time with only one part singing, so half the
+        // screen sits empty while the other half is cramped.
+        let lyric_height = style.gap(4.0) + style.gap(3.4) * parts.len() as f32;
+        let (lyrics_area, staff_area) = middle.cut_bottom(lyric_height);
 
-            // Whose part this is, in that singer's colour. Without it the two staves are
-            // indistinguishable and each singer watches the wrong one.
-            if let Some(name) = self.parts.get(index) {
-                let label = Rect::new(
-                    staff_area.x + style.gap(2.0),
-                    staff_area.y + style.gap(0.4),
-                    staff_area.w * 0.5,
-                    style.gap(2.0),
-                );
-                list.text(
-                    label,
-                    name,
-                    TextStyle::new(style.scaled_text(0.8), self.part_colour(index, style))
-                        .bold()
-                        .overflow(Overflow::Ellipsis),
-                );
-            }
+        let merged = self.merge_parts(parts);
+        self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
+
+        // Both parts' words, stacked at the bottom in their own colours, each with its own
+        // bar. A singer finds their line by its colour rather than by working out which half
+        // of the screen is theirs.
+        let rows = lyrics_area.rows(parts.len().max(1), 0.0);
+        for (index, (part, row)) in parts.iter().zip(rows).enumerate() {
+            let tint = (parts.len() > 1).then(|| self.part_colour(index, style));
+            self.draw_lyrics(list, row, style, part, beat, tint);
         }
         let _ = (line, syllables, next_line);
 
@@ -571,7 +584,8 @@ impl SingScreen {
         let rows = area.rows(self.singers.len(), style.gap(1.0));
         for (index, (singer, row)) in self.singers.iter().zip(rows).enumerate() {
             let color = style.player(index);
-            list.panel(row, style.surface.alpha(0.9), style.metrics.radius);
+            let opacity = if self.video.is_some() { 0.62 } else { 0.9 };
+            list.panel(row, style.surface.alpha(opacity), style.metrics.radius);
             let inner = row.inset(style.gap(1.0));
 
             let (name_row, rest) = inner.cut_top(style.scaled_text(0.85) * 1.4);
@@ -698,7 +712,10 @@ impl SingScreen {
         line: &NoteLine,
         beat: f64,
     ) {
-        list.panel(area, style.surface.alpha(0.55), style.metrics.radius);
+        // Barely there over a video: the staff is a guide, not a panel, and a song video is
+        // the thing behind it rather than a thing beside it.
+        let backing = if self.video.is_some() { 0.28 } else { 0.55 };
+        list.panel(area, style.surface.alpha(backing), style.metrics.radius);
         if line.is_empty() {
             return;
         }
@@ -741,8 +758,14 @@ impl SingScreen {
             let w = (x_of(note.end()) - x).max(4.0);
             let y = y_of(note.pitch) + (row_h - note_h) / 2.0;
             let rect = Rect::new(x, y, w, note_h);
+            // A duet's notes are coloured by whose they are, and the ones both sing get a
+            // third colour of their own rather than arbitrarily belonging to the first part.
             let color = if note.kind.is_golden() {
                 style.warning
+            } else if note.part == BOTH_PARTS {
+                style.text.alpha(0.85)
+            } else if self.is_duet() {
+                self.part_colour(note.part, style).alpha(0.75)
             } else {
                 style.muted.alpha(0.8)
             };
@@ -819,15 +842,23 @@ impl SingScreen {
         }
     }
 
+    /// Draw one part's words.
+    ///
+    /// `tint` is the part's colour when this is a duet; `None` uses the theme's accent.
     fn draw_lyrics(
         &self,
         list: &mut DrawList,
         area: Rect,
         style: &Style,
-        syllables: &[Syllable],
-        next_line: &str,
+        part: &PartView<'_>,
         beat: f64,
+        tint: Option<Color>,
     ) {
+        let syllables = part.syllables;
+        let next_line = part.next_line;
+        // Each part of a duet is highlighted in its own singer's colour, so a line is found by
+        // its colour rather than by working out which of them is yours.
+        let highlight = tint.unwrap_or(style.accent);
         let (current, upcoming) = area.cut_top(area.h * 0.62);
         if syllables.is_empty() {
             return;
@@ -905,7 +936,7 @@ impl SingScreen {
                     trail_width,
                     current.h * 0.76,
                 ),
-                style.accent.alpha(0.16),
+                highlight.alpha(0.16),
                 current.h * 0.38,
             );
         }
@@ -916,7 +947,7 @@ impl SingScreen {
                 4.0,
                 current.h * 0.84,
             ),
-            style.accent.alpha(0.9),
+            highlight.alpha(0.9),
             2.0,
         );
 
@@ -951,7 +982,7 @@ impl SingScreen {
                 style.muted
             };
             let colour = if active {
-                style.accent
+                highlight
             } else if done {
                 style.text
             } else {
@@ -983,11 +1014,7 @@ impl SingScreen {
                 list.clipped(
                     Rect::new(x, current.y, width * through, current.h),
                     |list| {
-                        list.text(
-                            box_rect,
-                            &syllable.text,
-                            text_style(style.accent, drawn_size),
-                        );
+                        list.text(box_rect, &syllable.text, text_style(highlight, drawn_size));
                     },
                 );
             } else {
@@ -1005,7 +1032,7 @@ impl SingScreen {
                     radius * 2.0,
                     radius * 2.0,
                 );
-                list.panel(ball, style.accent, radius);
+                list.panel(ball, highlight, radius);
             }
         }
 

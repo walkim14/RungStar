@@ -484,7 +484,14 @@ impl Session {
             return NoteLine::default();
         };
         let line = &self.parts[part][index];
-        let notes: Vec<Note> = line.notes.iter().map(convert_note).collect();
+        let notes: Vec<Note> = line
+            .notes
+            .iter()
+            .map(|note| Note {
+                part,
+                ..convert_note(note)
+            })
+            .collect();
         let start = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
         let end = notes.iter().map(Note::end).fold(f64::MIN, f64::max);
         NoteLine { notes, start, end }
@@ -531,6 +538,9 @@ impl Session {
 /// Turn a parsed note into one the screen can draw.
 fn convert_note(note: &rungstar_song::Note) -> Note {
     Note {
+        // Filled in by the caller for a duet's second part; a single-part song is all part
+        // zero and the staff does not colour by it.
+        part: 0,
         start: note.start as f64,
         duration: note.duration as f64,
         pitch: note.pitch,
