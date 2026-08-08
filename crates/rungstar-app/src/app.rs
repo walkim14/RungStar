@@ -841,6 +841,9 @@ impl App {
         );
         screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
         screen.duration = session.duration();
+        let (low, high) = session.pitch_range();
+        screen.pitch_low = low;
+        screen.pitch_high = high;
         if self.settings.graphics.backgrounds == Switch::On {
             screen.background = self.covers.get(entry.id);
         }
@@ -893,15 +896,8 @@ impl App {
             Some(Screen::Sing(screen, session)) => {
                 let beat = session.visual_beat();
                 let (syllables, next) = session.lyrics(beat);
-                screen.draw(
-                    list,
-                    area,
-                    &self.style,
-                    session.notes(),
-                    &syllables,
-                    &next,
-                    beat,
-                );
+                let line = session.current_line(beat);
+                screen.draw(list, area, &self.style, &line, &syllables, &next, beat);
             }
             Some(Screen::Mics(screen, _)) => screen.draw(list, area, &self.style),
             Some(Screen::About) => draw_about(list, area, &self.style),
@@ -1332,9 +1328,9 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
     {
         let mut screen = SingScreen::new("Artist", "Title", 6);
         screen.show_input_panel = true;
-        let notes: Vec<rungstar_ui::singscreen::Note> = (0..40)
+        let notes: Vec<rungstar_ui::singscreen::Note> = (0..9)
             .map(|i| rungstar_ui::singscreen::Note {
-                start: i as f64 * 4.0,
+                start: 8.0 + i as f64 * 4.0,
                 duration: 3.0,
                 pitch: 60 + (i % 7),
                 kind: if i % 5 == 0 {
@@ -1344,6 +1340,13 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
                 },
             })
             .collect();
+        screen.pitch_low = 60;
+        screen.pitch_high = 66;
+        let line = rungstar_ui::singscreen::NoteLine {
+            start: notes.first().map(|n| n.start).unwrap_or(0.0),
+            end: notes.last().map(|n| n.start + n.duration).unwrap_or(0.0),
+            notes,
+        };
         let syllables: Vec<rungstar_ui::singscreen::Syllable> = ["Hel", "lo ", "world"]
             .iter()
             .enumerate()
@@ -1357,15 +1360,7 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         for overlay in [Overlay::None, Overlay::Paused, Overlay::Results] {
             screen.overlay = overlay;
             list.clear();
-            screen.draw(
-                list,
-                area,
-                &app.style,
-                &notes,
-                &syllables,
-                "next line",
-                12.0,
-            );
+            screen.draw(list, area, &app.style, &line, &syllables, "next line", 20.0);
             if !list.is_balanced() {
                 anyhow::bail!("the sing screen left a clip pushed");
             }

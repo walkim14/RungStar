@@ -16,7 +16,7 @@ use rungstar_pitch::{Analyzer, AnalyzerConfig};
 use rungstar_platform::{Playback, SdlCapture};
 use rungstar_score::{Difficulty, ScoreTrack, Scorer};
 use rungstar_song::{Line, SongTxt};
-use rungstar_ui::singscreen::{Note, NoteKind, Singer, Sung, Syllable};
+use rungstar_ui::singscreen::{Note, NoteKind, NoteLine, Singer, Sung, Syllable};
 
 const SAMPLE_RATE: u32 = 44_100;
 
@@ -139,10 +139,6 @@ impl Session {
             finished: false,
             last_note_beat,
         })
-    }
-
-    pub fn notes(&self) -> &[Note] {
-        &self.notes
     }
 
     /// Change how loud the song plays, while it is playing.
@@ -318,18 +314,50 @@ impl Session {
         }
     }
 
-    /// The syllables of the line being sung, and the text of the one after it.
+    /// Which line is being sung at `beat`.
     ///
     /// Lyrics have to appear slightly before they are sung or nobody can read them in time,
-    /// so this returns the upcoming line once the previous one has ended.
-    pub fn lyrics(&self, beat: f64) -> (Vec<Syllable>, String) {
+    /// so this returns the upcoming line once the previous one has ended. Notes and lyrics
+    /// both go through it, because a staff showing one line while the words show another is
+    /// worse than either being slightly early.
+    fn line_at(&self, beat: f64) -> Option<usize> {
         let whole = beat as i32;
-        let index = self
-            .lines
+        self.lines
             .iter()
             .position(|line| !line.notes.is_empty() && whole < line.end())
-            .or(self.lines.len().checked_sub(1));
-        let Some(index) = index else {
+            .or_else(|| self.lines.iter().rposition(|line| !line.notes.is_empty()))
+    }
+
+    /// The notes of the line being sung, and the beats it spans.
+    pub fn current_line(&self, beat: f64) -> NoteLine {
+        let Some(index) = self.line_at(beat) else {
+            return NoteLine::default();
+        };
+        let line = &self.lines[index];
+        let notes: Vec<Note> = line.notes.iter().map(convert_note).collect();
+        let start = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
+        let end = notes.iter().map(Note::end).fold(f64::MIN, f64::max);
+        NoteLine { notes, start, end }
+    }
+
+    /// The lowest and highest pitch in the whole song, for a scale that does not move.
+    pub fn pitch_range(&self) -> (i32, i32) {
+        let (low, high) = self.notes.iter().fold((i32::MAX, i32::MIN), |(lo, hi), n| {
+            (lo.min(n.pitch), hi.max(n.pitch))
+        });
+        if low > high {
+            (0, 12)
+        } else {
+            // A song sitting on two notes would otherwise get a two-row staff, where every
+            // wobble looks like a wrong note.
+            let span = (high - low).max(7);
+            (low, low + span)
+        }
+    }
+
+    /// The syllables of the line being sung, and the text of the one after it.
+    pub fn lyrics(&self, beat: f64) -> (Vec<Syllable>, String) {
+        let Some(index) = self.line_at(beat) else {
             return (Vec::new(), String::new());
         };
         let syllables = self.lines[index]
@@ -351,23 +379,28 @@ impl Session {
     }
 }
 
-/// Flatten the track's notes for drawing.
+/// Turn a parsed note into one the screen can draw.
+fn convert_note(note: &rungstar_song::Note) -> Note {
+    Note {
+        start: note.start as f64,
+        duration: note.duration as f64,
+        pitch: note.pitch,
+        kind: match note.kind {
+            rungstar_song::NoteKind::Golden => NoteKind::Golden,
+            rungstar_song::NoteKind::Freestyle => NoteKind::Freestyle,
+            rungstar_song::NoteKind::Rap => NoteKind::Rap,
+            rungstar_song::NoteKind::GoldenRap => NoteKind::GoldenRap,
+            rungstar_song::NoteKind::Regular => NoteKind::Normal,
+        },
+    }
+}
+
+/// Flatten the track's notes, for the song's overall range and its end.
 fn collect_notes(lines: &[Line]) -> Vec<Note> {
     lines
         .iter()
         .flat_map(|line| line.notes.iter())
-        .map(|note| Note {
-            start: note.start as f64,
-            duration: note.duration as f64,
-            pitch: note.pitch,
-            kind: match note.kind {
-                rungstar_song::NoteKind::Golden => NoteKind::Golden,
-                rungstar_song::NoteKind::Freestyle => NoteKind::Freestyle,
-                rungstar_song::NoteKind::Rap => NoteKind::Rap,
-                rungstar_song::NoteKind::GoldenRap => NoteKind::GoldenRap,
-                rungstar_song::NoteKind::Regular => NoteKind::Normal,
-            },
-        })
+        .map(convert_note)
         .collect()
 }
 

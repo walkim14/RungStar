@@ -60,6 +60,28 @@ pub struct Sung {
     pub hit: bool,
 }
 
+/// The notes of one line, and the beats it spans.
+///
+/// The screen draws a line at a time rather than a scrolling window. UltraStar does the same,
+/// and the reason is not stylistic: with a window, notes slide past and there is no moment
+/// where a note and what you sang against it are both on screen long enough to compare. A
+/// static line with a sweeping playhead leaves the whole phrase visible, and the mark you
+/// made on it stays put until the line is over.
+#[derive(Debug, Clone, Default)]
+pub struct NoteLine {
+    pub notes: Vec<Note>,
+    /// First beat of the line, before any lead-in.
+    pub start: f64,
+    /// Last beat of the line.
+    pub end: f64,
+}
+
+impl NoteLine {
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty()
+    }
+}
+
 /// One syllable of the line being sung.
 #[derive(Debug, Clone)]
 pub struct Syllable {
@@ -162,6 +184,11 @@ pub struct SingScreen {
     pub duration: f32,
     pub gamepad: bool,
     pub show_input_panel: bool,
+    /// The song's whole pitch range, so a note sits at the same height from first line to
+    /// last. Deriving the scale from whatever happens to be on screen makes notes jump
+    /// vertically as the window moves, which is the one thing a pitch display must not do.
+    pub pitch_low: i32,
+    pub pitch_high: i32,
     pause_cursor: usize,
 }
 
@@ -185,6 +212,8 @@ impl SingScreen {
             duration: 0.0,
             gamepad: false,
             show_input_panel: false,
+            pitch_low: 0,
+            pitch_high: 12,
             pause_cursor: 0,
         }
     }
@@ -250,7 +279,7 @@ impl SingScreen {
         list: &mut DrawList,
         area: Rect,
         style: &Style,
-        notes: &[Note],
+        line: &NoteLine,
         syllables: &[Syllable],
         next_line: &str,
         beat: f64,
@@ -272,7 +301,7 @@ impl SingScreen {
         self.draw_panels(list, panels.inset(style.gap(1.0)), style);
 
         let (lyrics_area, staff_area) = middle.cut_bottom(style.gap(9.0));
-        self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, notes, beat);
+        self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, line, beat);
         self.draw_lyrics(list, lyrics_area, style, syllables, next_line, beat);
 
         match self.overlay {
@@ -439,41 +468,39 @@ impl SingScreen {
         list: &mut DrawList,
         area: Rect,
         style: &Style,
-        notes: &[Note],
+        line: &NoteLine,
         beat: f64,
     ) {
         list.panel(area, style.surface.alpha(0.55), style.metrics.radius);
-        if notes.is_empty() {
+        if line.is_empty() {
             return;
         }
 
-        // A window that scrolls with the song rather than one line at a time, so a note's
-        // approach is visible and its length is comparable to its neighbours'.
-        let window = 16.0;
-        let start = beat - window * 0.25;
-        let end = beat + window * 0.75;
+        // The line fills the width, with a lead-in so the playhead is already moving before
+        // the first note and does not appear out of the left edge on the beat it is due.
+        let span = (line.end - line.start).max(1.0);
+        let pad = (span * 0.06).clamp(0.5, 4.0);
+        let from = line.start - pad;
+        let to = line.end + pad;
 
-        let visible: Vec<&Note> = notes
-            .iter()
-            .filter(|n| n.end() > start && n.start < end)
-            .collect();
-        if visible.is_empty() {
-            return;
-        }
-        let (lowest, highest) = visible.iter().fold((i32::MAX, i32::MIN), |(lo, hi), n| {
-            (lo.min(n.pitch), hi.max(n.pitch))
-        });
-        let lowest = lowest - STAFF_MARGIN;
-        let highest = highest + STAFF_MARGIN;
-        let span = (highest - lowest).max(1) as f32;
+        // The scale is the song's, not this line's, so a note does not change height when the
+        // line changes. A line covering three semitones would otherwise fill the staff and
+        // make three semitones look like an octave.
+        let lowest = self.pitch_low - STAFF_MARGIN;
+        let highest = self.pitch_high + STAFF_MARGIN;
+        let rows = (highest - lowest).max(1) as f32;
 
         let inner = area.inset(style.gap(1.0));
-        let row_h = inner.h / span;
-        let x_of = |b: f64| inner.x + ((b - start) / (end - start)) as f32 * inner.w;
-        let y_of = |pitch: i32| inner.y + (highest - pitch) as f32 * row_h;
+        let row_h = inner.h / rows;
+        let x_of = |b: f64| inner.x + ((b - from) / (to - from)) as f32 * inner.w;
+        let y_of = |pitch: i32| inner.y + (highest - pitch.clamp(lowest, highest)) as f32 * row_h;
 
-        // Faint lines behind the notes, one per semitone.
-        for semitone in lowest..=highest {
+        // One faint line per semitone the line actually uses, rather than all of them: a full
+        // grid over a two-octave scale is noise.
+        let (line_low, line_high) = line.notes.iter().fold((i32::MAX, i32::MIN), |(lo, hi), n| {
+            (lo.min(n.pitch), hi.max(n.pitch))
+        });
+        for semitone in (line_low - 1)..=(line_high + 1) {
             let y = y_of(semitone) + row_h / 2.0;
             list.fill(
                 Rect::new(inner.x, y - 0.5, inner.w, 1.0),
@@ -481,61 +508,63 @@ impl SingScreen {
             );
         }
 
-        // The playhead, fixed where the notes should be met.
-        let head = x_of(beat);
+        let note_h = (row_h * 0.72).clamp(6.0, 26.0);
+        for note in &line.notes {
+            let x = x_of(note.start);
+            let w = (x_of(note.end()) - x).max(4.0);
+            let y = y_of(note.pitch) + (row_h - note_h) / 2.0;
+            let rect = Rect::new(x, y, w, note_h);
+            let color = if note.kind.is_golden() {
+                style.warning
+            } else {
+                style.muted.alpha(0.8)
+            };
+            if note.kind.is_freestyle() {
+                // Freestyle scores nothing, so it is drawn as an outline: a cue, not a target.
+                list.outline(rect, color.alpha(0.4), 2.0, note_h / 2.0);
+            } else {
+                list.panel(rect, color, note_h / 2.0);
+            }
+        }
+
+        // What each singer sang, over the top and clipped to this line. It stays on screen
+        // until the line turns, which is the point: you can look at what you just did.
+        for (index, singer) in self.singers.iter().enumerate() {
+            let color = style.player(index);
+            for sung in &singer.sung {
+                let sung_end = sung.start + sung.duration;
+                if sung_end < line.start || sung.start > line.end {
+                    continue;
+                }
+                let x = x_of(sung.start.max(line.start));
+                let w = (x_of(sung_end.min(line.end)) - x).max(4.0);
+                let y = y_of(sung.pitch) + (row_h - note_h) / 2.0;
+                list.panel(
+                    Rect::new(x, y + note_h * 0.22, w, note_h * 0.56),
+                    if sung.hit { color } else { style.danger },
+                    note_h * 0.28,
+                );
+            }
+        }
+
+        // The playhead sweeps the line rather than the notes sweeping past it.
+        let head = x_of(beat).clamp(inner.x, inner.right());
         list.fill(
             Rect::new(head - 1.5, inner.y, 3.0, inner.h),
-            style.accent.alpha(0.8),
+            style.accent.alpha(0.85),
         );
 
-        // Clipped: a note that started before the window still has to be drawn, and without
-        // this it is drawn from off the left edge across whatever is beside the staff.
-        let note_h = (row_h * 0.7).max(4.0);
-        list.clipped(inner, |list| {
-            for note in &visible {
-                let x = x_of(note.start);
-                let w = (x_of(note.end()) - x).max(3.0);
-                let y = y_of(note.pitch) + (row_h - note_h) / 2.0;
-                let rect = Rect::new(x, y, w, note_h);
-                let color = if note.kind.is_golden() {
-                    style.warning
-                } else {
-                    style.muted.alpha(0.75)
-                };
-                if note.kind.is_freestyle() {
-                    // Freestyle scores nothing, so it is drawn as an outline: it is a cue, not a
-                    // target, and filling it in would promise points that never arrive.
-                    list.outline(rect, color.alpha(0.4), 2.0, note_h / 2.0);
-                } else {
-                    list.panel(rect, color, note_h / 2.0);
-                }
+        // Where each singer is right now, on the playhead, whether or not a note is due.
+        for (index, singer) in self.singers.iter().enumerate() {
+            if let Some(pitch) = singer.pitch {
+                let y = y_of(pitch) + row_h / 2.0;
+                list.panel(
+                    Rect::new(head - 16.0, y - note_h * 0.28, 32.0, note_h * 0.56),
+                    style.player(index),
+                    note_h * 0.28,
+                );
             }
-
-            // What each singer actually sang, over the top.
-            for (index, singer) in self.singers.iter().enumerate() {
-                let color = style.player(index);
-                for sung in &singer.sung {
-                    if sung.start + sung.duration < start || sung.start > end {
-                        continue;
-                    }
-                    let x = x_of(sung.start);
-                    let w = (x_of(sung.start + sung.duration) - x).max(3.0);
-                    let y = y_of(sung.pitch) + (row_h - note_h) / 2.0;
-                    let rect = Rect::new(x, y + note_h * 0.25, w, note_h * 0.5);
-                    list.panel(
-                        rect,
-                        if sung.hit { color } else { style.danger },
-                        rect.h / 2.0,
-                    );
-                }
-                // Where this singer is right now, whether or not a note is due — silence and a
-                // dead microphone looked identical without it.
-                if let Some(pitch) = singer.pitch {
-                    let y = y_of(pitch.clamp(lowest, highest)) + row_h / 2.0;
-                    list.fill(Rect::new(head - 14.0, y - 2.0, 28.0, 4.0), color);
-                }
-            }
-        });
+        }
     }
 
     fn draw_lyrics(
