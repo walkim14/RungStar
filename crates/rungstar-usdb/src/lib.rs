@@ -22,6 +22,7 @@ pub mod client;
 pub mod parse;
 pub mod rate;
 pub mod secret;
+pub mod session_file;
 pub mod strings;
 
 pub use catalog::{Catalog, CatalogError, SyncReport};

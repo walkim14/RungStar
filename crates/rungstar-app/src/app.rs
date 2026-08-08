@@ -1333,6 +1333,7 @@ impl App {
         let mut problem: Option<String> = None;
         let mut signed: Option<Option<String>> = None;
         let mut catalog_size: Option<usize> = None;
+        let mut keeping: Option<usdbjob::Keeping> = None;
         for event in events {
             match event {
                 usdbjob::Event::Doing(what, fraction) => doing = Some((what, fraction)),
@@ -1360,7 +1361,10 @@ impl App {
                     ));
                 }
                 usdbjob::Event::Fetching(_) => catalog_changed = true,
-                usdbjob::Event::Signed(who) => signed = Some(who),
+                usdbjob::Event::Signed(who, how) => {
+                    signed = Some(who);
+                    keeping = Some(how);
+                }
                 usdbjob::Event::Problem(why) => problem = Some(why),
                 usdbjob::Event::Idle => idle = true,
             }
@@ -1409,8 +1413,16 @@ impl App {
             screen.set_rows(known);
         }
         if let Some(who) = signed {
+            let named = who.is_some();
             screen.user = who;
             screen.problem.clear();
+            // Said once, on signing in, rather than as a standing warning: a machine with no
+            // password store will ask again when the session runs out, and somebody should
+            // know that before it happens rather than be surprised by it.
+            if named && keeping == Some(usdbjob::Keeping::SessionOnly) {
+                screen.problem = "signed in \u{2014} this device has no password store, so you                                   will be asked again when the session expires"
+                    .to_owned();
+            }
         }
         if let Some((what, fraction)) = doing {
             screen.activity = Activity {

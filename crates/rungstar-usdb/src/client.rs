@@ -183,6 +183,11 @@ impl<T: Transport> Usdb<T> {
         }
     }
 
+    /// The transport underneath, so a caller can save and restore its cookies.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     pub fn session(&self) -> Session {
         match &self.user {
             Some(name) => Session::LoggedIn(name.clone()),
@@ -319,6 +324,11 @@ impl Default for Http {
 }
 
 impl Http {
+    /// The agent underneath, so a session can be saved and restored.
+    pub fn agent(&self) -> &ureq::Agent {
+        &self.agent
+    }
+
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))

@@ -288,6 +288,9 @@ dependencies = [
  "idna",
  "indexmap",
  "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
  "time",
  "url",
 ]
@@ -2196,6 +2199,8 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "ureq-proto",
  "url",
  "utf8-zero",

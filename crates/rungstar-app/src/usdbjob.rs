@@ -28,6 +28,16 @@ pub enum Order_ {
     Repair,
 }
 
+/// How a sign-in is being kept between launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keeping {
+    /// The OS password store. Windows and macOS always have one.
+    Keyring,
+    /// No password store on this machine, so the session cookie is kept instead. It lasts
+    /// until USDB expires it, and then the password has to be typed once more.
+    SessionOnly,
+}
+
 /// What the worker reports.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -39,8 +49,8 @@ pub enum Event {
     Downloaded(SongId, PathBuf, Outcome),
     /// A song is being fetched now.
     Fetching(SongId),
-    /// Who is logged in.
-    Signed(Option<String>),
+    /// Who is logged in, and how that is being remembered.
+    Signed(Option<String>, Keeping),
     /// Something went wrong, in words a person can act on.
     Problem(String),
     /// Nothing is happening any more.
@@ -187,35 +197,62 @@ fn run(
     let catalog_path = data.join("usdb-catalog.json");
     let scratch = songs.join(".rungstar-downloads");
 
-    // A password kept from a previous run means the browser is usable straight away rather
-    // than after somebody types a password on an on-screen keyboard.
-    if let Some(name) = &user {
-        match rungstar_usdb::secret::password(name) {
-            Ok(Some(password)) => {
-                let credentials = Credentials {
-                    user: name.clone(),
-                    password,
-                };
-                match usdb.log_in(&credentials) {
-                    Ok(Session::LoggedIn(who)) => {
-                        let _ = events.send(Event::Signed(Some(who)));
-                    }
-                    Ok(Session::Anonymous) | Err(UsdbError::BadCredentials) => {
-                        // A stored password that no longer works is worse than none: it fails
-                        // silently on every launch and nothing says why.
-                        let _ = rungstar_usdb::secret::forget(name);
-                        let _ = events.send(Event::Problem(
-                            "the saved USDB password no longer works; sign in again".to_owned(),
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = events.send(Event::Problem(error.to_string()));
+    let session_path = data.join(rungstar_usdb::session_file::FILE);
+    // Windows and macOS always have a password store. Linux needs a D-Bus Secret Service,
+    // which is a desktop session service — a Steam Deck in Game Mode has none, and neither
+    // does a kiosk or a container. Probed once, because the answer decides what is kept and
+    // what the screen has to tell somebody.
+    let keeping = if rungstar_usdb::secret::available() {
+        Keeping::Keyring
+    } else {
+        Keeping::SessionOnly
+    };
+
+    // The saved cookie first, on every platform. It signs in with no password at all, and on
+    // a machine with a keyring it means the password is only read when the session has
+    // actually expired rather than on every launch.
+    let mut signed_in = false;
+    if let Err(error) = rungstar_usdb::session_file::load(usdb.transport().agent(), &session_path) {
+        tracing::warn!("the saved USDB session could not be read: {error}");
+    } else if let Ok(Session::LoggedIn(who)) = usdb.who_am_i() {
+        signed_in = true;
+        let _ = events.send(Event::Signed(Some(who), keeping));
+    }
+
+    // Only then the password, and only where there is a store to have kept one.
+    if !signed_in && keeping == Keeping::Keyring {
+        if let Some(name) = &user {
+            match rungstar_usdb::secret::password(name) {
+                Ok(Some(password)) => {
+                    let credentials = Credentials {
+                        user: name.clone(),
+                        password,
+                    };
+                    match usdb.log_in(&credentials) {
+                        Ok(Session::LoggedIn(who)) => {
+                            let _ = rungstar_usdb::session_file::save(
+                                usdb.transport().agent(),
+                                &session_path,
+                            );
+                            let _ = events.send(Event::Signed(Some(who), keeping));
+                        }
+                        Ok(Session::Anonymous) | Err(UsdbError::BadCredentials) => {
+                            // A stored password that no longer works is worse than none: it
+                            // fails silently on every launch and nothing says why.
+                            let _ = rungstar_usdb::secret::forget(name);
+                            let _ = events.send(Event::Problem(
+                                "the saved USDB password no longer works; sign in again".to_owned(),
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error.to_string()));
+                        }
                     }
                 }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let _ = events.send(Event::Problem(error.to_string()));
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = events.send(Event::Problem(error.to_string()));
+                }
             }
         }
     }
@@ -230,12 +267,24 @@ fn run(
                 };
                 match usdb.log_in(&credentials) {
                     Ok(Session::LoggedIn(who)) => {
-                        if let Err(error) = rungstar_usdb::secret::remember(&user, &password) {
-                            // Signed in, but it will have to be typed again next time. Worth
-                            // saying, and not worth refusing the session over.
-                            let _ = events.send(Event::Problem(error.to_string()));
+                        // The cookie is kept on every machine: it is what makes the next
+                        // launch already signed in without the password being read at all.
+                        if let Err(error) = rungstar_usdb::session_file::save(
+                            usdb.transport().agent(),
+                            &session_path,
+                        ) {
+                            tracing::warn!("the USDB session could not be kept: {error}");
                         }
-                        let _ = events.send(Event::Signed(Some(who)));
+                        // The password only where there is somewhere safe to put it. On a
+                        // machine with no store it is simply not written down — an obfuscated
+                        // copy in the data directory would be the same password with a step in
+                        // front of it, and the key would be in the binary.
+                        if keeping == Keeping::Keyring {
+                            if let Err(error) = rungstar_usdb::secret::remember(&user, &password) {
+                                let _ = events.send(Event::Problem(error.to_string()));
+                            }
+                        }
+                        let _ = events.send(Event::Signed(Some(who), keeping));
                     }
                     Ok(Session::Anonymous) => {
                         let _ = events.send(Event::Problem(
@@ -252,8 +301,9 @@ fn run(
                 if let Some(name) = &user {
                     let _ = rungstar_usdb::secret::forget(name);
                 }
+                let _ = rungstar_usdb::session_file::forget(&session_path);
                 let _ = usdb.page(&rungstar_usdb::Endpoint::Logout);
-                let _ = events.send(Event::Signed(None));
+                let _ = events.send(Event::Signed(None, keeping));
             }
             Order_::Sync => {
                 sync(&mut usdb, &catalog, &catalog_path, &cancel, &events);

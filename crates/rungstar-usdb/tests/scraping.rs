@@ -612,3 +612,48 @@ fn a_real_page_syncs_into_a_searchable_catalog() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].title, "It Never Rains In Southern California");
 }
+
+// ---------------------------------------------------------------- staying signed in
+
+#[test]
+fn a_session_survives_being_saved_and_restored() {
+    // The fallback for a machine with no password store: keep the cookie, never the password.
+    // A Steam Deck in Game Mode has no D-Bus Secret Service, and asking for a password on an
+    // on-screen keyboard every launch is worst on exactly that machine.
+    use rungstar_usdb::session_file;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("usdb").join("session.json");
+
+    let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+    // Nothing saved yet is a first run, not a failure.
+    assert!(!session_file::load(&agent, &path).unwrap());
+
+    session_file::save(&agent, &path).unwrap();
+    assert!(path.is_file(), "the session was not written");
+    assert!(session_file::load(&agent, &path).unwrap());
+
+    // And signing out takes it away, twice over without complaining.
+    session_file::forget(&path).unwrap();
+    assert!(!path.exists());
+    session_file::forget(&path).unwrap();
+}
+
+#[test]
+fn a_corrupt_session_file_is_reported_rather_than_crashing() {
+    use rungstar_usdb::session_file;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.json");
+    std::fs::write(&path, b"this is not json").unwrap();
+    let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+    assert!(session_file::load(&agent, &path).is_err());
+}
+
+#[test]
+fn the_password_store_is_probed_rather_than_assumed() {
+    // Whether a Secret Service is reachable is not something the library can be asked, and
+    // the answer changes with the session. On Windows this is always true; the value of the
+    // test is that the probe runs at all and leaves nothing behind.
+    let first = rungstar_usdb::secret::available();
+    let again = rungstar_usdb::secret::available();
+    assert_eq!(first, again, "the probe is not repeatable");
+}

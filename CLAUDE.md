@@ -455,6 +455,20 @@ with packaging.
   a setting. A stored password that stops working is deleted rather than retried silently on
   every launch.
 
+  **There is no keyring on a Steam Deck in Game Mode.** Windows and macOS always have one; on
+  Linux it is a D-Bus Secret Service, which is a *desktop session* service, so Game Mode, a
+  kiosk, a container or a TTY launch have none. The fallback keeps the **session cookie**
+  instead of the password, and that is a real difference rather than a smaller version of the
+  same risk: a cookie expires, is worth nothing anywhere else, and cannot be used to take the
+  account over. What it costs is signing in again when the session runs out, which the screen
+  says at the time rather than as a standing warning.
+
+  The cookie is loaded first on *every* platform, so a machine with a keyring only reads the
+  password when the session has actually expired. Encrypting the password with a key derived
+  from the machine was considered and rejected: the key is in the binary, so it is obfuscation
+  dressed as security, and the only thing it reliably defeats is the reader understanding what
+  they are looking at.
+
   Deliberate divergence 12: **a missing optional resource does not fail the song.** The
   reference refuses to deliver a singable song whose background art 404ed.
 
