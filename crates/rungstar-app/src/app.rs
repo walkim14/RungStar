@@ -977,28 +977,21 @@ fn draw_about(list: &mut DrawList, area: Rect, style: &Style) {
     }
 }
 
-/// Whether a key is one that only ever means an action, never a character.
+/// Whether a key will also arrive as typed text.
 ///
-/// While a text field has focus the letter shortcuts must not fire, but the arrows, Enter and
-/// Escape still have to work or the on-screen keyboard cannot be used at all.
-fn is_navigation(keycode: Keycode) -> bool {
-    matches!(
-        keycode,
-        Keycode::Up
-            | Keycode::Down
-            | Keycode::Left
-            | Keycode::Right
-            | Keycode::Return
-            | Keycode::KpEnter
-            | Keycode::Escape
-            | Keycode::Backspace
-            | Keycode::PageUp
-            | Keycode::PageDown
-            | Keycode::Tab
-    )
+/// The rule is not a list of keys that are allowed through — that was the first attempt, and
+/// it silently blocked F3, which is how you change the field being searched. The rule is that
+/// a key producing a character must not *also* fire a shortcut, because the character is
+/// already being delivered as `TextInput`. Everything else — function keys, arrows, Escape,
+/// Tab — is unambiguous and stays live.
+fn produces_text(keycode: Keycode) -> bool {
+    let name = keycode.name();
+    // Single-character names are exactly the printable keys: letters, digits and punctuation.
+    // Space is spelled out but types a character all the same.
+    name.chars().count() == 1 || name == "Space"
 }
 
-/// Map a key or button to the semantic input the screens understand.
+/// Map a key or button to the semantic input the screens understand./// Map a key or button to the semantic input the screens understand.
 fn action_for(keycode: Keycode) -> Option<Input> {
     Some(match keycode {
         Keycode::Up => Input::Up,
@@ -1095,10 +1088,11 @@ fn main() -> Result<()> {
                     keycode: Some(key), ..
                 } => {
                     app.set_control_hints(false);
-                    // A screen editing text sees only navigation from the physical keyboard;
-                    // the characters arrive as `TextInput`, which is also the only way to get
-                    // an accented letter or a non-Latin script.
-                    if !app.wants_text() || is_navigation(key) {
+                    // While a screen is editing text, a key that types a character must not
+                    // also act as a shortcut. The character itself arrives as `TextInput`,
+                    // which is also the only way to get an accented letter or a non-Latin
+                    // script.
+                    if !app.wants_text() || !produces_text(key) {
                         if let Some(input) = action_for(key) {
                             app.handle(input, area);
                         }
@@ -1389,3 +1383,47 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
 /// Keeps `Color` in scope for the draw helpers above.
 #[allow(dead_code)]
 const _: Option<Color> = None;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typing_keys_are_told_apart_from_command_keys() {
+        // The keys that must not fire a shortcut while a search box has focus, because each
+        // of them also arrives as text.
+        for key in [
+            Keycode::A,
+            Keycode::F,
+            Keycode::M,
+            Keycode::R,
+            Keycode::Z,
+            Keycode::_0,
+            Keycode::_9,
+            Keycode::Space,
+            Keycode::Minus,
+            Keycode::Period,
+        ] {
+            assert!(produces_text(key), "{key:?} types a character");
+        }
+
+        // And the keys that must keep working: navigating the on-screen keyboard, finishing,
+        // leaving, and F3 for the field being searched. An earlier whitelist blocked F3 and
+        // made "search in" unreachable from a keyboard.
+        for key in [
+            Keycode::Up,
+            Keycode::Down,
+            Keycode::Left,
+            Keycode::Right,
+            Keycode::Return,
+            Keycode::Escape,
+            Keycode::Backspace,
+            Keycode::Tab,
+            Keycode::F3,
+            Keycode::PageUp,
+            Keycode::PageDown,
+        ] {
+            assert!(!produces_text(key), "{key:?} is a command, not a character");
+        }
+    }
+}

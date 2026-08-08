@@ -354,7 +354,26 @@ impl SongSelect {
 
     /// Move the cursor to whatever the pointer is over, and act on it if it was clicked.
     fn handle_pointer(&mut self, point: Point, clicked: bool) -> Transition {
-        match self.region_at(point) {
+        let region = self.region_at(point);
+
+        // An overlay is modal. While the keyboard, the sort picker or the song menu is up,
+        // the list behind it is not clickable — otherwise a click aimed just past the dialog
+        // selects a song, or starts one, which is the last thing a search box should do.
+        // Clicking away closes the overlay, as it does everywhere else.
+        if self.mode != Mode::Browsing {
+            let on_overlay = matches!(
+                region,
+                Some(Region::Key(_)) | Some(Region::Sort(_)) | Some(Region::Menu(_))
+            );
+            if !on_overlay {
+                if clicked {
+                    self.mode = Mode::Browsing;
+                }
+                return Transition::None;
+            }
+        }
+
+        match region {
             Some(Region::Song(index)) => {
                 // Hovering deliberately does *not* move the cursor. In the list and the
                 // roulette the cursor is always centred and the songs scroll past it, so
@@ -397,13 +416,7 @@ impl SongSelect {
                     self.mode = Mode::Browsing;
                 }
             }
-            None => {
-                // Clicking away from the overlays closes them, which is what every other
-                // program does and so what a hand expects.
-                if clicked && self.mode != Mode::Browsing {
-                    self.mode = Mode::Browsing;
-                }
-            }
+            None => {}
         }
         Transition::None
     }
@@ -474,9 +487,15 @@ impl SongSelect {
                 self.field_cursor = (self.field_cursor + 1) % FIELDS.len();
                 self.stale = true;
             }
-            Input::CycleLayout => self.browser.layout = self.browser.layout.next(),
-            Input::Random | Input::PageUp | Input::PageDown => {}
-            Input::ContextMenu | Input::Hover(_) | Input::Click(_) => {}
+            // Nothing here reaches past the dialog. Cycling the browse layout behind an open
+            // search box is a change you cannot see and did not ask for.
+            Input::CycleLayout
+            | Input::Random
+            | Input::PageUp
+            | Input::PageDown
+            | Input::ContextMenu
+            | Input::Hover(_)
+            | Input::Click(_) => {}
         }
         if self.keyboard.text() != before {
             // Every keystroke re-queries. At 3 ms for a prefix search over 30,000 songs that

@@ -833,3 +833,110 @@ fn hints_name_the_control_the_player_is_holding() {
         "gamepad hints still name keyboard keys: {pad}"
     );
 }
+
+#[test]
+fn an_open_overlay_takes_every_click_away_from_the_list() {
+    // A click aimed just past the search dialog was landing on the song list behind it, which
+    // could select a song or start one. A search box is the last place that should happen.
+    //
+    // The song menu is deliberately not in this list: it has a Sing row, so a click on it
+    // starting a song is the feature rather than the leak.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    for opener in [Input::Search, Input::Sort] {
+        let mut screen = loaded(200);
+        screen.browser.jump_to(100);
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area, &style, &|_| None);
+        screen.handle(opener, area);
+        let before = screen.browser.cursor();
+
+        for row in 0..14 {
+            for column in 0..10 {
+                if screen.mode() == Mode::Browsing {
+                    // A click landed outside the dialog and closed it, which is allowed.
+                    screen.handle(opener, area);
+                }
+                let mut list = DrawList::new();
+                screen.draw(&mut list, area, &style, &|_| None);
+                let point = rungstar_ui::geom::Point::new(
+                    60.0 + column as f32 * 150.0,
+                    60.0 + row as f32 * 65.0,
+                );
+                screen.handle(Input::Hover(point), area);
+                let outcome = screen.handle(Input::Click(point), area);
+                assert!(
+                    !matches!(outcome, Transition::Sing(_)),
+                    "{opener:?}: a click at {point:?} started a song through the overlay"
+                );
+                let _ = list;
+            }
+        }
+        if opener == Input::Search {
+            // Sorting re-queries and may legitimately move the cursor; searching must not
+            // touch the list at all.
+            assert_eq!(
+                screen.browser.cursor(),
+                before,
+                "clicks moved the song cursor behind the search box"
+            );
+        }
+    }
+}
+
+#[test]
+fn clicking_away_from_the_song_menu_closes_it_without_reaching_the_list() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+
+    let mut screen = loaded(200);
+    screen.browser.jump_to(100);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    screen.handle(Input::ContextMenu, area);
+    assert_eq!(screen.mode(), Mode::Menu);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    // Far from the centred card, but well inside the song list.
+    let corner = rungstar_ui::geom::Point::new(1500.0, 940.0);
+    let outcome = screen.handle(Input::Click(corner), area);
+    assert_eq!(outcome, Transition::None, "the click reached the list");
+    assert_eq!(screen.mode(), Mode::Browsing, "the menu did not close");
+    assert_eq!(screen.browser.cursor(), 100, "the click moved the cursor");
+}
+
+#[test]
+fn keys_that_do_not_type_still_work_while_searching() {
+    // The field being searched is changed with the sort key, and an earlier fix blocked it
+    // along with the letters. Navigation and finishing have to keep working too, or the
+    // on-screen keyboard cannot be used at all.
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.handle(Input::Search, area);
+    assert!(screen.wants_text());
+
+    let field = screen.field();
+    screen.handle(Input::Sort, area);
+    assert_ne!(
+        screen.field(),
+        field,
+        "the search field could not be changed"
+    );
+    assert_eq!(screen.mode(), Mode::Searching);
+
+    // And the layout does not change behind the dialog.
+    let layout = screen.browser.layout;
+    screen.handle(Input::CycleLayout, area);
+    assert_eq!(
+        screen.browser.layout, layout,
+        "the browse layout changed behind the search box"
+    );
+
+    screen.handle(Input::Back, area);
+    assert_eq!(screen.mode(), Mode::Browsing);
+    assert!(!screen.wants_text());
+}
