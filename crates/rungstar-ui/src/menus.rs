@@ -53,6 +53,18 @@ impl MainMenu {
                 quit: false,
             },
             Entry {
+                label: "Party",
+                detail: "Teams, jokers, tournaments and the challenge modes",
+                route: Some(Route::Party),
+                quit: false,
+            },
+            Entry {
+                label: "Jukebox",
+                detail: "Play songs back to back with nobody scoring",
+                route: Some(Route::Jukebox),
+                quit: false,
+            },
+            Entry {
                 label: "Statistics",
                 detail: "Best scores, best singers, most-sung songs",
                 route: Some(Route::Stats),

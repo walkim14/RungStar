@@ -375,5 +375,39 @@ with packaging.
   Skipping the outro records the song; giving up does not. The singing is finished when the
   outro starts, so that score is a whole one; an abandoned song's is not.
 
-Later phases in the plan: game modes and party, USDB browser and downloads, editor,
-packaging, extras.
+- **Phase 8 - game modes**: done. `rungstar-party` holds the rules; the screens drive them.
+
+  **UltraStar's fourteen challenge modes are Lua plugins**, one `.usdx` file each, every one
+  re-implementing the same walk-the-lines-and-compare-the-scores loop against a scripting API.
+  They are data, not programs: each is some combination of *hide something*, *stop early* and
+  *put somebody out*. So they are a table of `Effects` read by one `Watch`, and dropping the
+  scripting engine loses no mode. A plugin can only be tested by singing into a microphone; a
+  `Watch` is fed beats and scores by a test in a millisecond.
+
+  Three rules that had to be decided rather than copied:
+
+  - **Hardcore counts silent lines in a row, and only against the other singers.** Counted
+    absolutely, a hard verse everybody fluffs ends most rounds halfway through. Counted in
+    total, three bad lines across a long song is a human being. A lone singer is never knocked
+    out, because there is nobody to be worse than.
+  - **Hold The Line measures a running average against the rising bar.** The bar is the thing
+    that rises; what it measures should not also be jumpy, or every round ends on a cough.
+  - **A tied party round shares the placing** - both get first, nobody gets second, which is
+    what happens on a podium and what the reference leaves undefined. A drawn tournament match
+    still sends somebody through: "sing it again" is not an answer at half past eleven.
+
+  Medley finally wires up "sing from the chorus": `#MEDLEYSTARTBEAT`, else `#PREVIEWSTART`
+  (somebody's answer to "the bit worth hearing", which is the same question), else a third of
+  the way in. A plan narrows the song and never widens it, so a medley cannot run past `#END`.
+
+  The jukebox reuses the sing screen with its panels off. The scorer still runs underneath -
+  a second path through the session would be two things to keep right - but nothing it
+  produces leaves the screen, and no score screen interrupts.
+
+  Deliberate divergence 11: **a party screen has four stages, not ten screens.** UltraStar has
+  Party Options, Player, Rounds, NewRound, Score and Win, plus four more for Tournament, and
+  they disagree with each other. They are the same four questions - who is playing, what is
+  being sung, how did that go, who won - so one state machine serves both the party and the
+  bracket.
+
+Later phases in the plan: USDB browser and downloads, editor, packaging, extras.

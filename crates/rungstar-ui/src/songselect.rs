@@ -7,6 +7,7 @@
 //! makes typing into a 30,000 song library stay responsive.
 
 use rungstar_library::{SearchField, SongEntry, SortKey};
+use rungstar_party::Challenge;
 
 use crate::browse::{Browser, Layout};
 use crate::draw::{Align, DrawList, ImageId, Overflow, TextStyle, VAlign};
@@ -27,6 +28,8 @@ pub enum Mode {
     Sorting,
     /// The filter panel.
     Filtering,
+    /// Choosing a challenge to sing under.
+    Challenging,
     /// The per-song menu.
     Menu,
 }
@@ -264,6 +267,8 @@ enum Region {
     Category(usize),
     /// A row in the filter panel's value column.
     Value(usize),
+    /// A row in the challenge picker.
+    Challenge(usize),
 }
 
 /// What the per-song menu offers.
@@ -277,16 +282,19 @@ pub enum SongAction {
     /// Play from the medley point, or the preview point when there is none.
     SingFromChorus,
     ToggleFavourite,
+    /// Choose how the next song is sung: blind, deaf, first to 2000, and the rest.
+    PickChallenge,
     /// Copy what the browser knows to the clipboard, for reporting a broken file.
     ShowDetails,
     OpenFolder,
 }
 
 impl SongAction {
-    pub const ALL: [SongAction; 5] = [
+    pub const ALL: [SongAction; 6] = [
         SongAction::Sing,
         SongAction::SingFromChorus,
         SongAction::ToggleFavourite,
+        SongAction::PickChallenge,
         SongAction::ShowDetails,
         SongAction::OpenFolder,
     ];
@@ -296,6 +304,7 @@ impl SongAction {
             Self::Sing => "Sing",
             Self::SingFromChorus => "Sing from the chorus",
             Self::ToggleFavourite => "Favourite",
+            Self::PickChallenge => "Sing it how\u{2026}",
             Self::ShowDetails => "Song details",
             Self::OpenFolder => "Open the song folder",
         }
@@ -313,6 +322,8 @@ pub struct SongSelect {
     sort_chosen: bool,
     /// What the list is narrowed to.
     narrow: Narrow,
+    /// Which challenge the next song is sung under, as an index into `Challenge::ALL`.
+    challenge: usize,
     /// Values chosen per facet, in `Facet::ALL` order. Empty means no constraint.
     picked: Vec<Vec<String>>,
     /// The values each facet offers, filled in by the application.
@@ -360,6 +371,7 @@ impl SongSelect {
             sort_cursor: 0,
             sort_chosen: false,
             narrow: Narrow::default(),
+            challenge: 0,
             picked: vec![Vec::new(); Facet::ALL.len()],
             facets: FacetValues::new(),
             facets_stale: true,
@@ -654,6 +666,7 @@ impl SongSelect {
             Mode::Searching => self.handle_searching(input),
             Mode::Sorting => self.handle_sorting(input),
             Mode::Filtering => self.handle_filtering(input),
+            Mode::Challenging => self.handle_challenging(input),
             Mode::Menu => self.handle_menu(input),
         }
     }
@@ -761,6 +774,12 @@ impl SongSelect {
                 self.menu_cursor = index;
                 if clicked {
                     return self.handle_menu(Input::Confirm);
+                }
+            }
+            Some(Region::Challenge(index)) => {
+                self.challenge = index.min(Challenge::ALL.len() - 1);
+                if clicked {
+                    self.mode = Mode::Browsing;
                 }
             }
             Some(Region::Category(index)) => {
@@ -879,6 +898,33 @@ impl SongSelect {
         Transition::None
     }
 
+    /// The challenge the next song is sung under.
+    pub fn challenge(&self) -> &'static Challenge {
+        &Challenge::ALL[self.challenge.min(Challenge::ALL.len() - 1)]
+    }
+
+    /// Open the challenge picker.
+    pub fn pick_challenge(&mut self) {
+        self.mode = Mode::Challenging;
+    }
+
+    fn handle_challenging(&mut self, input: Input) -> Transition {
+        let count = Challenge::ALL.len();
+        match input {
+            Input::Up => self.challenge = (self.challenge + count - 1) % count,
+            Input::Down => self.challenge = (self.challenge + 1) % count,
+            Input::PageUp => self.challenge = self.challenge.saturating_sub(6),
+            Input::PageDown => self.challenge = (self.challenge + 6).min(count - 1),
+            // No cancel that reverts: the cursor *is* the choice, so moving it has already
+            // chosen and pretending otherwise would need a second confirm on every row.
+            Input::Confirm | Input::Submit | Input::Back | Input::ContextMenu => {
+                self.mode = Mode::Browsing
+            }
+            _ => {}
+        }
+        Transition::None
+    }
+
     /// The filter panel: categories on the left, their values on the right.
     fn handle_filtering(&mut self, input: Input) -> Transition {
         let rows = self.rows_for(self.facet()).len();
@@ -985,9 +1031,11 @@ impl SongSelect {
         };
         // Saying what is being hidden, because a list quietly missing songs is
         // indistinguishable from a library missing them.
-        let status = match self.filter_summary() {
-            Some(filters) => format!("{filters}  ·  {counted}"),
-            None => counted,
+        let status = match (self.filter_summary(), self.challenge) {
+            (Some(filters), 0) => format!("{filters}  ·  {counted}"),
+            (Some(filters), _) => format!("{}  ·  {filters}  ·  {counted}", self.challenge().name),
+            (None, 0) => counted,
+            (None, _) => format!("{}  ·  {counted}", self.challenge().name),
         };
         let body = widgets.header(list, area, "Songs", &status);
         let body = widgets.footer(list, body, &self.hints());
@@ -1008,6 +1056,7 @@ impl SongSelect {
             Mode::Searching => self.draw_keyboard(list, area, style, &mut overlay),
             Mode::Sorting => self.draw_sort_picker(list, area, style, &mut overlay),
             Mode::Filtering => self.draw_filters(list, area, style, &mut overlay),
+            Mode::Challenging => self.draw_challenges(list, area, style, &mut overlay),
             Mode::Menu => self.draw_menu(list, area, style, &mut overlay),
             Mode::Browsing => {}
         }
@@ -1046,6 +1095,7 @@ impl SongSelect {
                 (search, "Clear all"),
                 (back, "Done"),
             ],
+            Mode::Challenging => vec![(confirm, "Choose"), (back, "Back")],
             Mode::Menu => vec![(confirm, "Choose"), (back, "Back")],
         }
     }
@@ -1580,6 +1630,62 @@ impl SongSelect {
                 TextStyle::new(style.scaled_text(0.75), style.muted).align(Align::End),
             );
         }
+    }
+
+    /// The challenge picker: fifteen ways to sing the same song.
+    fn draw_challenges(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
+        let widgets = Widgets::new(style);
+        widgets.scrim(list, area);
+
+        let row_h = style.gap(2.9);
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.52).min(820.0),
+            (row_h * (Challenge::ALL.len() as f32 + 3.4)).min(area.h * 0.92),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(1.6));
+        let (heading, rest) = inner.cut_top(row_h);
+        list.text(
+            heading,
+            "Sing it how",
+            TextStyle::new(style.scaled_text(1.2), style.text).bold(),
+        );
+        // The blurb for the row under the cursor, so what a mode does is readable before it is
+        // chosen rather than discovered halfway through a song.
+        let (rows_area, blurb) = rest.cut_bottom(row_h * 1.6);
+        list.text(
+            blurb,
+            self.challenge().blurb,
+            TextStyle::new(style.scaled_text(0.82), style.muted).valign(VAlign::Middle),
+        );
+
+        let visible = ((rows_area.h / row_h).floor() as usize).max(1);
+        let first = self
+            .challenge
+            .saturating_sub(visible.saturating_sub(2))
+            .min(Challenge::ALL.len().saturating_sub(visible));
+        list.clipped(rows_area, |list| {
+            for (offset, challenge) in Challenge::ALL.iter().skip(first).take(visible).enumerate() {
+                let index = first + offset;
+                let row = Rect::new(
+                    rows_area.x,
+                    rows_area.y + row_h * offset as f32,
+                    rows_area.w,
+                    row_h,
+                )
+                .inset_xy(0.0, style.gap(0.2));
+                regions.push((row, Region::Challenge(index)));
+                widgets.row(list, row, challenge.name, "", index == self.challenge);
+            }
+        });
     }
 
     fn draw_sort_picker(

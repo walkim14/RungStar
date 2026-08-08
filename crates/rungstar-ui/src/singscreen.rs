@@ -241,6 +241,22 @@ pub struct SingScreen {
     pub duration: f32,
     pub gamepad: bool,
     pub show_input_panel: bool,
+    /// Whether the singer panels are shown. The jukebox has nobody singing.
+    pub show_panels: bool,
+    /// Whether the words are shown. A challenge takes them away.
+    pub show_lyrics: bool,
+    /// Whether the note staff is shown.
+    pub show_notes: bool,
+    /// The name of the challenge being played, when it is not the plain song.
+    pub challenge: Option<String>,
+    /// The rating bar that has to be cleared right now, and where each singer stands against
+    /// it. `None` when the challenge cannot put anybody out.
+    pub bar: Option<f32>,
+    /// Singers already knocked out, in singer order.
+    pub knocked_out: Vec<bool>,
+    /// Whether the backing track is audible. Deaf cuts it, and silence with no explanation
+    /// reads as the game having crashed.
+    pub audible: bool,
     /// How the highlight moves along the line.
     pub effect: LyricEffect,
     /// Where each singer's newest mark is *drawn* to, easing toward where it was sung.
@@ -322,6 +338,13 @@ impl SingScreen {
             duration: 0.0,
             gamepad: false,
             show_input_panel: false,
+            show_panels: true,
+            show_lyrics: true,
+            show_notes: true,
+            challenge: None,
+            bar: None,
+            knocked_out: Vec::new(),
+            audible: true,
             effect: LyricEffect::default(),
             grown: Vec::new(),
             grown_at: f64::NEG_INFINITY,
@@ -561,9 +584,15 @@ impl SingScreen {
 
         // Singers take a strip down the side, so the staff keeps the middle whatever the
         // player count. Six panels on a Deck are still readable at this width.
-        let panel_w = (area.w * 0.18).clamp(220.0, 340.0);
+        let panel_w = if self.show_panels {
+            (area.w * 0.18).clamp(220.0, 340.0)
+        } else {
+            0.0
+        };
         let (panels, middle) = body.cut_right(panel_w);
-        self.draw_panels(list, panels.inset(style.gap(1.0)), style);
+        if self.show_panels {
+            self.draw_panels(list, panels.inset(style.gap(1.0)), style);
+        }
 
         // One staff whatever the part count, with a duet's notes coloured by whose they are.
         // Two stacked staves was the first attempt and reads worse: it halves the height of
@@ -574,13 +603,30 @@ impl SingScreen {
 
         let merged = self.merge_parts(parts, beat);
         self.advance_marks(beat);
-        self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
+        if self.show_notes {
+            self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
+        } else {
+            // Not simply nothing: an empty middle of the screen looks like a song that failed
+            // to load. The panel that would have held the staff stays, and says why.
+            self.draw_hidden(
+                list,
+                staff_area.inset(style.gap(1.5)),
+                style,
+                "Notes hidden",
+            );
+        }
 
         // Both parts' words, stacked at the bottom in their own colours, each with its own
         // bar. A singer finds their line by its colour rather than by working out which half
         // of the screen is theirs.
         let rows = lyrics_area.rows(parts.len().max(1), 0.0);
         for (index, (part, row)) in parts.iter().zip(rows).enumerate() {
+            if !self.show_lyrics {
+                if index == 0 {
+                    self.draw_hidden(list, lyrics_area, style, "Words hidden");
+                }
+                continue;
+            }
             let tint = (parts.len() > 1).then(|| self.part_colour(index, style));
             self.draw_lyrics(list, row, style, part, beat, tint);
         }
@@ -608,9 +654,41 @@ impl SingScreen {
         }
     }
 
+    /// What a challenge has taken away, said rather than left blank.
+    ///
+    /// A blank middle of the screen is indistinguishable from a song that failed to load, and
+    /// somebody who joined the party ten minutes ago has no way to tell which it is.
+    fn draw_hidden(&self, list: &mut DrawList, area: Rect, style: &Style, what: &str) {
+        list.panel(area, style.surface.alpha(0.25), style.metrics.radius);
+        list.text(
+            area,
+            what,
+            TextStyle::new(style.scaled_text(0.9), style.muted).centered(),
+        );
+    }
+
+    /// The bar a rating has to clear, drawn across the top under the progress line.
+    ///
+    /// A rule that puts somebody out without showing how close they were is a rule nobody can
+    /// play against, and "you are out" with no warning reads as a bug.
+    fn draw_bar(&self, list: &mut DrawList, area: Rect, style: &Style, bar: f32) {
+        let track = Rect::new(area.x, area.y, area.w, style.gap(0.9));
+        list.panel(track, style.surface_sunken, track.h / 2.0);
+        list.panel(
+            Rect::new(track.x, track.y, track.w * bar.clamp(0.0, 1.0), track.h),
+            style.danger.alpha(0.55),
+            track.h / 2.0,
+        );
+        list.text(
+            Rect::new(area.x, area.y + track.h, area.w, style.gap(1.8)),
+            format!("Hold the line \u{2014} {}%", (bar * 100.0).round() as i32),
+            TextStyle::new(style.scaled_text(0.72), style.muted).centered(),
+        );
+    }
+
     fn draw_header(&self, list: &mut DrawList, area: Rect, style: &Style) {
         let inner = area.inset_xy(style.gap(2.0), 0.0);
-        let (title_area, _) = inner.cut_left(inner.w * 0.6);
+        let (title_area, right) = inner.cut_left(inner.w * 0.6);
         list.text(
             title_area,
             format!("{} \u{2013} {}", self.artist, self.title),
@@ -618,6 +696,30 @@ impl SingScreen {
                 .bold()
                 .overflow(Overflow::Ellipsis),
         );
+        // What is being played, when it is not just the song. Somebody who walked in has to be
+        // able to see why the words are missing.
+        if let Some(challenge) = &self.challenge {
+            let label = if self.audible {
+                challenge.clone()
+            } else {
+                format!("{challenge} \u{2014} music off")
+            };
+            list.text(
+                right,
+                label,
+                TextStyle::new(
+                    style.scaled_text(0.85),
+                    if self.audible {
+                        style.accent
+                    } else {
+                        style.danger
+                    },
+                )
+                .align(Align::End)
+                .bold()
+                .overflow(Overflow::Ellipsis),
+            );
+        }
 
         // A progress bar rather than a clock: how much is left matters, the timestamp does not.
         if self.duration > 0.0 {
@@ -635,6 +737,19 @@ impl SingScreen {
                 track.h / 2.0,
             );
         }
+        if let Some(bar) = self.bar {
+            self.draw_bar(
+                list,
+                Rect::new(
+                    inner.x,
+                    area.bottom() + style.gap(0.4),
+                    inner.w,
+                    style.gap(2.6),
+                ),
+                style,
+                bar,
+            );
+        }
     }
 
     fn draw_panels(&self, list: &mut DrawList, area: Rect, style: &Style) {
@@ -645,14 +760,34 @@ impl SingScreen {
             list.panel(row, style.surface.alpha(opacity), style.metrics.radius);
             let inner = row.inset(style.gap(1.0));
 
+            // Somebody knocked out keeps their panel and their score. Removing it would take
+            // away the one thing they want to look at, which is how far they got.
+            let out = self.knocked_out.get(index).copied().unwrap_or(false);
             let (name_row, rest) = inner.cut_top(style.scaled_text(0.85) * 1.4);
+            let (name_row, out_tag) = if out {
+                name_row.cut_left(name_row.w * 0.62)
+            } else {
+                (name_row, Rect::default())
+            };
             list.text(
                 name_row,
                 &singer.name,
-                TextStyle::new(style.scaled_text(0.85), color)
-                    .bold()
-                    .overflow(Overflow::Ellipsis),
+                TextStyle::new(
+                    style.scaled_text(0.85),
+                    if out { style.muted } else { color },
+                )
+                .bold()
+                .overflow(Overflow::Ellipsis),
             );
+            if out {
+                list.text(
+                    out_tag,
+                    "OUT",
+                    TextStyle::new(style.scaled_text(0.78), style.danger)
+                        .bold()
+                        .align(Align::End),
+                );
+            }
 
             let (score_row, rest) = rest.cut_top(style.scaled_text(1.8) * 1.2);
             list.text(

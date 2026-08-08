@@ -40,6 +40,10 @@ pub enum Route {
     Search,
     /// Who is singing tonight.
     Players,
+    /// Teams, jokers and brackets.
+    Party,
+    /// Songs played back to back with nobody scoring.
+    Jukebox,
     /// The four statistics views.
     Stats,
     About,

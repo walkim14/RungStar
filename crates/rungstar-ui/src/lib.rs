@@ -14,6 +14,7 @@ pub mod menu;
 pub mod menus;
 pub mod micscreen;
 pub mod options;
+pub mod partyscreen;
 pub mod playerscreen;
 pub mod screen;
 pub mod settings;
