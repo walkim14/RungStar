@@ -950,3 +950,50 @@ fn the_song_itself_ignores_the_pointer() {
     assert_eq!(choice, None);
     assert_eq!(screen.overlay, Overlay::None, "a click paused the song");
 }
+
+#[test]
+fn confirm_does_nothing_until_the_last_note_has_gone() {
+    // A stray press must never end a song that is still being sung.
+    let mut screen = sing_screen(1);
+    assert!(!screen.outro);
+    let (transition, choice) = screen.handle(Input::Confirm);
+    assert_eq!(transition, Transition::None);
+    assert_eq!(choice, None);
+    assert_eq!(screen.overlay, Overlay::None);
+}
+
+#[test]
+fn confirm_skips_the_outro_once_there_is_nothing_left_to_sing() {
+    // An instrumental tail is part of the song and worth hearing, but sitting through forty
+    // seconds of it with nothing to do is another matter — and the only way out was Give up,
+    // which used to throw the score away.
+    let mut screen = sing_screen(1);
+    screen.outro = true;
+    let (_, choice) = screen.handle(Input::Confirm);
+    assert_eq!(choice, Some(PauseChoice::SkipOutro));
+
+    // And Enter does the same, since it is the key the hint names.
+    let mut screen = sing_screen(1);
+    screen.outro = true;
+    let (_, choice) = screen.handle(Input::Submit);
+    assert_eq!(choice, Some(PauseChoice::SkipOutro));
+}
+
+#[test]
+fn the_outro_says_how_to_skip_it() {
+    // A shortcut nobody is told about is a shortcut nobody uses.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(1);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &line(), &syllables(), "", 10.0);
+    let quiet = strings(&list).join(" ");
+    assert!(!quiet.contains("your score"), "offered mid-song: {quiet}");
+
+    screen.outro = true;
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &line(), &syllables(), "", 10.0);
+    let offered = strings(&list).join(" ");
+    assert!(offered.contains("for your score"), "not offered: {offered}");
+}

@@ -93,6 +93,8 @@ struct App {
     pending_sing: Option<i64>,
     /// Set when the microphone screen has been asked for.
     pending_mics: bool,
+    /// The song being sung, so Restart knows what to start again.
+    singing: Option<i64>,
     /// Set when something changed that the window or the audio has to be told about.
     settings_dirty: bool,
     /// A scan running on another thread, and the last progress it reported.
@@ -223,6 +225,7 @@ impl App {
             status: String::new(),
             pending_sing: None,
             pending_mics: false,
+            singing: None,
             settings_dirty: true,
             scan: None,
             preview: None,
@@ -693,15 +696,25 @@ impl App {
             }
             Some(Screen::Sing(screen, session)) => {
                 let (transition, choice) = screen.handle(input);
+                let mut restart = false;
                 let forced = match choice {
                     Some(PauseChoice::Continue) => {
                         session.resume();
                         Transition::None
                     }
-                    Some(PauseChoice::Restart) | Some(PauseChoice::Quit) => {
-                        // Restarting means going back and picking it again: keeping a session
-                        // alive across a restart would mean owning the devices twice.
+                    // Giving up still earns what was already sung. Dropping straight back to
+                    // the browser throws away a score somebody worked for, and a half-sung
+                    // song is exactly when you most want to see the number.
+                    Some(PauseChoice::Quit) | Some(PauseChoice::SkipOutro) => {
                         session.stop();
+                        screen.overlay = Overlay::Results;
+                        Transition::None
+                    }
+                    Some(PauseChoice::Restart) => {
+                        // The devices cannot be owned twice, so the old session is dropped
+                        // before the new one opens them.
+                        session.stop();
+                        restart = true;
                         Transition::Pop
                     }
                     None => {
@@ -711,6 +724,9 @@ impl App {
                         Transition::None
                     }
                 };
+                if restart {
+                    self.pending_sing = self.singing;
+                }
                 if forced == Transition::None {
                     transition
                 } else {
@@ -1225,6 +1241,9 @@ fn main() -> Result<()> {
                 } else {
                     session.update_singers(&mut screen.singers);
                     screen.position = session.position();
+                    // Once the last note has gone by there is nothing left to sing, so the
+                    // screen offers to skip the rest of the instrumental.
+                    screen.outro = session.past_last_note();
                     if session.is_finished() && screen.overlay != Overlay::Results {
                         // The scores go up rather than the screen closing: in a party the
                         // result is the point, and popping straight back to the browser

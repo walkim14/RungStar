@@ -42,6 +42,23 @@ fn song_over(audio_finished: bool, position: f64, end_secs: Option<f64>) -> bool
     audio_finished || end_secs.is_some_and(|end| position >= end)
 }
 
+/// Whether a beat continues the previous run of sung marks.
+///
+/// The interesting half is `same_place`. A hit continues for as long as it is the same note,
+/// whatever pitch the detector reported: within the tolerance band every one of those beats
+/// counts and they are all drawn on the note, so splitting the run because the detector moved
+/// a semitone turns one bubble into a row of touching ones. A miss splits per pitch, because
+/// a miss is drawn where the singer actually was and two different wrong notes are two
+/// different pieces of information.
+fn continues_run(last: Option<&Sung>, beat: f64, pitch: i32, hit: bool, same_note: bool) -> bool {
+    let Some(last) = last else {
+        return false;
+    };
+    let contiguous = (last.start + last.duration - beat).abs() < 1.5;
+    let same_place = if hit { same_note } else { last.pitch == pitch };
+    contiguous && last.hit == hit && same_place
+}
+
 /// One song being played.
 pub struct Session {
     clock: MasterClock,
@@ -68,6 +85,15 @@ pub struct Session {
     finished: bool,
     /// Where `#END` says to stop, in seconds. `None` means play to the end of the audio.
     end_secs: Option<f64>,
+    /// The last beat any note ends on, for knowing when the outro has started.
+    last_note_beat: f64,
+    /// The note each singer's last recorded run was scored against.
+    ///
+    /// Runs merge on the note, not on the pitch. A singer holding one note wobbles across the
+    /// tolerance band — 60, 61, 60 — and every one of those beats is a hit, drawn at the
+    /// note's own pitch. Splitting the run whenever the detector moved produced a row of
+    /// separate bubbles sitting against each other where there should be one.
+    last_target: Vec<Option<usize>>,
 }
 
 impl Session {
@@ -112,6 +138,7 @@ impl Session {
         timing.mic_delay = mic_delay_ms / 1000.0;
 
         let notes = collect_notes(&lines);
+        let last_note_beat = notes.iter().map(Note::end).fold(0.0, f64::max);
         // `#END` is in milliseconds, unlike `#START` and `#PREVIEWSTART` which are seconds.
         // The format is inconsistent about this and it is an easy place to be wrong.
         let end_secs = song
@@ -157,6 +184,8 @@ impl Session {
             has_microphone,
             finished: false,
             end_secs,
+            last_note_beat,
+            last_target: vec![None; players],
         })
     }
 
@@ -258,10 +287,10 @@ impl Session {
             for player in 0..self.scorers.len() {
                 let sung = self.pitches[player].filter(|_| self.levels[player] >= self.gate);
                 let result = self.scorers[player].sing_beat(beat, sung);
-                if result.target.is_some() {
+                if let Some(target) = result.target {
                     self.hitting[player] = Some(result.hit);
                     if let Some(pitch) = sung {
-                        self.record_sung(player, beat, pitch, result.hit);
+                        self.record_sung(player, beat, pitch, target, result.hit);
                     }
                 }
 
@@ -294,24 +323,35 @@ impl Session {
 
     /// Extend the last run rather than pushing a bar per beat, so a held note draws as one
     /// stretch instead of a dotted line.
-    fn record_sung(&mut self, player: usize, beat: i32, pitch: i32, hit: bool) {
-        let history = &mut self.sung[player];
+    ///
+    /// A hit continues the run for as long as it is the same note, whatever pitch the
+    /// detector reported: within the tolerance band every one of those beats counts, and they
+    /// are all drawn on the note, so ending the run because the detector moved a semitone
+    /// splits one bubble into several touching ones. A miss is kept separate per pitch,
+    /// because a miss is drawn where the singer actually was.
+    fn record_sung(&mut self, player: usize, beat: i32, pitch: i32, target: usize, hit: bool) {
         let beat = beat as f64;
-        match history.last_mut() {
-            Some(last)
-                if last.hit == hit
-                    && last.pitch == pitch
-                    && (last.start + last.duration - beat).abs() < 1.5 =>
-            {
+        let same_note = self.last_target[player] == Some(target);
+        let continues = continues_run(self.sung[player].last(), beat, pitch, hit, same_note);
+
+        if continues {
+            if let Some(last) = self.sung[player].last_mut() {
                 last.duration = (beat + 1.0) - last.start;
             }
-            _ => history.push(Sung {
+        } else {
+            self.sung[player].push(Sung {
                 start: beat,
                 duration: 1.0,
                 pitch,
                 hit,
-            }),
+            });
         }
+        self.last_target[player] = Some(target);
+    }
+
+    /// Whether the last note has gone by, so there is nothing left to sing.
+    pub fn past_last_note(&self) -> bool {
+        self.clock.beats().visual > self.last_note_beat
     }
 
     /// The drawing beat, which runs ahead of the scoring beat by the microphone delay.
@@ -697,6 +737,60 @@ mod tests {
         // final syllable every time.
         assert!(!song_over(false, 200.0, None), "audio still playing");
         assert!(song_over(true, 200.0, None), "audio ran out");
+    }
+
+    fn run(start: f64, duration: f64, pitch: i32, hit: bool) -> Sung {
+        Sung {
+            start,
+            duration,
+            pitch,
+            hit,
+        }
+    }
+
+    #[test]
+    fn a_held_note_stays_one_bubble_while_the_detector_wobbles() {
+        // The reported defect: a singer holding one note drifts across the tolerance band,
+        // 60 then 61 then 60, and every beat is a hit. They were drawn as separate bubbles
+        // sitting against each other instead of one.
+        let last = run(8.0, 1.0, 60, true);
+        assert!(
+            continues_run(Some(&last), 9.0, 61, true, true),
+            "a wobble within the same note split the run"
+        );
+        assert!(continues_run(Some(&last), 9.0, 59, true, true));
+        assert!(continues_run(Some(&last), 9.0, 60, true, true));
+    }
+
+    #[test]
+    fn a_new_note_starts_a_new_bubble() {
+        // Two hits in a row against different notes are two bubbles, however close in pitch.
+        let last = run(8.0, 1.0, 60, true);
+        assert!(!continues_run(Some(&last), 9.0, 60, true, false));
+    }
+
+    #[test]
+    fn a_miss_is_kept_apart_from_a_hit_and_from_another_pitch() {
+        let hit = run(8.0, 1.0, 60, true);
+        assert!(
+            !continues_run(Some(&hit), 9.0, 60, false, true),
+            "hit and miss merged"
+        );
+
+        // Two different wrong notes are two different pieces of information.
+        let miss = run(8.0, 1.0, 64, false);
+        assert!(continues_run(Some(&miss), 9.0, 64, false, true));
+        assert!(!continues_run(Some(&miss), 9.0, 67, false, true));
+    }
+
+    #[test]
+    fn a_gap_starts_a_new_run() {
+        // Stopping and starting again on the same note is two marks, because the silence
+        // between them is the thing worth seeing.
+        let last = run(8.0, 1.0, 60, true);
+        assert!(continues_run(Some(&last), 9.0, 60, true, true));
+        assert!(!continues_run(Some(&last), 12.0, 60, true, true));
+        assert!(!continues_run(None, 9.0, 60, true, true));
     }
 
     #[test]

@@ -205,6 +205,8 @@ pub enum PauseChoice {
     Continue,
     Restart,
     Quit,
+    /// Stop the instrumental tail and show the scores, keeping them.
+    SkipOutro,
 }
 
 /// The sing screen.
@@ -229,6 +231,12 @@ pub struct SingScreen {
     /// Clickable pause-menu rows from the last frame. Recorded while drawing, so hit testing
     /// cannot drift from the picture.
     pause_regions: Vec<Rect>,
+    /// Whether the last note has gone by, so the screen can offer to skip the outro.
+    ///
+    /// An instrumental tail is part of the song and worth hearing, but sitting through forty
+    /// seconds of it with nothing left to sing is a different matter — and the alternative
+    /// on offer was "Give up", which throws the score away.
+    pub outro: bool,
     /// The area the results card covers. Kept for the pointer, which the layout is otherwise
     /// the only thing that knows about.
     results_card: Option<Rect>,
@@ -266,6 +274,7 @@ impl SingScreen {
             pitch_high: 12,
             pause_cursor: 0,
             pause_regions: Vec::new(),
+            outro: false,
             results_card: None,
         }
     }
@@ -288,6 +297,12 @@ impl SingScreen {
                     self.overlay = Overlay::Paused;
                     self.pause_cursor = 0;
                     (Transition::None, None)
+                }
+                // Confirm does nothing while there is still singing to do — a stray press
+                // must not end a song — but once the last note has gone it skips to the
+                // scores, keeping them.
+                Input::Confirm | Input::Submit if self.outro => {
+                    (Transition::None, Some(PauseChoice::SkipOutro))
                 }
                 _ => (Transition::None, None),
             },
@@ -388,6 +403,21 @@ impl SingScreen {
         let (lyrics_area, staff_area) = middle.cut_bottom(style.gap(9.0));
         self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, line, beat);
         self.draw_lyrics(list, lyrics_area, style, syllables, next_line, beat);
+
+        if self.outro && self.overlay == Overlay::None {
+            let hint = if self.gamepad { "A" } else { "Enter" };
+            let strip = Rect::new(
+                area.x,
+                area.bottom() - style.gap(3.0),
+                area.w,
+                style.gap(2.2),
+            );
+            list.text(
+                strip,
+                format!("{hint} for your score"),
+                TextStyle::new(style.scaled_text(0.85), style.muted).centered(),
+            );
+        }
 
         match self.overlay {
             Overlay::Paused => self.draw_pause(list, area, style),
