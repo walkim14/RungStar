@@ -31,8 +31,16 @@ const ANALYSIS_INTERVAL: Duration = Duration::from_millis(10);
 /// whole point of drawing a line at a time is being able to look back over it.
 const SUNG_KEEP_BEFORE_LINE: f64 = 8.0;
 
-/// How long after the last note the song is considered over, in beats.
-const TAIL_BEATS: f64 = 8.0;
+/// Whether the song is over.
+///
+/// It ends when the audio does, or at `#END` for a song that names one. Deliberately not when
+/// the notes run out: an earlier version stopped eight beats after the last note, and the note
+/// grid runs at four times the written BPM — so at a typical tempo that was under half a
+/// second, and every song cut off dead on its final syllable. An outro is part of the song,
+/// and `#END` is how a song says to skip it.
+fn song_over(audio_finished: bool, position: f64, end_secs: Option<f64>) -> bool {
+    audio_finished || end_secs.is_some_and(|end| position >= end)
+}
 
 /// One song being played.
 pub struct Session {
@@ -58,7 +66,8 @@ pub struct Session {
     capture: SdlCapture,
     has_microphone: bool,
     finished: bool,
-    last_note_beat: f64,
+    /// Where `#END` says to stop, in seconds. `None` means play to the end of the audio.
+    end_secs: Option<f64>,
 }
 
 impl Session {
@@ -103,7 +112,13 @@ impl Session {
         timing.mic_delay = mic_delay_ms / 1000.0;
 
         let notes = collect_notes(&lines);
-        let last_note_beat = notes.iter().map(|n| n.end()).fold(0.0, f64::max);
+        // `#END` is in milliseconds, unlike `#START` and `#PREVIEWSTART` which are seconds.
+        // The format is inconsistent about this and it is an easy place to be wrong.
+        let end_secs = song
+            .headers
+            .end
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms as f64 / 1000.0);
 
         let mut clock = MasterClock::new(timing);
         playback
@@ -141,7 +156,7 @@ impl Session {
             capture,
             has_microphone,
             finished: false,
-            last_note_beat,
+            end_secs,
         })
     }
 
@@ -224,9 +239,11 @@ impl Session {
             self.score_elapsed(beats.detection);
         }
 
-        // Over when the audio runs out, or when the last note is well behind — a song with a
-        // long silent outro should not hold the screen for it.
-        if self.playback.is_finished() || beats.visual > self.last_note_beat + TAIL_BEATS {
+        if song_over(
+            self.playback.is_finished(),
+            self.playback.position(),
+            self.end_secs,
+        ) {
             self.finished = true;
         }
         Ok(())
@@ -665,5 +682,32 @@ impl Monitor {
 
     pub fn stop(&mut self) {
         self.capture.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_song_plays_its_outro_rather_than_stopping_on_the_last_note() {
+        // The bug this replaces: the end was eight *grid* beats after the last note, and the
+        // grid runs at four times the written BPM. At 300 in the file that is 1200 beats a
+        // minute, so eight of them is four tenths of a second — the song stopped dead on its
+        // final syllable every time.
+        assert!(!song_over(false, 200.0, None), "audio still playing");
+        assert!(song_over(true, 200.0, None), "audio ran out");
+    }
+
+    #[test]
+    fn a_song_that_names_an_end_stops_there() {
+        // `#END` is in milliseconds, unlike `#START` and `#PREVIEWSTART` which are seconds.
+        // The format is inconsistent and this is an easy place to be wrong.
+        let end = Some(180_000.0 / 1000.0);
+        assert!(!song_over(false, 179.9, end));
+        assert!(song_over(false, 180.0, end));
+        assert!(song_over(false, 200.0, end));
+        // And the audio running out still ends it, even before `#END`.
+        assert!(song_over(true, 10.0, end));
     }
 }
