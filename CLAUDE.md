@@ -28,6 +28,9 @@ Re-clone if the scratchpad is gone:
 cargo run -p rungstar-app --bin rungstar-diagnostics   # mic/pitch/controller check
 cargo run --release --example scale -p rungstar-library  # 30k-song scan/search timings
 cargo run -p rungstar-app --bin rungstar-sing -- <song.txt> [--mic <name>]  # play and score
+cargo run --release -p rungstar-app --bin rungstar        # the game
+cargo run --release -p rungstar-app --bin rungstar -- --check   # start, draw every screen, exit
+cargo run --release --example index -p rungstar-library -- <folder>  # scan a real library
 cargo test --workspace                              # all tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
@@ -112,6 +115,13 @@ fixture output.
 8. **A freestyle-only line earns no line bonus.** UltraStar Deluxe excludes such lines from
    the bonus divisor but still pays them a full bonus, so a song containing one can score
    over 10,000. Ours cannot.
+9. **A text search ranks by relevance, and a phrase beats scattered words.** UltraStar sorts
+   alphabetically always, so searching only works if you already know the title. Two parts:
+   an unsorted search ranks by bm25 rather than by artist, and — because bm25 scores term
+   count and document length but has no notion of *adjacency* — a second pass promotes songs
+   containing the words as a phrase. Without it, "never gonna give you up" returns every song
+   containing those five words scattered about, in artist order. Picking a sort explicitly
+   turns ranking off, because reordering a list somebody asked to be alphabetical is wrong.
 
 Normalisation is now idempotent, verified by property test over 20k generated songs.
 
@@ -149,19 +159,76 @@ Library, 30,000 songs (`cargo run --release --example scale -p rungstar-library`
 | Search: lyrics | 44 ms |
 | Search: fuzzy fallback (only on a miss) | 78 ms |
 | Browse by artist | 6.2 ms |
-| Cold scan (paid once) | 82 s |
+| Cold scan (paid once) | 3.9 s |
 
-**The cold scan is dominated by FTS5 indexing the lyrics**, not by parsing or by the
-filesystem. Roughly 36 MB of lyric text across thirty thousand small documents is simply slow
-to tokenise, and it is the price of being able to search by a line you half-remember. Batching
-the index lookup and replacing four `stat` calls per song with one directory listing bought
-21% on the warm path and only 8% on the cold one — measured, not assumed, and the earlier
-guess that syscalls dominated was wrong.
+The cold scan was 82 s until the real cause turned up, and it was **not** a cost — it was a
+pathology. Writing a song ran an FTS5 `DELETE` before its `INSERT`. On a first scan every one
+of those deletes matched nothing, but FTS5 buffers pending index terms in memory and **a
+delete forces that buffer to flush**, so the index was built in thirty thousand small pieces
+instead of a few large ones. Skipping the delete for rows being inserted for the first time
+took the cold scan from 82 s to 3.9 s.
 
-If it needs to come down further, in order of expected value: skip the FTS delete for rows
-being inserted rather than updated (it is a no-op on a fresh index but still a statement per
-song), bulk-load the FTS table in one pass after the main insert, and consider an
-external-content FTS table to stop storing the lyrics twice.
+Two earlier hypotheses about this were wrong — first that syscalls dominated (batching the
+index lookup and replacing four `stat` calls per song with one directory listing bought 21%
+warm and only 8% cold), then that tokenising 36 MB of lyrics was simply slow. Tokenising is
+not free, but it was never the bottleneck. The skip is only correct while "new" means "this
+path has no index entry", so `tests/fts_sync.rs` pins the two ways that could stop being true.
+
+The *verifying* rescan still pays the old price, because there every row genuinely needs its
+delete. That path is the rare "I do not trust the index" case, so it has not been optimised.
+
+### Measured on a real library
+
+8,134 songs at `UltraStarPlaySongConverter/UltraStarPlaySongsToBeConverted`, via
+`cargo run --release --example index -p rungstar-library`:
+
+| Operation | Time |
+|---|---|
+| Cold scan, cold file cache | 14.1 s (1.7 ms/song) |
+| Cold scan, warm file cache | 3.9 s |
+| Warm rescan | 0.40 s |
+| Search: prefix / two words | 3.3 / 6.2 ms |
+| Search: lyric line | 2.0 ms |
+| Search: fuzzy fallback | 26 ms |
+
+**Zero parse failures across all 8,134 files**, including titles with curly quotes and
+non-ASCII folder names. 35 languages, 354 genres, 295 editions.
+
+## The user interface
+
+`rungstar-ui` has **no graphics API in it**. Screens turn state into a `DrawList` of rectangles
+and strings in design units; a backend turns that into pixels. Two things fall out: the whole
+interface is testable without a window — the tests assert *commands*, which is stronger than a
+screenshot — and the renderer can be replaced without touching a screen. `rungstar-platform`
+consumes the list through SDL today; wgpu will be a sibling of that file, not a rewrite.
+
+**Resolution independence is real, not a scale factor.** The design space is 1000 units tall
+and as wide as the aspect ratio makes it, so a lyric line is 64 units on every display and a
+wider screen gets more room rather than a stretched picture. Layout is composition of
+rectangles (`cut_top`, `columns`, `anchored`), so a six-player screen is the same code as a
+one-player screen with a different split. USDX hand-places every player count in 800x600
+coordinates, which is why it ships one layout per count per theme.
+
+**A theme sets only how things look** — colours, fonts, radius, spacing. Layout belongs to the
+screen. So a theme is forty lines of TOML, cannot be broken by a resolution, and cannot break a
+screen added after it was written. Skin and accent vary independently and every derived colour
+(raised, sunken, on-accent) is computed, because asking theme authors to get contrast right by
+hand is how themes end up with an invisible list cursor. The built-in theme is compiled in, so
+a missing file cannot stop the game starting.
+
+**Options pages are derived from the settings**, not written beside them: an option cannot
+exist without a label and a help string, and a test walks every row of every page checking it
+steps and comes back. USDX has ten hand-written options screens that disagree with each other.
+
+The three browse layouts (List, Chessboard, Roulette) are one state machine with three
+placement functions, so switching keeps the cursor, filter and scroll position. Scrolling
+animates by keeping cursor and view as separate values — the cursor never waits on an
+animation, so input is never dropped during a fast scroll through 30,000 songs.
+
+Fonts are rasterised with `fontdue` into a shelf-packed atlas per (face, whole-pixel size) and
+drawn with colour modulation. **No font is vendored yet** — the game borrows a system face
+(Segoe UI on Windows, DejaVu on Linux) and says so if it cannot. Bundling an OFL face belongs
+with packaging.
 
 ## Status
 
@@ -187,6 +254,20 @@ external-content FTS table to stop storing the lyrics twice.
   Device choice skips names that look virtual (Steam Streaming Microphone and friends). They
   sort to the top of SDL's list and deliver silence forever, which is indistinguishable from
   a broken setup. `--mic <substring>` overrides.
+
+- **Phase 6 — song select, theme engine, options**: the `rungstar` binary runs. Main menu,
+  song browser with all three layouts, live search with an on-screen keyboard, sort picker,
+  detail panel with cover art, six options pages, and real font rendering. Verified against a
+  real 8,134-song library.
+
+  `--check` starts everything a real launch does, draws one frame of every screen, and exits.
+  That is what makes "the game starts" assertable on a build machine with nobody in front of
+  it, and it is the first thing to run after touching a screen.
+
+  Still to come here: the context menu, playlists in the browser, audio previews while
+  browsing, controller rebinding, a microphone setup screen, and wiring `Transition::Sing`
+  into the sing screen — song select currently records the play and reports what it *would*
+  sing, because the sing screen is still a separate binary.
 
   The input panel exists because silence and a dead microphone looked identical on the first
   version of this screen. It separates the three things that fail independently: no audio

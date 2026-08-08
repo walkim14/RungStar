@@ -9,6 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 [[bin]]
+name = "rungstar"
+path = "src/app.rs"
+
+[[bin]]
 name = "rungstar-diagnostics"
 path = "src/diagnostics.rs"
 
@@ -21,6 +25,11 @@ rungstar-audio.workspace = true
 rungstar-pitch.workspace = true
 rungstar-platform.workspace = true
 rungstar-song.workspace = true
+rungstar-library.workspace = true
+rungstar-ui.workspace = true
 rungstar-score.workspace = true
-sdl3 = "0.18"
+sdl3 = { version = "0.18", features = ["unsafe_textures"] }
 anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }

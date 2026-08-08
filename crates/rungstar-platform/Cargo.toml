@@ -10,6 +10,8 @@ authors.workspace = true
 
 [dependencies]
 rungstar-audio.workspace = true
-sdl3 = "0.18"
+rungstar-ui.workspace = true
+fontdue = "0.9"
+sdl3 = { version = "0.18", features = ["unsafe_textures"] }
 thiserror.workspace = true
 tracing.workspace = true

@@ -111,6 +111,51 @@ fn fts_expression(text: &str, field: SearchField) -> Option<String> {
     })
 }
 
+/// The same words as a single phrase, when more than one was typed.
+///
+/// bm25 scores a document on how many of the query's terms it contains and how short it is;
+/// it has no notion of the terms being *adjacent*. So "never gonna give you up" ranks a song
+/// that happens to contain all five words scattered through it above the song those five
+/// words are the chorus of. Searching the phrase separately is what fixes that, and it is the
+/// difference between the lyric search finding your song and merely containing it.
+///
+/// The trailing `*` prefix-matches the final token, so the phrase still narrows while the
+/// last word is being typed.
+fn phrase_expression(text: &str, field: SearchField) -> Option<String> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.replace(['"', '*', ':', '(', ')', '^'], ""))
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() < 2 {
+        return None;
+    }
+    let phrase = format!("\"{}\"*", words.join(" "));
+    Some(match field.column() {
+        Some(column) => format!("{column} : ({phrase})"),
+        None => phrase,
+    })
+}
+
+/// Put the phrase matches in front, keeping each group's own order and dropping duplicates.
+fn phrase_first(
+    phrase: Vec<SongEntry>,
+    rest: Vec<SongEntry>,
+    limit: Option<usize>,
+) -> Vec<SongEntry> {
+    let mut seen: std::collections::HashSet<i64> = phrase.iter().map(|s| s.id).collect();
+    let mut merged = phrase;
+    for song in rest {
+        if seen.insert(song.id) {
+            merged.push(song);
+        }
+    }
+    if let Some(limit) = limit {
+        merged.truncate(limit);
+    }
+    merged
+}
+
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<SongEntry> {
     Ok(SongEntry {
         id: row.get(0)?,
@@ -223,6 +268,18 @@ impl Database {
         // than absent, so try again by similarity.
         if results.is_empty() && expression.is_some() {
             return self.search_fuzzy(query);
+        }
+
+        // Ranked by relevance, songs containing the words as a phrase come first. Only when
+        // ranking: under an artist or title sort the player has asked for a specific order
+        // and reordering it would be wrong.
+        if query.sort == SortKey::Relevance && !results.is_empty() {
+            if let Some(phrase) = phrase_expression(&query.text, query.field) {
+                let exact = self.search_indexed(query, Some(&phrase))?;
+                if !exact.is_empty() {
+                    return Ok(phrase_first(exact, results, query.limit));
+                }
+            }
         }
         Ok(results)
     }
