@@ -226,6 +226,12 @@ pub struct SingScreen {
     pub pitch_low: i32,
     pub pitch_high: i32,
     pause_cursor: usize,
+    /// Clickable pause-menu rows from the last frame. Recorded while drawing, so hit testing
+    /// cannot drift from the picture.
+    pause_regions: Vec<Rect>,
+    /// The area the results card covers. Kept for the pointer, which the layout is otherwise
+    /// the only thing that knows about.
+    results_card: Option<Rect>,
 }
 
 /// Semitones shown on the staff either side of the song's own range.
@@ -259,6 +265,8 @@ impl SingScreen {
             pitch_low: 0,
             pitch_high: 12,
             pause_cursor: 0,
+            pause_regions: Vec::new(),
+            results_card: None,
         }
     }
 
@@ -268,6 +276,10 @@ impl SingScreen {
 
     /// Handle an input. Returns a transition, and separately what the pause menu chose.
     pub fn handle(&mut self, input: Input) -> (Transition, Option<PauseChoice>) {
+        if let Input::Hover(point) | Input::Click(point) = input {
+            let clicked = matches!(input, Input::Click(_));
+            return self.handle_pointer(point, clicked);
+        }
         match self.overlay {
             Overlay::None => match input {
                 // Back pauses rather than quitting. Leaving a song by accident in the middle
@@ -313,13 +325,42 @@ impl SingScreen {
         }
     }
 
+    /// Move the pause cursor to whatever the pointer is over, and act on it if clicked.
+    ///
+    /// The song itself takes no pointer input — there is nothing on it to click — but a menu
+    /// that ignores the mouse while every other menu accepts it just reads as broken.
+    fn handle_pointer(&mut self, point: Point, clicked: bool) -> (Transition, Option<PauseChoice>) {
+        match self.overlay {
+            Overlay::Paused => {
+                if let Some(index) = self.pause_regions.iter().position(|r| r.contains(point)) {
+                    self.pause_cursor = index;
+                    if clicked {
+                        return self.handle(Input::Confirm);
+                    }
+                }
+                (Transition::None, None)
+            }
+            Overlay::Results => {
+                // A click anywhere dismisses. The card is only waiting to be acknowledged,
+                // so aiming at it is not something to ask of somebody halfway through a
+                // party.
+                if clicked {
+                    (Transition::Pop, None)
+                } else {
+                    (Transition::None, None)
+                }
+            }
+            Overlay::None => (Transition::None, None),
+        }
+    }
+
     /// Draw a frame.
     ///
     /// `notes` and `syllables` describe the track being sung; `beat` is the drawing clock,
     /// which runs ahead of the scoring clock by the microphone delay.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
-        &self,
+        &mut self,
         list: &mut DrawList,
         area: Rect,
         style: &Style,
@@ -593,11 +634,20 @@ impl SingScreen {
                     None => sung.pitch,
                 };
                 let y = y_of(pitch) + (row_h - note_h) / 2.0;
-                list.panel(
-                    Rect::new(x, y + note_h * 0.22, w, note_h * 0.56),
-                    if sung.hit { color } else { style.danger },
-                    note_h * 0.28,
-                );
+                if sung.hit {
+                    // A hit fills the bubble it landed in rather than sitting as a bar
+                    // inside it, so the two read as one shape lighting up rather than as
+                    // two things that happen to overlap.
+                    list.panel(Rect::new(x, y, w, note_h), color, note_h / 2.0);
+                } else {
+                    // A miss stays a thin mark at the pitch actually sung: it belongs to no
+                    // bubble, and drawing it as one would claim it did.
+                    list.panel(
+                        Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
+                        style.danger,
+                        note_h * 0.24,
+                    );
+                }
             }
         }
 
@@ -765,7 +815,8 @@ impl SingScreen {
         }
     }
 
-    fn draw_pause(&self, list: &mut DrawList, area: Rect, style: &Style) {
+    fn draw_pause(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
+        self.pause_regions.clear();
         let widgets = Widgets::new(style);
         widgets.scrim(list, area);
         let row_h = style.gap(4.0);
@@ -792,11 +843,12 @@ impl SingScreen {
                 row_h,
             )
             .inset_xy(0.0, style.gap(0.3));
+            self.pause_regions.push(row);
             widgets.row(list, row, entry, "", index == self.pause_cursor);
         }
     }
 
-    fn draw_results(&self, list: &mut DrawList, area: Rect, style: &Style) {
+    fn draw_results(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
         let widgets = Widgets::new(style);
         widgets.scrim(list, area);
         let row_h = style.gap(5.0);
@@ -807,6 +859,7 @@ impl SingScreen {
             0.0,
         );
         widgets.card(list, card);
+        self.results_card = Some(card);
         let inner = card.inset(style.gap(2.0));
 
         let (title, rest) = inner.cut_top(row_h);

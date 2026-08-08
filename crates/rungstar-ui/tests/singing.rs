@@ -48,7 +48,7 @@ fn syllables() -> Vec<Syllable> {
         .collect()
 }
 
-fn draw(screen: &SingScreen, beat: f64) -> DrawList {
+fn draw(screen: &mut SingScreen, beat: f64) -> DrawList {
     let theme = Theme::builtin();
     let mut list = DrawList::new();
     screen.draw(
@@ -86,9 +86,9 @@ fn one_singer_and_six_are_the_same_code() {
     // The whole point of the screen taking a slice: UltraStar hand-places every player count
     // in every theme, which is why adding a sixth singer there is a layout change.
     for count in 1..=6 {
-        let screen = sing_screen(count);
+        let mut screen = sing_screen(count);
         assert_eq!(screen.singers.len(), count);
-        let list = draw(&screen, 10.0);
+        let list = draw(&mut screen, 10.0);
         assert!(list.is_balanced(), "{count} singers left a clip pushed");
         assert!(!list.is_empty());
     }
@@ -98,8 +98,8 @@ fn one_singer_and_six_are_the_same_code() {
 fn every_singer_gets_a_panel_and_a_distinct_colour() {
     let theme = Theme::builtin();
     let style = theme.resolve_default();
-    let screen = sing_screen(6);
-    let list = draw(&screen, 10.0);
+    let mut screen = sing_screen(6);
+    let list = draw(&mut screen, 10.0);
     let text = strings(&list);
     for player in 1..=6 {
         assert!(
@@ -212,7 +212,7 @@ fn the_results_stay_up_until_dismissed() {
     screen.singers[1].score = 9100;
     screen.singers[2].score = 3000;
 
-    let list = draw(&screen, 200.0);
+    let list = draw(&mut screen, 200.0);
     let text = strings(&list).join(" ");
     // Ranked, because in a party the order is the whole point.
     assert!(text.contains("9100") && text.contains("7200") && text.contains("3000"));
@@ -268,7 +268,7 @@ fn a_broken_microphone_is_reported_even_with_the_panel_off() {
     screen.show_input_panel = false;
     screen.singers[0].has_microphone = false;
 
-    let text = strings(&draw(&screen, 10.0)).join(" ");
+    let text = strings(&draw(&mut screen, 10.0)).join(" ");
     assert!(text.contains("no microphone"), "not reported: {text}");
 }
 
@@ -282,14 +282,14 @@ fn a_working_microphone_stays_quiet_unless_asked() {
     screen.singers[0].level = 0.5;
     screen.singers[0].pitch = Some(62);
 
-    let text = strings(&draw(&screen, 10.0)).join(" ");
+    let text = strings(&draw(&mut screen, 10.0)).join(" ");
     assert!(
         !text.contains("listening"),
         "the panel drew uninvited: {text}"
     );
 
     screen.show_input_panel = true;
-    let text = strings(&draw(&screen, 10.0)).join(" ");
+    let text = strings(&draw(&mut screen, 10.0)).join(" ");
     assert!(text.contains('D'), "the detected note is not shown: {text}");
 }
 
@@ -298,8 +298,8 @@ fn the_lyric_being_sung_is_drawn_differently_from_the_rest() {
     let theme = Theme::builtin();
     let style = theme.resolve_default();
     // Beat 11 is inside the second syllable, which starts at 10 and lasts 2.
-    let screen = sing_screen(1);
-    let list = draw(&screen, 11.0);
+    let mut screen = sing_screen(1);
+    let list = draw(&mut screen, 11.0);
 
     let colours: Vec<(String, rungstar_ui::Color)> = list
         .commands()
@@ -324,8 +324,8 @@ fn the_lyric_being_sung_is_drawn_differently_from_the_rest() {
 fn lyrics_are_outlined_so_they_survive_a_background() {
     // Lyrics sit over artwork and video, where an outline is the difference between readable
     // and not.
-    let screen = sing_screen(1);
-    let list = draw(&screen, 11.0);
+    let mut screen = sing_screen(1);
+    let list = draw(&mut screen, 11.0);
     let outlined = list.commands().iter().any(|c| match c {
         Command::Text { text, style, .. } => text == "ver " && style.outline.is_some(),
         _ => false,
@@ -336,7 +336,7 @@ fn lyrics_are_outlined_so_they_survive_a_background() {
 #[test]
 fn what_was_sung_is_drawn_over_the_notes() {
     let mut screen = sing_screen(1);
-    let plain = draw(&screen, 10.0).len();
+    let plain = draw(&mut screen, 10.0).len();
 
     screen.singers[0].sung = vec![
         Sung {
@@ -352,7 +352,7 @@ fn what_was_sung_is_drawn_over_the_notes() {
             hit: false,
         },
     ];
-    let with_sung = draw(&screen, 10.0).len();
+    let with_sung = draw(&mut screen, 10.0).len();
     assert!(
         with_sung > plain,
         "what was sung was not drawn: {plain} then {with_sung}"
@@ -363,7 +363,7 @@ fn what_was_sung_is_drawn_over_the_notes() {
 fn a_song_with_no_notes_still_draws() {
     // Real libraries contain them, and a screen that panics on one is worse than a blank one.
     let theme = Theme::builtin();
-    let screen = sing_screen(2);
+    let mut screen = sing_screen(2);
     let mut list = DrawList::new();
     screen.draw(
         &mut list,
@@ -382,12 +382,28 @@ fn a_song_with_no_notes_still_draws() {
 fn the_progress_bar_only_appears_once_the_length_is_known() {
     let mut screen = sing_screen(1);
     screen.duration = 0.0;
-    let without = draw(&screen, 10.0).len();
+    let without = draw(&mut screen, 10.0).len();
 
     screen.duration = 200.0;
     screen.position = 100.0;
-    let with = draw(&screen, 10.0).len();
+    let with = draw(&mut screen, 10.0).len();
     assert!(with > without, "no progress bar was drawn");
+}
+
+/// The widest rectangle drawn in `color`.
+///
+/// The singer panel also draws a score bar in the player's colour, and it is zero wide at a
+/// score of zero — so taking the first match found that instead, and two tests comparing
+/// positions across variants were quietly comparing the same unmoving bar.
+fn widest(list: &DrawList, color: rungstar_ui::Color) -> Rect {
+    list.commands()
+        .iter()
+        .filter_map(|c| match c {
+            Command::Rect { rect, color: c, .. } if *c == color => Some(*rect),
+            _ => None,
+        })
+        .max_by(|a, b| a.w.partial_cmp(&b.w).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("nothing was drawn in that colour")
 }
 
 /// The note bars, matched by the colours only notes are drawn in.
@@ -446,7 +462,7 @@ fn a_note_sits_at_the_same_height_whatever_else_is_on_screen() {
             end: notes.last().map(Note::end).unwrap_or(11.0),
             notes,
         };
-        let screen = sing_screen(1);
+        let mut screen = sing_screen(1);
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
         // The first bar drawn is the note at pitch 62.
@@ -472,7 +488,7 @@ fn the_whole_line_is_on_screen_at_once() {
     // instead, and the playhead sweeps it.
     let theme = Theme::builtin();
     let style = theme.resolve_default();
-    let screen = sing_screen(1);
+    let mut screen = sing_screen(1);
     let line = line();
 
     let mut list = DrawList::new();
@@ -501,11 +517,11 @@ fn the_whole_line_is_on_screen_at_once() {
 fn the_playhead_sweeps_from_left_to_right_across_the_line() {
     let theme = Theme::builtin();
     let style = theme.resolve_default();
-    let screen = sing_screen(1);
+    let mut screen = sing_screen(1);
     let line = line();
 
     // The playhead is the tall thin accent bar.
-    let head_x = |beat: f64| -> f32 {
+    let mut head_x = |beat: f64| -> f32 {
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line, &[], "", beat);
         list.commands()
@@ -544,17 +560,11 @@ fn what_was_sung_stays_put_until_the_line_turns() {
         hit: true,
     }];
 
-    let position = |beat: f64| -> Option<Rect> {
+    let mut position = |beat: f64| -> Option<Rect> {
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line, &[], "", beat);
-        // The sung bar is drawn in the player's colour.
-        list.commands()
-            .iter()
-            .filter_map(|c| match c {
-                Command::Rect { rect, color, .. } if *color == style.player(0) => Some(*rect),
-                _ => None,
-            })
-            .next()
+        // The sung bar is drawn in the player's colour, and is the widest thing in it.
+        Some(widest(&list, style.player(0)))
     };
 
     let early = position(10.0).expect("the sung note was not drawn");
@@ -675,14 +685,7 @@ fn a_sung_note_an_octave_out_is_drawn_on_the_note_it_scored() {
         }];
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
-        list.commands()
-            .iter()
-            .filter_map(|c| match c {
-                Command::Rect { rect, color, .. } if *color == style.player(0) => Some(rect.y),
-                _ => None,
-            })
-            .next()
-            .expect("the sung note was not drawn")
+        widest(&list, style.player(0)).y
     };
 
     // Sung on the note, and sung an octave below it: both scored, so both must be drawn in
@@ -702,13 +705,13 @@ fn the_lyric_bar_arrives_before_the_first_word_and_sweeps_with_it() {
     // ahead of the first syllable rather than appearing once you are already late.
     let theme = Theme::builtin();
     let style = theme.resolve_default();
-    let screen = sing_screen(1);
+    let mut screen = sing_screen(1);
     let words = syllables();
     let first = words[0].start;
     let last = words.last().map(|s| s.start + s.duration).unwrap();
 
     // The bar is the narrow accent panel in the lyric strip.
-    let bar_x = |beat: f64| -> Option<f32> {
+    let mut bar_x = |beat: f64| -> Option<f32> {
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
         list.commands()
@@ -769,14 +772,7 @@ fn a_hit_is_drawn_on_the_note_even_when_it_was_a_semitone_off() {
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
         let wanted = if hit { style.player(0) } else { style.danger };
-        list.commands()
-            .iter()
-            .filter_map(|c| match c {
-                Command::Rect { rect, color, .. } if *color == wanted => Some(rect.y),
-                _ => None,
-            })
-            .next()
-            .expect("the sung note was not drawn")
+        widest(&list, wanted).y
     };
 
     let exact = marker_y(60, true);
@@ -800,11 +796,11 @@ fn the_lyric_bar_runs_in_from_the_edge_of_the_screen() {
     // that is over before it has been noticed.
     let theme = Theme::builtin();
     let style = theme.resolve_default();
-    let screen = sing_screen(1);
+    let mut screen = sing_screen(1);
     let words = syllables();
     let first = words[0].start;
 
-    let bar_x = |beat: f64| -> f32 {
+    let mut bar_x = |beat: f64| -> f32 {
         let mut list = DrawList::new();
         screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
         list.commands()
@@ -836,4 +832,121 @@ fn the_lyric_bar_runs_in_from_the_edge_of_the_screen() {
         halfway > earliest && halfway < at_start,
         "the run-up did not progress: {earliest}, {halfway}, {at_start}"
     );
+}
+
+#[test]
+fn a_hit_fills_the_bubble_it_landed_in() {
+    // The two should read as one shape lighting up, not as a bar that happens to overlap a
+    // bubble. A miss stays a thin mark, because it belongs to no bubble and drawing it as one
+    // would claim it did.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let line = NoteLine {
+        start: 8.0,
+        end: 11.0,
+        notes: vec![Note {
+            start: 8.0,
+            duration: 3.0,
+            pitch: 60,
+            kind: NoteKind::Normal,
+        }],
+    };
+
+    let mark = |hit: bool| -> Rect {
+        let mut screen = sing_screen(1);
+        screen.singers[0].sung = vec![Sung {
+            start: 8.0,
+            duration: 3.0,
+            pitch: 60,
+            hit,
+        }];
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        let wanted = if hit { style.player(0) } else { style.danger };
+        widest(&list, wanted)
+    };
+
+    let note = bars(
+        &{
+            let mut screen = sing_screen(1);
+            let mut list = DrawList::new();
+            screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+            list
+        },
+        &style,
+    )[0];
+
+    let hit = mark(true);
+    assert!(
+        (hit.h - note.h).abs() < 0.5 && (hit.y - note.y).abs() < 0.5,
+        "a hit was drawn as {hit:?} against a note of {note:?}"
+    );
+
+    let miss = mark(false);
+    assert!(
+        miss.h < note.h * 0.75,
+        "a miss filled the bubble as well: {miss:?} against {note:?}"
+    );
+}
+
+#[test]
+fn the_pause_menu_takes_the_mouse() {
+    // Every other menu accepts a click, so one that does not just reads as broken.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(1);
+    screen.handle(Input::Back);
+    assert_eq!(screen.overlay, Overlay::Paused);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+
+    // The rows are the wide panels in the centred card. Probe down the middle of the screen
+    // until one of them takes the pointer.
+    let mut moved = None;
+    for row in 0..24 {
+        let point = rungstar_ui::geom::Point::new(area().center().x, 300.0 + row as f32 * 25.0);
+        let before = screen.pause_cursor();
+        screen.handle(Input::Hover(point));
+        if screen.pause_cursor() != before {
+            moved = Some(point);
+            break;
+        }
+    }
+    let point = moved.expect("no pause row responded to the pointer");
+
+    // Clicking the row under the pointer chooses it.
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+    let (_, choice) = screen.handle(Input::Click(point));
+    assert!(choice.is_some(), "a click on a pause row chose nothing");
+}
+
+#[test]
+fn a_click_dismisses_the_results() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = sing_screen(2);
+    screen.overlay = Overlay::Results;
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &line(), &[], "", 10.0);
+
+    let (transition, _) = screen.handle(Input::Click(area().center()));
+    assert_eq!(
+        transition,
+        Transition::Pop,
+        "a click did not dismiss the results"
+    );
+}
+
+#[test]
+fn the_song_itself_ignores_the_pointer() {
+    // There is nothing on the staff to click, and a stray click during a song must not do
+    // anything at all.
+    let mut screen = sing_screen(1);
+    assert_eq!(screen.overlay, Overlay::None);
+    let (transition, choice) = screen.handle(Input::Click(area().center()));
+    assert_eq!(transition, Transition::None);
+    assert_eq!(choice, None);
+    assert_eq!(screen.overlay, Overlay::None, "a click paused the song");
 }

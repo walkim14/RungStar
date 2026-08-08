@@ -53,6 +53,10 @@ pub enum Input {
     /// A character from a physical keyboard, while searching.
     Type(char),
     Backspace,
+    /// Finish editing. Enter on a physical keyboard, where it means "done" rather than
+    /// "press the highlighted key" — nobody typing on a real keyboard is looking at the
+    /// on-screen one's cursor.
+    Submit,
     /// The pointer moved. Moves the cursor to whatever is under it, so the highlight follows
     /// the mouse exactly as it follows the stick.
     Hover(Point),
@@ -317,7 +321,7 @@ impl SongSelect {
             Input::Right => self.browser.move_by(if horizontal { 1 } else { page }),
             Input::PageUp => self.browser.move_by(-page),
             Input::PageDown => self.browser.move_by(page),
-            Input::Confirm => {
+            Input::Confirm | Input::Submit => {
                 if let Some(song) = self.selected() {
                     return Transition::Sing(song.id);
                 }
@@ -441,7 +445,7 @@ impl SongSelect {
             Input::Down => {
                 self.menu_cursor = (self.menu_cursor + 1) % SongAction::ALL.len();
             }
-            Input::Confirm => {
+            Input::Confirm | Input::Submit => {
                 let action = SongAction::ALL[self.menu_cursor];
                 self.mode = Mode::Browsing;
                 // Sing is the one the browser already knows how to do; the rest go back to
@@ -478,7 +482,7 @@ impl SongSelect {
                     self.mode = Mode::Browsing;
                 }
             }
-            Input::Back | Input::Search => self.mode = Mode::Browsing,
+            Input::Back | Input::Search | Input::Submit => self.mode = Mode::Browsing,
             Input::Type(c) => self.keyboard.push(c),
             Input::Backspace => self.keyboard.backspace(),
             // Cycling which field is searched without leaving the keyboard: "I typed a lyric,
@@ -522,7 +526,9 @@ impl SongSelect {
                 self.descending = !self.descending;
                 self.stale = true;
             }
-            Input::Confirm | Input::Back | Input::Sort => self.mode = Mode::Browsing,
+            Input::Confirm | Input::Submit | Input::Back | Input::Sort => {
+                self.mode = Mode::Browsing
+            }
             _ => {}
         }
         Transition::None

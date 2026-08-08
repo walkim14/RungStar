@@ -940,3 +940,45 @@ fn keys_that_do_not_type_still_work_while_searching() {
     assert_eq!(screen.mode(), Mode::Browsing);
     assert!(!screen.wants_text());
 }
+
+#[test]
+fn enter_finishes_the_search_rather_than_pressing_a_key() {
+    // Somebody typing on a real keyboard is not looking at the on-screen keyboard's cursor,
+    // so pressing whatever happens to be under it is never what Enter meant.
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.handle(Input::Search, area);
+    for c in "queen".chars() {
+        screen.handle(Input::Type(c), area);
+    }
+    assert_eq!(screen.search_text(), "queen");
+
+    screen.handle(Input::Submit, area);
+    assert_eq!(
+        screen.mode(),
+        Mode::Browsing,
+        "Enter did not finish the search"
+    );
+    assert_eq!(screen.search_text(), "queen", "Enter changed the text");
+    assert!(!screen.wants_text());
+
+    // And back in the list, Enter sings again.
+    screen.set_results(vec![]);
+    assert_eq!(screen.handle(Input::Submit, area), Transition::None);
+}
+
+#[test]
+fn the_on_screen_keyboard_still_presses_keys_with_confirm() {
+    // Submit is Enter's meaning, not Confirm's: a gamepad still presses the highlighted key.
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.handle(Input::Search, area);
+    let before = screen.search_text().to_owned();
+    screen.handle(Input::Confirm, area);
+    assert_ne!(
+        screen.search_text(),
+        before,
+        "Confirm no longer types on the on-screen keyboard"
+    );
+    assert_eq!(screen.mode(), Mode::Searching);
+}

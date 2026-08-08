@@ -1094,7 +1094,14 @@ fn main() -> Result<()> {
                     // which is also the only way to get an accented letter or a non-Latin
                     // script.
                     if !app.wants_text() || !produces_text(key) {
-                        if let Some(input) = action_for(key) {
+                        if let Some(mut input) = action_for(key) {
+                            // Enter on a real keyboard finishes the search. Somebody typing
+                            // is not looking at the on-screen keyboard's cursor, so pressing
+                            // whatever key happens to be under it is never what they meant.
+                            if app.wants_text() && matches!(key, Keycode::Return | Keycode::KpEnter)
+                            {
+                                input = Input::Submit;
+                            }
                             app.handle(input, area);
                         }
                     }

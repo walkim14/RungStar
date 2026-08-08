@@ -24,8 +24,12 @@ const SAMPLE_RATE: u32 = 44_100;
 /// detectors cost even for six singers.
 const ANALYSIS_INTERVAL: Duration = Duration::from_millis(10);
 
-/// How much of what was sung stays on screen behind the playhead, in beats.
-const SUNG_HISTORY: f64 = 24.0;
+/// How far back beyond the current line what was sung is kept, in beats.
+///
+/// Trimming to a fixed window behind the playhead made the marks at the start of a long line
+/// disappear while the line was still on screen — the one place they need to stay, since the
+/// whole point of drawing a line at a time is being able to look back over it.
+const SUNG_KEEP_BEFORE_LINE: f64 = 8.0;
 
 /// How long after the last note the song is considered over, in beats.
 const TAIL_BEATS: f64 = 8.0;
@@ -259,8 +263,13 @@ impl Session {
         }
         self.scored_through = detection_beat;
 
-        // Forget what has scrolled off, so a long song does not grow without bound.
-        let cutoff = detection_beat - SUNG_HISTORY;
+        // Forget what is behind the line being sung, so a long song does not grow without
+        // bound, but never anything still on screen.
+        let cutoff = self
+            .line_at(detection_beat)
+            .and_then(|index| self.lines.get(index))
+            .map(|line| line.start() as f64 - SUNG_KEEP_BEFORE_LINE)
+            .unwrap_or(detection_beat - 64.0);
         for history in &mut self.sung {
             history.retain(|s| s.start + s.duration >= cutoff);
         }
