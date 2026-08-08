@@ -126,7 +126,9 @@ fn main() {
             .clip()
             .wait_for(start + 1.0, Duration::from_secs(2));
         let _ = playback.seek(start);
-        playback.set_volume(0.0);
+        // The real volume, not silence. Muting here is what let the fade bug through: the
+        // harness proved the position advanced and said nothing about audibility.
+        playback.set_volume(0.48);
         if let Err(error) = playback.start() {
             println!("no start     {shown}\n             {error}");
             *reasons.entry("stream would not resume").or_default() += 1;
@@ -143,7 +145,15 @@ fn main() {
             std::thread::sleep(Duration::from_millis(8));
         }
         let moved = playback.position() - start;
-        if moved > 0.02 {
+        // The browser fades a preview out after thirty seconds *of preview*, which is the
+        // distance from the seek point and not the position in the song. Getting that wrong
+        // silenced every preview on its first frame, so the harness checks it too.
+        const PREVIEW_LENGTH: f64 = 30.0;
+        let would_fade = (playback.position() - start) > PREVIEW_LENGTH;
+        if would_fade {
+            println!("faded out    {shown}  (the fade fired immediately)");
+            *reasons.entry("faded out on the first frame").or_default() += 1;
+        } else if moved > 0.02 {
             played += 1;
             println!("ok           {shown}  (+{moved:.2} s in {pumped} pumps)");
         } else {

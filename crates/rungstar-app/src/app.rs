@@ -110,6 +110,13 @@ struct Preview {
     song: i64,
     playback: Option<Playback>,
     started: Instant,
+    /// Where in the song the clip was seeked to.
+    ///
+    /// Needed because `position()` reports the absolute point in the song, and a preview
+    /// starts a quarter of the way in — so "how long has this been playing" is the difference,
+    /// not the position. Comparing the position itself against the preview length faded every
+    /// preview out on its first frame.
+    from: f64,
     /// Set when opening failed, so it is not attempted again every frame.
     failed: bool,
 }
@@ -354,6 +361,7 @@ impl App {
                 song,
                 playback: None,
                 started: Instant::now(),
+                from: 0.0,
                 failed: false,
             });
             return;
@@ -369,8 +377,9 @@ impl App {
         });
         if due {
             match self.open_preview(audio, song) {
-                Ok(playback) => {
+                Ok((playback, from)) => {
                     if let Some(preview) = &mut self.preview {
+                        preview.from = from;
                         preview.playback = Some(playback);
                     }
                 }
@@ -386,13 +395,15 @@ impl App {
             return;
         }
 
+        let from = self.preview.as_ref().map(|p| p.from).unwrap_or(0.0);
         if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
             let _ = playback.pump();
             // Fade out at the end rather than cutting, and never restart: a preview that
-            // loops under a cursor left resting is maddening.
-            let position = playback.position() as f32;
-            if position > PREVIEW_LENGTH {
-                let fade = (1.0 - (position - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0);
+            // loops under a cursor left resting is maddening. Measured from where the clip
+            // was seeked to, not from the start of the song.
+            let played = (playback.position() - from) as f32;
+            if played > PREVIEW_LENGTH {
+                let fade = (1.0 - (played - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0);
                 playback.set_volume(volume * fade);
                 if fade <= 0.0 {
                     let _ = playback.pause();
@@ -411,7 +422,11 @@ impl App {
     /// Returns the reason on failure rather than an `Option`, because "most songs do not
     /// preview" is unanswerable when a missing file, a refused device and a bad seek all look
     /// the same from outside.
-    fn open_preview(&self, audio: &sdl3::AudioSubsystem, id: i64) -> Result<Playback, String> {
+    fn open_preview(
+        &self,
+        audio: &sdl3::AudioSubsystem,
+        id: i64,
+    ) -> Result<(Playback, f64), String> {
         let entry = self
             .library
             .song(id)
@@ -448,7 +463,7 @@ impl App {
         playback.seek(start).map_err(|e| e.to_string())?;
         playback.set_volume(self.preview_volume());
         playback.start().map_err(|e| e.to_string())?;
-        Ok(playback)
+        Ok((playback, start))
     }
 
     /// Stop any preview, for when a song is about to start.
@@ -1150,7 +1165,11 @@ fn main() -> Result<()> {
         if std::mem::take(&mut app.pending_mics) {
             app.stop_preview();
             let capture = SdlCapture::new(audio_subsystem.clone());
-            let mut monitor = session::Monitor::start(capture, app.settings.game.players as usize);
+            let mut monitor = session::Monitor::start(
+                capture,
+                app.settings.game.players as usize,
+                &app.settings.sound.microphones,
+            );
             let mut screen = MicScreen::new(app.settings.game.players as usize);
             screen.gate = app.settings.threshold();
             screen.devices = monitor.devices();

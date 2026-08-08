@@ -463,6 +463,9 @@ pub fn choose_devices(capture: &SdlCapture, players: usize) -> Vec<DeviceConfig>
 pub struct Monitor {
     capture: SdlCapture,
     players: usize,
+    /// What was saved last time, so opening the screen shows the setup rather than the
+    /// defaults it would have worked out from scratch.
+    saved: Vec<rungstar_ui::settings::MicAssignment>,
     devices: Vec<DeviceConfig>,
     buffers: PlayerBuffers,
     /// Peak level per device per channel.
@@ -476,10 +479,15 @@ impl Monitor {
     ///
     /// Routing is by channel rather than by device, so a stereo pair shows two independent
     /// meters — which is what makes it obvious that only one of the two microphones is live.
-    pub fn start(capture: SdlCapture, players: usize) -> Self {
+    pub fn start(
+        capture: SdlCapture,
+        players: usize,
+        saved: &[rungstar_ui::settings::MicAssignment],
+    ) -> Self {
         let mut monitor = Self {
             capture,
             players: players.max(1),
+            saved: saved.to_vec(),
             devices: Vec::new(),
             buffers: PlayerBuffers::new(),
             levels: Vec::new(),
@@ -498,7 +506,10 @@ impl Monitor {
 
     fn rescan_with(&mut self, players: usize) {
         self.capture.stop();
-        let found = choose_devices(&self.capture, players);
+        let mut found = choose_devices(&self.capture, players);
+        // Whatever was saved wins over the automatic assignment, or the screen would show
+        // defaults every time it opened and the setup would appear not to have been kept.
+        apply_saved(&mut found, &self.saved);
         self.levels = found.iter().map(|d| vec![0.0; d.channels()]).collect();
         self.heard = found.iter().map(|d| vec![false; d.channels()]).collect();
         self.devices = found;
@@ -510,7 +521,18 @@ impl Monitor {
         for (config, shown) in self.devices.iter_mut().zip(devices) {
             config.channel_to_player.clone_from(&shown.assignment);
         }
+        self.saved = self.saved_assignment();
         self.restart();
+    }
+
+    fn saved_assignment(&self) -> Vec<rungstar_ui::settings::MicAssignment> {
+        self.devices
+            .iter()
+            .map(|device| rungstar_ui::settings::MicAssignment {
+                name: device.name.clone(),
+                channels: device.channel_to_player.clone(),
+            })
+            .collect()
     }
 
     fn restart(&mut self) {
@@ -596,13 +618,7 @@ impl Monitor {
 
     /// The assignment, for saving. A setup that does not survive a restart is not a setup.
     pub fn saved(&self) -> Vec<rungstar_ui::settings::MicAssignment> {
-        self.devices
-            .iter()
-            .map(|device| rungstar_ui::settings::MicAssignment {
-                name: device.name.clone(),
-                channels: device.channel_to_player.clone(),
-            })
-            .collect()
+        self.saved_assignment()
     }
 
     pub fn stop(&mut self) {
