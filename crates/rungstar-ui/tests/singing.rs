@@ -4,8 +4,8 @@ use rungstar_ui::draw::{Command, DrawList};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::screen::Transition;
 use rungstar_ui::singscreen::{
-    rating_title, Note, NoteKind, NoteLine, Overlay, PauseChoice, SingScreen, Singer, Sung,
-    Syllable,
+    fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PauseChoice, SingScreen,
+    Singer, Sung, Syllable,
 };
 use rungstar_ui::songselect::Input;
 use rungstar_ui::theme::Theme;
@@ -605,4 +605,137 @@ fn a_narrow_line_does_not_fill_the_staff() {
         "three semitones covered {} of a {staff_height} tall screen",
         bottom - top
     );
+}
+
+#[test]
+fn folding_puts_a_sung_pitch_in_the_octave_it_was_scored_in() {
+    // Matching is octave-agnostic, so singing the right note an octave down scores. The
+    // detector reports the octave it heard, and drawing that raw put the marker twelve
+    // semitones from the note it had just scored against.
+    assert_eq!(fold_to_octave(48, 60), 60, "an octave below should fold up");
+    assert_eq!(
+        fold_to_octave(72, 60),
+        60,
+        "an octave above should fold down"
+    );
+    assert_eq!(fold_to_octave(60, 60), 60);
+    // Two octaves, and three.
+    assert_eq!(fold_to_octave(36, 60), 60);
+    assert_eq!(fold_to_octave(96, 62), 60);
+    // A genuinely wrong note stays wrong. It may be moved into the other octave — 67 against
+    // 60 is seven semitones up, so it folds to 55, five semitones down — but it must not
+    // become the target.
+    assert_ne!(fold_to_octave(55, 60), 60);
+    assert_ne!(fold_to_octave(67, 60), 60);
+    assert_eq!(
+        fold_to_octave(67, 60),
+        55,
+        "the shorter way round is five below"
+    );
+    // The fold always lands within half an octave of the target, which is the window the
+    // scorer compares in.
+    for target in 40..80 {
+        for sung in 0..128 {
+            let folded = fold_to_octave(sung, target);
+            assert!(
+                (folded - target).abs() <= 6,
+                "{sung} against {target} folded to {folded}"
+            );
+            assert_eq!(
+                folded.rem_euclid(12),
+                sung.rem_euclid(12),
+                "folding changed the pitch class"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_sung_note_an_octave_out_is_drawn_on_the_note_it_scored() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let line = NoteLine {
+        start: 8.0,
+        end: 11.0,
+        notes: vec![Note {
+            start: 8.0,
+            duration: 3.0,
+            pitch: 60,
+            kind: NoteKind::Normal,
+        }],
+    };
+
+    let marker_y = |sung_pitch: i32| -> f32 {
+        let mut screen = sing_screen(1);
+        screen.singers[0].sung = vec![Sung {
+            start: 8.0,
+            duration: 3.0,
+            pitch: sung_pitch,
+            hit: true,
+        }];
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line, &[], "", 9.0);
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Rect { rect, color, .. } if *color == style.player(0) => Some(rect.y),
+                _ => None,
+            })
+            .next()
+            .expect("the sung note was not drawn")
+    };
+
+    // Sung on the note, and sung an octave below it: both scored, so both must be drawn in
+    // the same place.
+    assert!(
+        (marker_y(60) - marker_y(48)).abs() < 1.0,
+        "an octave below was drawn at {} instead of {}",
+        marker_y(48),
+        marker_y(60)
+    );
+    assert!((marker_y(60) - marker_y(72)).abs() < 1.0);
+}
+
+#[test]
+fn the_lyric_bar_arrives_before_the_first_word_and_sweeps_with_it() {
+    // Knowing when to come in is most of singing a song you half-remember, so the bar enters
+    // ahead of the first syllable rather than appearing once you are already late.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let screen = sing_screen(1);
+    let words = syllables();
+    let first = words[0].start;
+    let last = words.last().map(|s| s.start + s.duration).unwrap();
+
+    // The bar is the narrow accent panel in the lyric strip.
+    let bar_x = |beat: f64| -> Option<f32> {
+        let mut list = DrawList::new();
+        screen.draw(&mut list, area(), &style, &line(), &words, "", beat);
+        list.commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Rect { rect, color, .. }
+                    if rect.w < 6.0 && *color == style.accent.alpha(0.9) =>
+                {
+                    Some(rect.x)
+                }
+                _ => None,
+            })
+            .next()
+    };
+
+    let before = bar_x(first - 3.0).expect("no bar during the lead-in");
+    let at_start = bar_x(first).expect("no bar at the first syllable");
+    let middle = bar_x((first + last) / 2.0).expect("no bar mid line");
+    let end = bar_x(last).expect("no bar at the end");
+
+    assert!(
+        before < at_start,
+        "the bar did not lead in: {before} then {at_start}"
+    );
+    assert!(
+        at_start < middle,
+        "the bar did not sweep: {at_start} then {middle}"
+    );
+    assert!(middle < end, "the bar stalled: {middle} then {end}");
 }
