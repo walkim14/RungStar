@@ -25,6 +25,8 @@ pub enum Mode {
     Searching,
     /// Choosing what to sort by.
     Sorting,
+    /// The per-song menu.
+    Menu,
 }
 
 /// Semantic inputs the screen understands. Deliberately not device events: the same enum comes
@@ -43,6 +45,8 @@ pub enum Input {
     CycleLayout,
     /// Open the sort picker.
     Sort,
+    /// Open the menu for the song under the cursor.
+    ContextMenu,
     Random,
     PageUp,
     PageDown,
@@ -92,6 +96,43 @@ enum Region {
     Song(usize),
     Key(usize),
     Sort(usize),
+    Menu(usize),
+}
+
+/// What the per-song menu offers.
+///
+/// UltraStar has one of these too, and it is where the things you do to a song rather than
+/// with it belong — so they are not buttons cluttering a screen you spend most of your time
+/// scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SongAction {
+    Sing,
+    /// Play from the medley point, or the preview point when there is none.
+    SingFromChorus,
+    ToggleFavourite,
+    /// Copy what the browser knows to the clipboard, for reporting a broken file.
+    ShowDetails,
+    OpenFolder,
+}
+
+impl SongAction {
+    pub const ALL: [SongAction; 5] = [
+        SongAction::Sing,
+        SongAction::SingFromChorus,
+        SongAction::ToggleFavourite,
+        SongAction::ShowDetails,
+        SongAction::OpenFolder,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sing => "Sing",
+            Self::SingFromChorus => "Sing from the chorus",
+            Self::ToggleFavourite => "Favourite",
+            Self::ShowDetails => "Song details",
+            Self::OpenFolder => "Open the song folder",
+        }
+    }
 }
 
 /// The song browser.
@@ -111,8 +152,14 @@ pub struct SongSelect {
     fetched_for: String,
     /// Clickable areas from the last frame.
     regions: Vec<(Rect, Region)>,
+    menu_cursor: usize,
+    /// Set when the player chose something from the song menu.
+    pub chosen: Option<SongAction>,
     /// Whether to label the on-screen hints with gamepad buttons or keyboard keys.
     pub gamepad: bool,
+    /// What a scan is doing, when one is running. Shown instead of "no songs", because a
+    /// first run reaches this screen before the library exists.
+    pub scanning: Option<String>,
 }
 
 impl Default for SongSelect {
@@ -135,8 +182,18 @@ impl SongSelect {
             stale: true,
             fetched_for: String::new(),
             regions: Vec::new(),
+            menu_cursor: 0,
+            chosen: None,
             gamepad: false,
+            scanning: None,
         }
+    }
+
+    /// Mark the results stale, so the next frame re-queries.
+    ///
+    /// Used when a scan has changed the library underneath the browser.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
     }
 
     /// What is under a point, topmost first — the overlays are recorded last and so win.
@@ -235,6 +292,7 @@ impl SongSelect {
             Mode::Browsing => self.handle_browsing(input, area),
             Mode::Searching => self.handle_searching(input),
             Mode::Sorting => self.handle_sorting(input),
+            Mode::Menu => self.handle_menu(input),
         }
     }
 
@@ -261,6 +319,12 @@ impl SongSelect {
             }
             Input::Sort => {
                 self.mode = Mode::Sorting;
+            }
+            Input::ContextMenu => {
+                if !self.songs.is_empty() {
+                    self.menu_cursor = 0;
+                    self.mode = Mode::Menu;
+                }
             }
             Input::CycleLayout => {
                 self.browser.layout = self.browser.layout.next();
@@ -308,6 +372,12 @@ impl SongSelect {
                     self.stale = true;
                 }
             }
+            Some(Region::Menu(index)) => {
+                self.menu_cursor = index;
+                if clicked {
+                    return self.handle_menu(Input::Confirm);
+                }
+            }
             Some(Region::Sort(index)) => {
                 if index != self.sort_cursor {
                     self.sort_cursor = index;
@@ -340,6 +410,40 @@ impl SongSelect {
         }
     }
 
+    fn handle_menu(&mut self, input: Input) -> Transition {
+        match input {
+            Input::Up => {
+                self.menu_cursor =
+                    (self.menu_cursor + SongAction::ALL.len() - 1) % SongAction::ALL.len();
+            }
+            Input::Down => {
+                self.menu_cursor = (self.menu_cursor + 1) % SongAction::ALL.len();
+            }
+            Input::Confirm => {
+                let action = SongAction::ALL[self.menu_cursor];
+                self.mode = Mode::Browsing;
+                // Sing is the one the browser already knows how to do; the rest go back to
+                // the application, which is the only thing that can open a folder.
+                if action == SongAction::Sing {
+                    if let Some(song) = self.selected() {
+                        return Transition::Sing(song.id);
+                    }
+                }
+                self.chosen = Some(action);
+            }
+            Input::Back | Input::ContextMenu => self.mode = Mode::Browsing,
+            _ => {}
+        }
+        Transition::None
+    }
+
+    /// Take whatever the song menu chose, if anything.
+    pub fn take_choice(&mut self) -> Option<(SongAction, i64)> {
+        let action = self.chosen.take()?;
+        let id = self.selected()?.id;
+        Some((action, id))
+    }
+
     fn handle_searching(&mut self, input: Input) -> Transition {
         let before = self.keyboard.text().to_owned();
         match input {
@@ -363,7 +467,7 @@ impl SongSelect {
             }
             Input::CycleLayout => self.browser.layout = self.browser.layout.next(),
             Input::Random | Input::PageUp | Input::PageDown => {}
-            Input::Hover(_) | Input::Click(_) => {}
+            Input::ContextMenu | Input::Hover(_) | Input::Click(_) => {}
         }
         if self.keyboard.text() != before {
             // Every keystroke re-queries. At 3 ms for a prefix search over 30,000 songs that
@@ -442,6 +546,7 @@ impl SongSelect {
         match self.mode {
             Mode::Searching => self.draw_keyboard(list, area, style, &mut overlay),
             Mode::Sorting => self.draw_sort_picker(list, area, style, &mut overlay),
+            Mode::Menu => self.draw_menu(list, area, style, &mut overlay),
             Mode::Browsing => {}
         }
         self.regions.extend(overlay);
@@ -472,10 +577,17 @@ impl SongSelect {
                 ("\u{2190}\u{2192}", "Reverse"),
                 (back, "Back"),
             ],
+            Mode::Menu => vec![(confirm, "Choose"), (back, "Back")],
         }
     }
 
     fn draw_empty(&self, list: &mut DrawList, area: Rect, widgets: &Widgets) {
+        if let Some(progress) = &self.scanning {
+            // A first run arrives here before the library exists. Saying what is happening is
+            // the difference between waiting and giving up.
+            widgets.empty_state(list, area, "Finding your songs", progress);
+            return;
+        }
         if self.keyboard.is_empty() {
             widgets.empty_state(
                 list,
@@ -741,6 +853,50 @@ impl SongSelect {
                 )
                 .centered(),
             );
+        }
+    }
+
+    fn draw_menu(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
+        let widgets = Widgets::new(style);
+        widgets.scrim(list, area);
+        let row_h = style.gap(3.4);
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.36).min(680.0),
+            row_h * (SongAction::ALL.len() as f32 + 2.2),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(1.5));
+
+        let title = self
+            .selected()
+            .map(|s| s.display_name())
+            .unwrap_or_default();
+        list.text(
+            Rect::new(inner.x, inner.y, inner.w, row_h),
+            title,
+            TextStyle::new(style.scaled_text(1.0), style.text)
+                .bold()
+                .overflow(Overflow::Ellipsis),
+        );
+
+        for (index, action) in SongAction::ALL.iter().enumerate() {
+            let row = Rect::new(
+                inner.x,
+                inner.y + row_h * (index as f32 + 1.4),
+                inner.w,
+                row_h,
+            )
+            .inset_xy(0.0, style.gap(0.2));
+            regions.push((row, Region::Menu(index)));
+            widgets.row(list, row, action.label(), "", index == self.menu_cursor);
         }
     }
 

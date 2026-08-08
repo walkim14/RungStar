@@ -470,6 +470,11 @@ impl Settings {
         THRESHOLDS[(self.sound.threshold as usize).min(THRESHOLDS.len() - 1)]
     }
 
+    /// Whether a clip should play under the browser cursor.
+    pub fn preview_enabled(&self) -> bool {
+        self.graphics.preview != Preview::Off && self.sound.preview_volume > 0
+    }
+
     /// Pitch tolerance in semitones for the chosen difficulty. Easy 2, Medium 1, Hard 0.
     pub fn tolerance(&self) -> i32 {
         match self.game.difficulty {

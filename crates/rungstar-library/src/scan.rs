@@ -345,8 +345,39 @@ pub fn fold_for_sort(text: &str) -> String {
         .collect()
 }
 
+/// How far a scan has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Progress {
+    /// Files read so far.
+    pub done: usize,
+    /// Files that need reading. Zero until the directory walk has finished.
+    pub total: usize,
+    /// Files that turned out to be unusable.
+    pub failed: usize,
+}
+
+impl Progress {
+    /// `0.0..=1.0`, or `None` before the total is known.
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| (self.done as f32 / self.total as f32).clamp(0.0, 1.0))
+    }
+}
+
 /// Bring the index in line with what is on disk.
 pub fn scan(database: &mut Database, options: &ScanOptions) -> Result<ScanReport, DbError> {
+    scan_with_progress(database, options, |_| {})
+}
+
+/// Scan, reporting progress as it goes.
+///
+/// A first scan of a real library takes long enough that a frozen window is the wrong
+/// answer — eight thousand songs is fourteen seconds on a cold file cache. The callback runs
+/// on the scanning thread and should do nothing but hand the numbers somewhere else.
+pub fn scan_with_progress(
+    database: &mut Database,
+    options: &ScanOptions,
+    progress: impl Fn(Progress) + Send + Sync,
+) -> Result<ScanReport, DbError> {
     let candidates = collect(options);
     let mut report = ScanReport::default();
 
@@ -374,9 +405,31 @@ pub fn scan(database: &mut Database, options: &ScanOptions) -> Result<ScanReport
         }
     }
 
+    let total = to_parse.len();
+    progress(Progress {
+        done: 0,
+        total,
+        failed: 0,
+    });
+    // Counted across the parallel pass, so the number moves smoothly rather than in the
+    // chunks rayon happens to split the work into.
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let parsed: Vec<(Option<ParsedSong>, bool)> = to_parse
         .par_iter()
-        .map(|(candidate, is_new)| (parse(candidate), *is_new))
+        .map(|(candidate, is_new)| {
+            let song = parse(candidate);
+            let seen = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // Reporting every file would be thousands of channel sends for a bar that moves
+            // in whole percent anyway.
+            if seen % 64 == 0 || seen == total {
+                progress(Progress {
+                    done: seen,
+                    total,
+                    failed: 0,
+                });
+            }
+            (song, *is_new)
+        })
         .collect();
 
     let mut songs = Vec::with_capacity(parsed.len());

@@ -15,6 +15,7 @@ pub mod menus;
 pub mod options;
 pub mod screen;
 pub mod settings;
+pub mod singscreen;
 pub mod songselect;
 pub mod theme;
 
@@ -27,5 +28,6 @@ pub use menu::{Cursor, Repeat};
 pub use menus::{MainMenu, OptionsOutcome, OptionsScreen};
 pub use screen::{Route, Transition, Widgets};
 pub use settings::{Choice, Settings};
+pub use singscreen::{Note, NoteKind, PauseChoice, SingScreen, Singer, Sung, Syllable};
 pub use songselect::SongSelect;
 pub use theme::{Style, Theme};

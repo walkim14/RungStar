@@ -5,25 +5,32 @@
 //! that produce a display list; this file is where that meets a device.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Keycode;
 
-use rungstar_library::{scan, Database, ScanOptions, SearchQuery, SongEntry};
+use rungstar_audio::AudioClip;
+use rungstar_library::{
+    scan_with_progress, Database, Progress, ScanOptions, SearchQuery, SongEntry,
+};
 use rungstar_platform::font::FontSet;
 use rungstar_platform::render::Renderer;
+use rungstar_platform::{Playback, SdlCapture};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::menus::{MainMenu, OptionsOutcome, OptionsScreen};
 use rungstar_ui::options::Action;
 use rungstar_ui::screen::{Route, Transition, Widgets};
 use rungstar_ui::settings::{ScreenMode, Settings, Switch};
-use rungstar_ui::songselect::{Input, SongSelect};
+use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
+use rungstar_ui::songselect::{Input, SongAction, SongSelect};
 use rungstar_ui::theme::{Style, Theme};
 use rungstar_ui::Color;
+
+mod session;
 
 mod paths {
     use std::path::PathBuf;
@@ -63,6 +70,8 @@ enum Screen {
     Main(MainMenu),
     Songs(Box<SongSelect>),
     Options(Box<OptionsScreen>),
+    /// Singing. The session owns the devices; the screen only draws.
+    Sing(Box<SingScreen>, Box<session::Session>),
     About,
 }
 
@@ -77,7 +86,42 @@ struct App {
     data_dir: PathBuf,
     /// Set when a scan or a query has changed what the browser should be showing.
     status: String,
+    /// A song the browser asked for, waiting for the frame loop to open the devices.
+    pending_sing: Option<i64>,
+    /// A scan running on another thread, and the last progress it reported.
+    scan: Option<ScanJob>,
+    /// The clip playing under the browser cursor.
+    preview: Option<Preview>,
     running: bool,
+}
+
+/// A snatch of the song under the cursor.
+///
+/// Held back by a delay, because starting a clip for every song a fast scroll passes over
+/// would be a stutter of half-second fragments rather than a preview.
+struct Preview {
+    song: i64,
+    playback: Option<Playback>,
+    started: Instant,
+}
+
+/// How long the cursor must rest on a song before its preview starts.
+const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// How long a preview plays before it fades out, in seconds.
+const PREVIEW_LENGTH: f32 = 30.0;
+
+/// A scan running off the main thread.
+///
+/// A first scan of a real library takes long enough that doing it inline freezes the window --
+/// eight thousand songs is fourteen seconds on a cold file cache, and a frozen window is
+/// indistinguishable from a crash. The scan writes through its own connection; the index is in
+/// WAL mode, so the browser keeps reading while it does.
+struct ScanJob {
+    progress: std::sync::mpsc::Receiver<Progress>,
+    handle: Option<std::thread::JoinHandle<Result<usize, String>>>,
+    latest: Progress,
+    started: Instant,
 }
 
 /// Covers loaded on demand, with a bound on how many are kept.
@@ -161,6 +205,9 @@ impl App {
             covers: CoverCache::new(),
             data_dir,
             status: String::new(),
+            pending_sing: None,
+            scan: None,
+            preview: None,
             running: true,
         })
     }
@@ -178,7 +225,10 @@ impl App {
         }
     }
 
-    /// Bring the index in line with the disk.
+    /// Bring the index in line with the disk, on this thread.
+    ///
+    /// Used by `--check`, where blocking is the point. Everything interactive uses
+    /// [`App::start_scan`].
     fn rescan(&mut self, verify: bool) {
         let roots = self.song_roots();
         for root in &roots {
@@ -187,7 +237,7 @@ impl App {
         let mut options = ScanOptions::new(roots);
         options.verify = verify;
         let started = Instant::now();
-        match scan(&mut self.library, &options) {
+        match scan_with_progress(&mut self.library, &options, |_| {}) {
             Ok(report) => {
                 self.status = format!(
                     "{} songs, scanned in {:.1} s",
@@ -197,6 +247,232 @@ impl App {
             }
             Err(error) => self.status = format!("scan failed: {error}"),
         }
+    }
+
+    /// Start a scan on another thread.
+    fn start_scan(&mut self, verify: bool) {
+        if self.scan.is_some() {
+            return;
+        }
+        let roots = self.song_roots();
+        for root in &roots {
+            let _ = std::fs::create_dir_all(root);
+        }
+        let mut options = ScanOptions::new(roots);
+        options.verify = verify;
+        let database_path = self.data_dir.join("library.db");
+
+        let (sender, progress) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut database = Database::open(&database_path).map_err(|e| e.to_string())?;
+            let report = scan_with_progress(&mut database, &options, move |p| {
+                // A closed receiver means the game is shutting down: there is nothing to
+                // report to and nothing to do about it.
+                let _ = sender.send(p);
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(report.total_indexed())
+        });
+
+        self.scan = Some(ScanJob {
+            progress,
+            handle: Some(handle),
+            latest: Progress::default(),
+            started: Instant::now(),
+        });
+        self.status = "looking for songs\u{2026}".to_owned();
+    }
+
+    /// Collect progress, and pick up the result when the scan has finished.
+    fn poll_scan(&mut self) {
+        let Some(job) = &mut self.scan else {
+            return;
+        };
+        while let Ok(progress) = job.progress.try_recv() {
+            job.latest = progress;
+        }
+        let finished = job
+            .handle
+            .as_ref()
+            .map(std::thread::JoinHandle::is_finished)
+            .unwrap_or(true);
+        if !finished {
+            self.status = match job.latest.fraction() {
+                Some(fraction) => format!(
+                    "reading songs\u{2026} {}%  ({} of {})",
+                    (fraction * 100.0).round(),
+                    job.latest.done,
+                    job.latest.total
+                ),
+                None => "looking for songs\u{2026}".to_owned(),
+            };
+            return;
+        }
+
+        let elapsed = job.started.elapsed().as_secs_f32();
+        let outcome = job.handle.take().map(std::thread::JoinHandle::join);
+        self.scan = None;
+        self.status = match outcome {
+            Some(Ok(Ok(count))) => format!("{count} songs, scanned in {elapsed:.1} s"),
+            Some(Ok(Err(error))) => format!("scan failed: {error}"),
+            _ => "the scan stopped unexpectedly".to_owned(),
+        };
+        // The rows are new, so whatever the browser is showing is stale.
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.invalidate();
+        }
+    }
+
+    /// Keep the preview in step with the browser cursor.
+    ///
+    /// Started only after the cursor has rested, so scrolling past a hundred songs plays none
+    /// of them. Stopped the moment the browser is not on top, so a preview never talks over
+    /// the song being sung.
+    fn update_preview(&mut self, audio: &sdl3::AudioSubsystem) {
+        let wanted = match self.stack.last() {
+            Some(Screen::Songs(songs)) if self.settings.preview_enabled() => {
+                songs.selected().map(|s| s.id)
+            }
+            _ => None,
+        };
+
+        let current = self.preview.as_ref().map(|p| p.song);
+        if current != wanted {
+            // A different song, or none. Drop whatever was playing and start the timer again.
+            self.preview = wanted.map(|song| Preview {
+                song,
+                playback: None,
+                started: Instant::now(),
+            });
+            return;
+        }
+        let Some(song) = wanted else {
+            return;
+        };
+
+        // Read before borrowing the preview mutably: both want `self`.
+        let volume = self.preview_volume();
+        let due = self
+            .preview
+            .as_ref()
+            .is_some_and(|p| p.playback.is_none() && p.started.elapsed() >= PREVIEW_DELAY);
+        if due {
+            let opened = self.open_preview(audio, song);
+            if let Some(preview) = &mut self.preview {
+                preview.playback = opened;
+            }
+            return;
+        }
+
+        if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
+            let _ = playback.pump();
+            // Fade out at the end rather than cutting, and never restart: a preview that
+            // loops under a cursor left resting is maddening.
+            let position = playback.position() as f32;
+            if position > PREVIEW_LENGTH {
+                let fade = (1.0 - (position - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0);
+                playback.set_volume(volume * fade);
+                if fade <= 0.0 {
+                    let _ = playback.pause();
+                }
+            }
+        }
+    }
+
+    fn preview_volume(&self) -> f32 {
+        self.settings.sound.preview_volume as f32 / 100.0
+            * (self.settings.sound.master_volume as f32 / 100.0)
+    }
+
+    /// Open the clip for a song, starting at its preview point.
+    fn open_preview(&self, audio: &sdl3::AudioSubsystem, id: i64) -> Option<Playback> {
+        let entry = self.library.song(id).ok().flatten()?;
+        let directory = entry.directory()?;
+        let name = entry.audio_file.as_ref()?;
+        let path = resolve_beside(directory, name)?;
+
+        let clip = AudioClip::open(&path).ok()?;
+        // A short wait only: a preview that blocks the browser has already failed at being a
+        // preview.
+        clip.wait_for(0.4, std::time::Duration::from_millis(400));
+        let mut playback = Playback::new(audio, clip).ok()?;
+        // `#PREVIEWSTART` when the song names one, otherwise a quarter in — which is past the
+        // intro on almost everything and is what UltraStar does.
+        let start = entry
+            .preview_start
+            .filter(|s| *s > 0.0)
+            .unwrap_or(entry.duration_secs * 0.25);
+        let _ = playback.seek(start);
+        playback.set_volume(self.preview_volume());
+        playback.start().ok()?;
+        Some(playback)
+    }
+
+    /// Stop any preview, for when a song is about to start.
+    fn stop_preview(&mut self) {
+        self.preview = None;
+    }
+
+    /// Carry out whatever the song menu chose.
+    fn handle_song_menu(&mut self) {
+        let Some(Screen::Songs(songs)) = self.stack.last_mut() else {
+            return;
+        };
+        let Some((action, id)) = songs.take_choice() else {
+            return;
+        };
+        match action {
+            SongAction::Sing => self.pending_sing = Some(id),
+            SongAction::SingFromChorus => {
+                self.pending_sing = Some(id);
+                self.status = "starting from the chorus is not wired up yet".to_owned();
+            }
+            SongAction::ToggleFavourite => {
+                self.status = "favourites arrive with player profiles".to_owned();
+            }
+            SongAction::ShowDetails => {
+                if let Ok(Some(song)) = self.library.song(id) {
+                    self.status = format!(
+                        "{} \u{2014} {} BPM, {} notes, {}",
+                        song.path.display(),
+                        song.bpm,
+                        song.note_count,
+                        if song.is_playable() {
+                            "playable"
+                        } else {
+                            "no audio"
+                        }
+                    );
+                }
+            }
+            SongAction::OpenFolder => self.open_folder(id),
+        }
+    }
+
+    /// Show a song's folder in the desktop's file manager.
+    fn open_folder(&mut self, id: i64) {
+        let Ok(Some(song)) = self.library.song(id) else {
+            return;
+        };
+        let Some(directory) = song.directory() else {
+            return;
+        };
+        let command = if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        // `explorer` returns a non-zero exit code even when it worked, so the child is
+        // deliberately spawned and not waited on.
+        match std::process::Command::new(command).arg(directory).spawn() {
+            Ok(_) => self.status = format!("opened {}", directory.display()),
+            Err(error) => self.status = format!("could not open the folder: {error}"),
+        }
+    }
+
+    /// Whether a scan is running, for the screens that say so.
+    fn scanning(&self) -> bool {
+        self.scan.is_some()
     }
 
     fn save_settings(&self) {
@@ -284,8 +560,16 @@ impl App {
             Some(Screen::Main(menu)) => menu.gamepad = gamepad,
             Some(Screen::Songs(songs)) => songs.gamepad = gamepad,
             Some(Screen::Options(options)) => options.gamepad = gamepad,
+            Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
             _ => {}
         }
+    }
+
+    /// Whether a song is playing.
+    ///
+    /// A singing frame always has something moving in it, so it must never wait on an event.
+    pub fn is_singing(&self) -> bool {
+        matches!(self.stack.last(), Some(Screen::Sing(..)))
     }
 
     fn handle(&mut self, input: Input, area: Rect) {
@@ -306,6 +590,32 @@ impl App {
                         Transition::None
                     }
                     OptionsOutcome::None => Transition::None,
+                }
+            }
+            Some(Screen::Sing(screen, session)) => {
+                let (transition, choice) = screen.handle(input);
+                let forced = match choice {
+                    Some(PauseChoice::Continue) => {
+                        session.resume();
+                        Transition::None
+                    }
+                    Some(PauseChoice::Restart) | Some(PauseChoice::Quit) => {
+                        // Restarting means going back and picking it again: keeping a session
+                        // alive across a restart would mean owning the devices twice.
+                        session.stop();
+                        Transition::Pop
+                    }
+                    None => {
+                        if screen.overlay == Overlay::Paused {
+                            session.pause();
+                        }
+                        Transition::None
+                    }
+                };
+                if forced == Transition::None {
+                    transition
+                } else {
+                    forced
                 }
             }
             Some(Screen::About) => match input {
@@ -333,7 +643,7 @@ impl App {
                     // A first run has no index, and an empty song list with no explanation is
                     // where a player gives up. Scan on the way in.
                     if self.library.count().unwrap_or(0) == 0 {
-                        self.rescan(false);
+                        self.start_scan(false);
                     }
                 }
                 Route::Options | Route::OptionsPage(_) => self
@@ -342,49 +652,89 @@ impl App {
                 Route::About => self.stack.push(Screen::About),
                 Route::Main | Route::Search => {}
             },
-            Transition::Sing(id) => self.sing(id),
+            // Starting a song needs the audio subsystem, which the frame loop owns. It is
+            // recorded here and acted on there.
+            Transition::Sing(id) => self.pending_sing = Some(id),
         }
     }
 
-    /// Play a song.
+    /// Start singing a song.
     ///
-    /// The sing screen still builds its own SDL context and window, so it runs as a child
-    /// process rather than inside this one. That is a seam, not a design: the screen belongs
-    /// in `rungstar-ui` producing a display list like every other, and moving it there is
-    /// what removes the second window. Until then this is the difference between the browser
-    /// being usable and being a picture of a browser.
-    fn sing(&mut self, id: i64) {
-        let Ok(Some(song)) = self.library.song(id) else {
+    /// Everything that touches a device lives in the session; the screen is pure and draws
+    /// what it is handed. That is why this is a screen on the same stack as the browser
+    /// rather than a second window.
+    fn sing(&mut self, id: i64, audio: &sdl3::AudioSubsystem, capture: SdlCapture) {
+        let Ok(Some(entry)) = self.library.song(id) else {
             self.status = "that song is no longer in the library".to_owned();
             return;
         };
-        if !song.is_playable() {
-            self.status = format!("{} has no audio file", song.display_name());
+        let Some(directory) = entry.directory().map(Path::to_path_buf) else {
+            self.status = "that song has no folder".to_owned();
             return;
-        }
-        let Some(binary) = sing_binary() else {
-            self.status = "could not find the rungstar-sing executable".to_owned();
+        };
+        let Some(audio_name) = entry.audio_file.clone() else {
+            self.status = format!("{} has no audio file", entry.display_name());
             return;
         };
 
-        self.status = format!("singing {}\u{2026}", song.display_name());
-        let result = std::process::Command::new(binary).arg(&song.path).status();
-        match result {
-            Ok(status) if status.success() => {
-                // Only count a play that actually ran, so a failed launch does not inflate
-                // the history the "times played" sort depends on.
-                let _ = self.library.record_play(id);
-                self.status = format!("sang {}", song.display_name());
+        let bytes = match std::fs::read(&entry.path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.status = format!("could not read the song: {error}");
+                return;
             }
-            Ok(_) => self.status = format!("{} ended early", song.display_name()),
-            Err(error) => self.status = format!("could not start the song: {error}"),
+        };
+        let parsed = match rungstar_song::SongTxt::parse_bytes(&bytes) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.status = format!("{} is not a usable song: {error}", entry.display_name());
+                return;
+            }
+        };
+        let audio_path =
+            resolve_beside(&directory, &audio_name).unwrap_or_else(|| directory.join(&audio_name));
+
+        let session = session::Session::start(
+            audio,
+            &parsed.song,
+            &audio_path,
+            self.settings.game.players as usize,
+            match self.settings.game.difficulty {
+                rungstar_ui::settings::Difficulty::Easy => rungstar_score::Difficulty::Easy,
+                rungstar_ui::settings::Difficulty::Medium => rungstar_score::Difficulty::Medium,
+                rungstar_ui::settings::Difficulty::Hard => rungstar_score::Difficulty::Hard,
+            },
+            self.settings.threshold(),
+            self.settings.sound.mic_delay_ms as f64,
+            capture,
+        );
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                self.status = format!("could not start the song: {error}");
+                return;
+            }
+        };
+
+        let mut screen = SingScreen::new(
+            &entry.artist,
+            &entry.title,
+            self.settings.game.players as usize,
+        );
+        screen.show_input_panel = self.settings.advanced.input_panel == Switch::On;
+        screen.duration = session.duration();
+        if self.settings.graphics.backgrounds == Switch::On {
+            screen.background = self.covers.get(entry.id);
         }
+        let _ = self.library.record_play(id);
+        self.stack
+            .push(Screen::Sing(Box::new(screen), Box::new(session)));
     }
 
     fn run_action(&mut self, action: Action) {
         match action {
-            Action::RescanLibrary => self.rescan(false),
-            Action::RebuildIndex => self.rescan(true),
+            Action::RescanLibrary => self.start_scan(false),
+            Action::RebuildIndex => self.start_scan(true),
             Action::ResetToDefaults => {
                 self.settings = Settings::default();
                 self.restyle();
@@ -423,23 +773,40 @@ impl App {
                 songs.draw(list, area, &self.style, &|id| covers.get(id));
             }
             Some(Screen::Options(options)) => options.draw(list, area, &self.style, &self.settings),
+            Some(Screen::Sing(screen, session)) => {
+                let beat = session.visual_beat();
+                let (syllables, next) = session.lyrics(beat);
+                screen.draw(
+                    list,
+                    area,
+                    &self.style,
+                    session.notes(),
+                    &syllables,
+                    &next,
+                    beat,
+                );
+            }
             Some(Screen::About) => draw_about(list, area, &self.style),
             None => {}
         }
     }
 }
 
-/// Where the sing executable is, which is beside this one.
-fn sing_binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let directory = exe.parent()?;
-    let name = if cfg!(windows) {
-        "rungstar-sing.exe"
-    } else {
-        "rungstar-sing"
-    };
-    let path = directory.join(name);
-    path.exists().then_some(path)
+/// Find a file beside the song, tolerating a case mismatch in the header.
+///
+/// Real libraries are full of `#MP3:Song.MP3` next to `Song.mp3`, and on Linux that is a
+/// missing file rather than a typo.
+fn resolve_beside(directory: &Path, name: &str) -> Option<PathBuf> {
+    let direct = directory.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let wanted = name.to_lowercase();
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().to_lowercase() == wanted)
+        .map(|entry| entry.path())
 }
 
 /// Load the theme named in the settings, falling back to the built-in one.
@@ -511,6 +878,7 @@ fn action_for(keycode: Keycode) -> Option<Input> {
         Keycode::F => Input::Search,
         Keycode::Slash => Input::Search,
         Keycode::F3 => Input::Sort,
+        Keycode::M => Input::ContextMenu,
         Keycode::R => Input::Random,
         Keycode::PageUp => Input::PageUp,
         Keycode::PageDown => Input::PageDown,
@@ -564,6 +932,7 @@ fn main() -> Result<()> {
     )?;
     let mut renderer = Renderer::new(canvas, fonts).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let audio_subsystem = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut list = DrawList::new();
     let mut last = Instant::now();
@@ -634,6 +1003,7 @@ fn main() -> Result<()> {
                         Button::East => Some(Input::Back),
                         Button::West => Some(Input::Search),
                         Button::North => Some(Input::Sort),
+                        Button::Back => Some(Input::ContextMenu),
                         Button::LeftShoulder => Some(Input::CycleLayout),
                         Button::RightShoulder => Some(Input::CycleLayout),
                         _ => None,
@@ -646,10 +1016,45 @@ fn main() -> Result<()> {
             }
         }
 
-        app.refresh_songs();
-        app.load_visible_covers(&mut renderer);
+        // A song the browser asked for. Started here because it needs the audio subsystem,
+        // and a fresh capture handle so the microphones belong to this session alone.
+        if let Some(id) = app.pending_sing.take() {
+            app.stop_preview();
+            let capture = SdlCapture::new(audio_subsystem.clone());
+            app.sing(id, &audio_subsystem, capture);
+        }
+
+        app.poll_scan();
+        let scanning = app.scanning().then(|| app.status.clone());
         if let Some(Screen::Songs(songs)) = app.stack.last_mut() {
-            songs.tick(dt);
+            songs.scanning = scanning;
+        }
+        app.handle_song_menu();
+        app.refresh_songs();
+        app.update_preview(&audio_subsystem);
+        app.load_visible_covers(&mut renderer);
+        match app.stack.last_mut() {
+            Some(Screen::Songs(songs)) => {
+                songs.tick(dt);
+            }
+            Some(Screen::Sing(screen, session)) => {
+                if let Err(error) = session.tick() {
+                    tracing::warn!("playback stopped: {error}");
+                    session.stop();
+                    app.apply(Transition::Pop);
+                } else {
+                    session.update_singers(&mut screen.singers);
+                    screen.position = session.position();
+                    if session.is_finished() && screen.overlay != Overlay::Results {
+                        // The scores go up rather than the screen closing: in a party the
+                        // result is the point, and popping straight back to the browser
+                        // throws it away before anybody has read it.
+                        screen.overlay = Overlay::Results;
+                        session.stop();
+                    }
+                }
+            }
+            _ => {}
         }
 
         list.clear();
@@ -666,6 +1071,19 @@ fn main() -> Result<()> {
         renderer
             .render(&list, app.style.background)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // A menu with nothing moving does not need to redraw as fast as the display can go,
+        // and on a handheld that is battery for no picture. A song always has something
+        // moving, so it never sleeps.
+        if !app.is_singing() {
+            let settled = match app.stack.last() {
+                Some(Screen::Songs(songs)) => !songs.browser.animating(),
+                _ => true,
+            };
+            if settled {
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        }
     }
 
     app.save_settings();
@@ -718,7 +1136,56 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
         app.stack.pop();
     }
 
-    // And the two overlays, which are the parts with their own layout maths.
+    // The sing screen, drawn without a session: notes, lyrics and singers are all supplied
+    // by the caller, so it can be exercised with nothing playing.
+    {
+        let mut screen = SingScreen::new("Artist", "Title", 6);
+        screen.show_input_panel = true;
+        let notes: Vec<rungstar_ui::singscreen::Note> = (0..40)
+            .map(|i| rungstar_ui::singscreen::Note {
+                start: i as f64 * 4.0,
+                duration: 3.0,
+                pitch: 60 + (i % 7),
+                kind: if i % 5 == 0 {
+                    rungstar_ui::singscreen::NoteKind::Golden
+                } else {
+                    rungstar_ui::singscreen::NoteKind::Normal
+                },
+            })
+            .collect();
+        let syllables: Vec<rungstar_ui::singscreen::Syllable> = ["Hel", "lo ", "world"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| rungstar_ui::singscreen::Syllable {
+                text: (*text).to_owned(),
+                start: i as f64 * 4.0,
+                duration: 3.0,
+                golden: false,
+            })
+            .collect();
+        for overlay in [Overlay::None, Overlay::Paused, Overlay::Results] {
+            screen.overlay = overlay;
+            list.clear();
+            screen.draw(
+                list,
+                area,
+                &app.style,
+                &notes,
+                &syllables,
+                "next line",
+                12.0,
+            );
+            if !list.is_balanced() {
+                anyhow::bail!("the sing screen left a clip pushed");
+            }
+            renderer
+                .render(list, app.style.background)
+                .map_err(|e| anyhow::anyhow!("sing: {e}"))?;
+        }
+        println!("sing        {} draw commands, 6 singers", list.len());
+    }
+
+    // And the two browser overlays, which have their own layout maths.
     app.stack.push(Screen::Songs(Box::new(SongSelect::new())));
     for overlay in [Input::Search, Input::Search, Input::Sort] {
         app.handle(overlay, area);

@@ -115,7 +115,11 @@ fixture output.
 8. **A freestyle-only line earns no line bonus.** UltraStar Deluxe excludes such lines from
    the bonus divisor but still pays them a full bonus, so a song containing one can score
    over 10,000. Ours cannot.
-9. **A text search ranks by relevance, and a phrase beats scattered words.** UltraStar sorts
+9. **Hovering does not move the browser cursor.** In the list and the roulette the cursor is
+   centred and the songs scroll past it, so selecting on hover drags the list out from under
+   the pointer and you click a different song than you aimed at. Click selects, a second
+   click sings — so a stray click never starts a song either.
+10. **A text search ranks by relevance, and a phrase beats scattered words.** UltraStar sorts
    alphabetically always, so searching only works if you already know the title. Two parts:
    an unsorted search ranks by bm25 rather than by artist, and — because bm25 scores term
    count and document length but has no notion of *adjacency* — a second pass promotes songs
@@ -255,19 +259,28 @@ with packaging.
   sort to the top of SDL's list and deliver silence forever, which is indistinguishable from
   a broken setup. `--mic <substring>` overrides.
 
-- **Phase 6 — song select, theme engine, options**: the `rungstar` binary runs. Main menu,
-  song browser with all three layouts, live search with an on-screen keyboard, sort picker,
-  detail panel with cover art, six options pages, and real font rendering. Verified against a
-  real 8,134-song library.
+- **Phase 6 — song select, theme engine, options**: done. The `rungstar` binary is the game.
+  Main menu, song browser with all three layouts, live search with an on-screen keyboard,
+  sort picker, per-song context menu, detail panel with cover art, six options pages, audio
+  previews while browsing, and the sing screen — all one window, all mouse- and
+  controller-operable. Verified against a real 8,134-song library.
 
   `--check` starts everything a real launch does, draws one frame of every screen, and exits.
   That is what makes "the game starts" assertable on a build machine with nobody in front of
   it, and it is the first thing to run after touching a screen.
 
-  Still to come here: the context menu, playlists in the browser, audio previews while
-  browsing, controller rebinding, a microphone setup screen, and wiring `Transition::Sing`
-  into the sing screen — song select currently records the play and reports what it *would*
-  sing, because the sing screen is still a separate binary.
+  **The sing screen is now a screen**, not a second binary: `rungstar-ui/singscreen.rs` is
+  pure and `rungstar-app/session.rs` owns the clock, the microphones and the scorers. That
+  split is what made multiple singers a layout question — the screen takes a slice of singers
+  and splits the panel strip by its length, so one and six are the same code. `rungstar-sing`
+  survives as a standalone tool for testing one song without the browser.
+
+  **The scan runs off the main thread**, reporting progress the browser shows. Eight thousand
+  songs is fourteen seconds on a cold file cache, and a frozen window is indistinguishable
+  from a crash. The index is in WAL mode, so the browser reads while the scan writes.
+
+  Still to come here: playlists in the browser, controller rebinding, a microphone setup
+  screen, and the medley start point for "sing from the chorus".
 
   The input panel exists because silence and a dead microphone looked identical on the first
   version of this screen. It separates the three things that fail independently: no audio
