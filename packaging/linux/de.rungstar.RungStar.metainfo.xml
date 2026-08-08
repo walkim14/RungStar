@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata. Not optional decoration: without it a Flatpak has no name, no icon and
+  no description in a software centre, and on a Steam Deck in Desktop Mode that is the only
+  place anybody will find it.
+-->
+<component type="desktop-application">
+  <id>de.rungstar.RungStar</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>RungStar</name>
+  <summary>Karaoke for your own song library</summary>
+
+  <description>
+    <p>
+      A karaoke game for UltraStar song files. Point it at a folder of songs and it indexes
+      them in seconds, including their lyrics, so you can find a song by a line you remember
+      rather than by its title.
+    </p>
+    <p>
+      Up to six people can sing at once across several microphones, with duets, party modes,
+      tournament brackets and fourteen challenge modes. Songs can be browsed and downloaded
+      from USDB without leaving the game, and a built-in editor fixes the timing of a file that
+      is not quite right.
+    </p>
+    <p>
+      Everything is operable from a controller, at any resolution, so it works on a handheld as
+      well as on a television.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">de.rungstar.RungStar.desktop</launchable>
+
+  <categories>
+    <category>Game</category>
+    <category>Music</category>
+  </categories>
+
+  <keywords>
+    <keyword>karaoke</keyword>
+    <keyword>singing</keyword>
+    <keyword>ultrastar</keyword>
+    <keyword>party</keyword>
+  </keywords>
+
+  <supports>
+    <control>gamepad</control>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <!-- A handheld is a first-class target rather than an afterthought, and this is what tells
+       a software centre to say so. -->
+  <recommends>
+    <display_length compare="ge">1024</display_length>
+  </recommends>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-08">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

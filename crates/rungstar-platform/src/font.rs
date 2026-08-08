@@ -64,13 +64,39 @@ impl Face {
     }
 }
 
+/// A face shipped beside the executable, which is what a packaged build uses.
+///
+/// Looked at before anything on the system. Borrowing Segoe UI works on a developer's Windows
+/// machine and produces a different-looking game on every other one; a Flatpak has no system
+/// fonts to borrow at all beyond what the runtime happens to carry.
+///
+/// `assets/fonts/` is empty in the repository on purpose — a font binary is a megabyte of
+/// something nobody reviews in a diff. Packaging drops one in; see `packaging/README.md`.
+fn bundled(name: &str) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(beside) = exe.parent() {
+            paths.push(beside.join("assets").join("fonts").join(name));
+            // One level up as well, for `target/release/rungstar` run from the source tree.
+            if let Some(up) = beside.parent() {
+                paths.push(up.join("assets").join("fonts").join(name));
+            }
+        }
+    }
+    paths.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/fonts")
+            .join(name),
+    );
+    paths
+}
+
 /// Where the platform looks for a font when the theme does not name one that exists.
 ///
-/// Nothing is vendored yet: shipping a face means picking one with a licence that permits
-/// redistribution and adding a megabyte to the repository, which belongs with packaging.
-/// Until then the game borrows one from the system, and says so if it cannot.
+/// A bundled face first, then whatever the system has. The fallback stays because a build run
+/// from the source tree has no bundled font and should still start.
 fn system_font_candidates() -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut paths: Vec<std::path::PathBuf> = bundled("RungStar-Regular.ttf");
     if cfg!(windows) {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
         for name in ["segoeui.ttf", "arial.ttf", "tahoma.ttf", "verdana.ttf"] {
@@ -91,9 +117,9 @@ fn system_font_candidates() -> Vec<std::path::PathBuf> {
     paths
 }
 
-/// Bold variants of the same system faces, so headings are not faked by drawing twice.
+/// Bold variants of the same faces, so headings are not faked by drawing twice.
 fn system_bold_candidates() -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut paths: Vec<std::path::PathBuf> = bundled("RungStar-Bold.ttf");
     if cfg!(windows) {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
         for name in [

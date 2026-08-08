@@ -441,6 +441,8 @@ pub struct AdvancedSettings {
     /// Draw the input diagnostics panel over the sing screen.
     pub input_panel: Switch,
     pub show_fps: Switch,
+    /// What the on-screen hints call the controller's buttons.
+    pub glyphs: crate::glyphs::Glyphs,
 }
 
 impl Default for AdvancedSettings {
@@ -452,6 +454,7 @@ impl Default for AdvancedSettings {
             rumble: Switch::On,
             input_panel: Switch::Off,
             show_fps: Switch::Off,
+            glyphs: crate::glyphs::Glyphs::default(),
         }
     }
 }

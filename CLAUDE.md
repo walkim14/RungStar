@@ -506,4 +506,34 @@ with packaging.
   Escape with unsaved work offers to save, and Save is what the cursor starts on: somebody who
   pressed Escape almost always meant to keep it.
 
-Later phases in the plan: packaging, extras.
+- **Phase 11 - packaging**: done. `packaging/` holds four ways out of the build tree.
+
+  Windows: a portable zip assembled by `packaging/windows/portable.ps1` and an Inno Setup
+  installer over the same tree. Verified by running the packaged folder standalone - all six
+  DLLs beside the executable, `--check` green. Linux: a **Flatpak**, which is the only delivery
+  that works on SteamOS's immutable rootfs, plus an AppImage for distributions without it.
+
+  **Settings and songs are never inside the install directory**, portable build included. An
+  uninstall or an unzip-over-the-top must not be able to take somebody's highscores with it.
+
+  The Flatpak asks for what it needs and no more. `--socket=pulseaudio` carries capture as well
+  as output; `--device=all` is required for controllers because `--device=dri` is only the GPU;
+  and `--filesystem=home` is deliberately **not** requested - a karaoke game has no business
+  reading everything, and a folder elsewhere is one `flatpak override` away.
+
+  **A Steam Deck is 1600x1000 design units**, because the design space is a thousand tall and
+  a Deck is 16:10 - so one design unit is 0.8 physical pixels. `tests/deck.rs` draws every
+  screen at that shape and asserts two things: nothing outside the window, since a control half
+  off the bottom is unreachable with no mouse, and no text below twelve physical pixels. There
+  is no Deck layout, only the layout, checked at the Deck's shape.
+
+  **Controller hints name the right buttons.** A Deck's face buttons are an Xbox pad's, but its
+  shoulders are L1/L2 rather than LB/LT and its two menu buttons have no letters at all.
+  Detected from `SteamDeck=1` and `/etc/os-release` rather than configured, with a setting for
+  the case detection cannot cover.
+
+  **No font is committed.** `assets/fonts/` is where a packaged build looks first, and the
+  binary is dropped in at packaging time: a megabyte nobody reviews in a diff, and picking one
+  is a licensing decision. Without it the game borrows a system face and says so.
+
+Later phases in the plan: extras.

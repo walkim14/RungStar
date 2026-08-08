@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RungStar
+GenericName=Karaoke
+Comment=Sing with your own song library, and download more without leaving the game
+Exec=rungstar
+Icon=de.rungstar.RungStar
+Terminal=false
+Categories=Game;Music;AudioVideo;
+Keywords=karaoke;sing;ultrastar;singstar;party;
+StartupNotify=true
+StartupWMClass=rungstar
