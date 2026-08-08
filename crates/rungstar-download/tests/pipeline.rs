@@ -1,0 +1,612 @@
+//! The download pipeline, driven with no network and no yt-dlp.
+//!
+//! Everything that decides what happens — what to fetch, what to skip, what to do when a
+//! resource is missing, when the song becomes singable — is exercised here against fake
+//! fetchers. What is left needing a real account is the two requests that get the note file.
+
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+
+use rungstar_download::meta::hash;
+use rungstar_download::pipeline::{download, Fetcher, Progress, RunToEnd, Stop};
+use rungstar_download::plan::{plan, safe_name, watchable, Source};
+use rungstar_download::ytdlp::{
+    arguments, is_permanent, written, ExtractError, Extraction, Extractor,
+};
+use rungstar_download::{Kind, Outcome, Resource, SyncMeta};
+use rungstar_usdb::{SongDetails, SongId};
+
+const SONG: &str =
+    "#TITLE:Waterloo\n#ARTIST:Abba\n#MP3:audio.ogg\n#BPM:300\n#GAP:0\n: 0 4 60 Wa~\n- 8\nE\n";
+
+fn parse(text: &str) -> rungstar_song::SongTxt {
+    rungstar_song::SongTxt::parse_bytes(text.as_bytes())
+        .expect("the fixture song should parse")
+        .song
+}
+
+/// A song whose `#VIDEO` header is a meta-tag list.
+fn tagged(tags: &str) -> rungstar_song::SongTxt {
+    parse(&SONG.replace("#BPM:300", &format!("#VIDEO:{tags}\n#BPM:300")))
+}
+
+// ---------------------------------------------------------------- fake network
+
+struct Canned {
+    files: Vec<(String, Vec<u8>)>,
+    asked: RefCell<Vec<String>>,
+}
+
+impl Canned {
+    fn new(files: Vec<(&str, &[u8])>) -> Self {
+        Self {
+            files: files
+                .into_iter()
+                .map(|(url, bytes)| (url.to_owned(), bytes.to_vec()))
+                .collect(),
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Fetcher for Canned {
+    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.asked.borrow_mut().push(url.to_owned());
+        self.files
+            .iter()
+            .find(|(known, _)| known == url)
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or_else(|| format!("404 {url}"))
+    }
+}
+
+/// An extractor that writes a file of the right shape, or refuses.
+struct FakeYtDlp {
+    fail: Option<ExtractError>,
+    calls: RefCell<Vec<(String, bool, String)>>,
+}
+
+impl FakeYtDlp {
+    fn working() -> Self {
+        Self {
+            fail: None,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+    fn broken(error: ExtractError) -> Self {
+        Self {
+            fail: Some(error),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Extractor for FakeYtDlp {
+    fn extract(
+        &self,
+        page: &str,
+        audio_only: bool,
+        into: &Path,
+        stem: &str,
+    ) -> Result<Extraction, ExtractError> {
+        self.calls
+            .borrow_mut()
+            .push((page.to_owned(), audio_only, stem.to_owned()));
+        if let Some(error) = &self.fail {
+            return Err(error.clone());
+        }
+        let extension = if audio_only { "opus" } else { "webm" };
+        let path = into.join(format!("{stem}.{extension}"));
+        std::fs::write(&path, format!("pretend {stem}").as_bytes()).unwrap();
+        Ok(Extraction {
+            path,
+            note: String::new(),
+        })
+    }
+}
+
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+
+// ---------------------------------------------------------------- planning
+
+#[test]
+fn a_plan_fetches_the_song_then_the_audio_then_the_rest() {
+    // The order is the feature. The reference downloads everything before a song is usable, so
+    // a 60 MB video stands between you and a 4 MB song you wanted to sing now.
+    let directory = tempfile::tempdir().unwrap();
+    let song = tagged("v=dQw4w9WgXcQ,co=coverid");
+    let plan = plan(SongId(1), SONG, &song, None, None, directory.path());
+    let order: Vec<Kind> = plan.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(
+        order,
+        vec![Kind::Txt, Kind::Audio, Kind::Video, Kind::Cover],
+        "the song and the audio must come before the big files"
+    );
+    // And the two that make it singable are named.
+    let essential: Vec<Kind> = plan.essential().map(|s| s.kind).collect();
+    assert_eq!(essential, vec![Kind::Txt, Kind::Audio]);
+}
+
+#[test]
+fn one_link_serves_both_the_audio_and_the_video() {
+    let directory = tempfile::tempdir().unwrap();
+    let song = tagged("v=dQw4w9WgXcQ");
+    let plan = plan(SongId(1), SONG, &song, None, None, directory.path());
+    let audio = plan.steps.iter().find(|s| s.kind == Kind::Audio).unwrap();
+    let video = plan.steps.iter().find(|s| s.kind == Kind::Video).unwrap();
+    assert_eq!(
+        audio.source,
+        Source::Extract {
+            page: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            audio_only: true
+        }
+    );
+    assert_eq!(
+        video.source,
+        Source::Extract {
+            page: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            audio_only: false
+        }
+    );
+}
+
+#[test]
+fn a_video_posted_in_the_comments_is_used_when_the_tag_has_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let song = tagged("a=dQw4w9WgXcQ");
+    let details = SongDetails {
+        comment_videos: vec!["https://www.youtube.com/watch?v=WIAvMiUcCgw".into()],
+        ..SongDetails::default()
+    };
+    let plan = plan(
+        SongId(1),
+        SONG,
+        &song,
+        Some(&details),
+        None,
+        directory.path(),
+    );
+    let video = plan.steps.iter().find(|s| s.kind == Kind::Video).unwrap();
+    assert_eq!(
+        video.source,
+        Source::Extract {
+            page: "https://www.youtube.com/watch?v=WIAvMiUcCgw".into(),
+            audio_only: false
+        }
+    );
+}
+
+#[test]
+fn a_song_with_no_video_tag_and_no_comment_asks_for_no_video() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = plan(SongId(1), SONG, &parse(SONG), None, None, directory.path());
+    assert!(!plan.steps.iter().any(|s| s.kind == Kind::Video));
+    assert!(!plan.steps.iter().any(|s| s.kind == Kind::Audio));
+    assert_eq!(plan.steps.len(), 1, "only the song file itself");
+}
+
+#[test]
+fn a_file_already_on_disk_and_intact_is_not_fetched_again() {
+    // What makes a repair cheap. Matching on the content rather than on a timestamp is what
+    // makes it survive a folder that has been through cloud sync.
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path();
+    let bytes = b"already here";
+    std::fs::write(folder.join("Abba - Waterloo.jpg"), bytes).unwrap();
+    let mut held = SyncMeta::new(SongId(1), 0, 0);
+    held.put(Resource {
+        kind: Kind::Cover,
+        file: "Abba - Waterloo.jpg".into(),
+        source: "https://assets.fanart.tv/fanart/coverid".into(),
+        hash: hash(bytes),
+        bytes: bytes.len() as u64,
+    });
+
+    let song = tagged("co=coverid");
+    let intact = plan(SongId(1), SONG, &song, None, Some(&held), folder);
+    assert_eq!(intact.skipped, vec![Kind::Cover]);
+    assert!(!intact.steps.iter().any(|s| s.kind == Kind::Cover));
+
+    // Damage it and it comes back.
+    std::fs::write(folder.join("Abba - Waterloo.jpg"), b"truncated").unwrap();
+    let damaged = plan(SongId(1), SONG, &song, None, Some(&held), folder);
+    assert!(damaged.skipped.is_empty());
+    assert!(damaged.steps.iter().any(|s| s.kind == Kind::Cover));
+}
+
+#[test]
+fn a_bare_youtube_id_becomes_a_link() {
+    assert_eq!(
+        watchable("dQw4w9WgXcQ"),
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
+    assert_eq!(
+        watchable("v=dQw4w9WgXcQ"),
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
+    assert_eq!(
+        watchable("https://vimeo.com/12345"),
+        "https://vimeo.com/12345"
+    );
+    assert_eq!(watchable("vimeo.com/12345"), "https://vimeo.com/12345");
+}
+
+#[test]
+fn a_folder_name_is_safe_on_every_file_system() {
+    assert_eq!(safe_name("AC/DC - T.N.T."), "AC_DC - T.N.T");
+    assert_eq!(safe_name("What?"), "What_");
+    assert_eq!(safe_name("Say: Yes"), "Say_ Yes");
+    // Windows refuses a trailing dot or space, silently, by truncating.
+    assert_eq!(safe_name("Trailing. "), "Trailing");
+    // And the device names, which cannot be a folder at all.
+    assert_eq!(safe_name("AUX"), "_AUX");
+    assert_eq!(safe_name("con.txt"), "_con.txt");
+    assert_eq!(safe_name("Auxiliary"), "Auxiliary", "only the exact names");
+    assert_eq!(safe_name(""), "song");
+    assert!(safe_name(&"x".repeat(400)).chars().count() <= 120);
+}
+
+// ---------------------------------------------------------------- running
+
+fn run(
+    song: &rungstar_song::SongTxt,
+    details: Option<&SongDetails>,
+    fetcher: &Canned,
+    extractor: &FakeYtDlp,
+    stop: &dyn Stop,
+) -> (
+    tempfile::TempDir,
+    Result<rungstar_download::Report, rungstar_download::DownloadError>,
+    Vec<Progress>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("songs");
+    let scratch = directory.path().join("scratch");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let plan = plan(SongId(7), SONG, song, details, None, &root.join("x"));
+    let mut progress = Vec::new();
+    let report = download(
+        &plan,
+        &root,
+        &scratch,
+        1000,
+        2000,
+        fetcher,
+        extractor,
+        stop,
+        |step| progress.push(step),
+    );
+    (directory, report, progress)
+}
+
+#[test]
+fn a_finished_download_lands_in_the_library_with_a_sidecar() {
+    let fetcher = Canned::new(vec![("https://assets.fanart.tv/fanart/coverid", JPEG)]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ,co=coverid");
+    let (_dir, report, progress) = run(&song, None, &fetcher, &extractor, &RunToEnd);
+    let report = report.expect("it should have worked");
+
+    assert_eq!(report.outcome, Outcome::Complete);
+    assert!(report.folder.join("Abba - Waterloo.txt").is_file());
+    assert!(report.folder.join("Abba - Waterloo.opus").is_file());
+    assert!(report.folder.join("Abba - Waterloo [video].webm").is_file());
+    assert!(report.folder.join("Abba - Waterloo.jpg").is_file());
+
+    // The sidecar remembers all four, with hashes.
+    let meta = SyncMeta::read(&report.folder).expect("a sidecar");
+    assert_eq!(meta.usdb_id, SongId(7));
+    assert_eq!(meta.usdb_mtime, 1000);
+    assert!(meta.playable());
+    for kind in [Kind::Txt, Kind::Audio, Kind::Video, Kind::Cover] {
+        let resource = meta.get(kind).unwrap_or_else(|| panic!("{kind:?} missing"));
+        assert_eq!(resource.hash.len(), 64, "not a blake3 hex digest");
+        assert!(resource.bytes > 0);
+    }
+    // And nothing on disk disagrees with it.
+    assert!(meta.broken(&report.folder).is_empty());
+
+    // The song was announced as playable before the video finished.
+    let playable_at = progress
+        .iter()
+        .position(|p| matches!(p, Progress::Playable(_)))
+        .expect("never announced");
+    let video_at = progress
+        .iter()
+        .position(|p| *p == Progress::Finished(Kind::Video))
+        .expect("no video");
+    assert!(
+        playable_at < video_at,
+        "the song waited for its video: {progress:?}"
+    );
+}
+
+#[test]
+fn a_missing_cover_does_not_stop_the_song_arriving() {
+    // Refusing to deliver a singable song because its artwork 404ed is the reference's
+    // behaviour and it is wrong.
+    let fetcher = Canned::new(vec![]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ,co=goneid");
+    let (_dir, report, _) = run(&song, None, &fetcher, &extractor, &RunToEnd);
+    let report = report.expect("the song should still arrive");
+    assert_eq!(report.outcome, Outcome::Partial);
+    assert!(report.folder.join("Abba - Waterloo.txt").is_file());
+    assert_eq!(report.missing.len(), 1);
+    assert_eq!(report.missing[0].0, Kind::Cover);
+}
+
+#[test]
+fn a_song_whose_audio_cannot_be_fetched_leaves_nothing_behind() {
+    // The opposite case: half a song in the library is worse than none, because the scanner
+    // indexes it and somebody tries to sing it.
+    let fetcher = Canned::new(vec![]);
+    let extractor = FakeYtDlp::broken(ExtractError::Unavailable("gone".into()));
+    let song = tagged("v=dQw4w9WgXcQ");
+    let (dir, report, _) = run(&song, None, &fetcher, &extractor, &RunToEnd);
+    assert!(report.is_err(), "a song with no audio should not land");
+    let root = dir.path().join("songs");
+    let left: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "something was left in the library: {left:?}"
+    );
+    // And the scratch folder is cleaned up too.
+    let scratch: Vec<PathBuf> = std::fs::read_dir(dir.path().join("scratch"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert!(scratch.is_empty(), "scratch left behind: {scratch:?}");
+}
+
+#[test]
+fn cancelling_stops_and_leaves_the_library_alone() {
+    // The reference's abort is cooperative, polled every 500 ms, and cannot stop a running
+    // subprocess at all.
+    struct StopAtOnce;
+    impl Stop for StopAtOnce {
+        fn stopped(&self) -> bool {
+            true
+        }
+    }
+    let fetcher = Canned::new(vec![]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ");
+    let (dir, report, _) = run(&song, None, &fetcher, &extractor, &StopAtOnce);
+    let report = report.expect("cancelling is not a failure");
+    assert_eq!(report.outcome, Outcome::Cancelled);
+    assert!(std::fs::read_dir(dir.path().join("songs"))
+        .unwrap()
+        .flatten()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn a_cancel_part_way_through_still_leaves_no_half_song() {
+    let flag = AtomicBool::new(false);
+    let fetcher = Canned::new(vec![]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ");
+    // Stop after the first step by flipping the flag from the progress callback.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("songs");
+    let scratch = directory.path().join("scratch");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let plan = plan(SongId(7), SONG, &song, None, None, &root.join("x"));
+    let report = download(
+        &plan,
+        &root,
+        &scratch,
+        1,
+        2,
+        &fetcher,
+        &extractor,
+        &flag,
+        |step| {
+            if matches!(step, Progress::Finished(Kind::Txt)) {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::Cancelled);
+    assert!(std::fs::read_dir(&root).unwrap().flatten().next().is_none());
+}
+
+#[test]
+fn an_image_is_named_for_what_it_is_rather_than_what_the_url_claims() {
+    // Half the covers on fanart.tv are served from a path ending in .jpg and are PNGs. A
+    // library full of PNGs called .jpg is a decoder's problem later.
+    let fetcher = Canned::new(vec![("https://assets.fanart.tv/fanart/coverid", PNG)]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ,co=coverid");
+    let (_dir, report, _) = run(&song, None, &fetcher, &extractor, &RunToEnd);
+    let report = report.unwrap();
+    assert!(
+        report.folder.join("Abba - Waterloo.png").is_file(),
+        "the file was named from the URL rather than its contents"
+    );
+}
+
+#[test]
+fn downloading_a_song_twice_fetches_nothing_the_second_time() {
+    let fetcher = Canned::new(vec![("https://assets.fanart.tv/fanart/coverid", JPEG)]);
+    let extractor = FakeYtDlp::working();
+    let song = tagged("v=dQw4w9WgXcQ,co=coverid");
+    let (dir, report, _) = run(&song, None, &fetcher, &extractor, &RunToEnd);
+    let folder = report.unwrap().folder;
+
+    let held = SyncMeta::read(&folder).unwrap();
+    let again = plan(SongId(7), SONG, &song, None, Some(&held), &folder);
+    assert!(
+        again.steps.is_empty(),
+        "it would fetch {:?} again",
+        again.steps.iter().map(|s| s.kind).collect::<Vec<_>>()
+    );
+    assert_eq!(again.skipped.len(), 4);
+    drop(dir);
+}
+
+// ---------------------------------------------------------------- repair
+
+#[test]
+fn repair_finds_songs_whose_files_have_gone_or_changed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+
+    // One good song.
+    let good = root.join("Good Song");
+    std::fs::create_dir_all(&good).unwrap();
+    std::fs::write(good.join("song.txt"), b"hello").unwrap();
+    let mut meta = SyncMeta::new(SongId(1), 0, 0);
+    meta.put(Resource {
+        kind: Kind::Txt,
+        file: "song.txt".into(),
+        source: "usdb".into(),
+        hash: hash(b"hello"),
+        bytes: 5,
+    });
+    meta.write(&good).unwrap();
+
+    // One whose video was deleted.
+    let broken = root.join("Broken Song");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("song.txt"), b"hello").unwrap();
+    let mut meta = SyncMeta::new(SongId(2), 0, 0);
+    meta.put(Resource {
+        kind: Kind::Txt,
+        file: "song.txt".into(),
+        source: "usdb".into(),
+        hash: hash(b"hello"),
+        bytes: 5,
+    });
+    meta.put(Resource {
+        kind: Kind::Video,
+        file: "gone.webm".into(),
+        source: "https://example.invalid".into(),
+        hash: hash(b"whatever"),
+        bytes: 8,
+    });
+    meta.write(&broken).unwrap();
+
+    // And one nobody downloaded, which is left alone: repairing a song with no sidecar means
+    // deciding what it should have been.
+    let handmade = root.join("Somebody's Own Song");
+    std::fs::create_dir_all(&handmade).unwrap();
+    std::fs::write(handmade.join("song.txt"), b"mine").unwrap();
+
+    let found = rungstar_download::pipeline::needs_repair(root);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].1, SongId(2));
+    assert_eq!(found[0].2, vec![Kind::Video]);
+}
+
+#[test]
+fn a_truncated_file_is_broken_even_though_it_exists() {
+    // The failure a timestamp cannot see: a download interrupted halfway leaves a file that
+    // exists, opens, and plays four seconds of a song.
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path();
+    std::fs::write(folder.join("audio.ogg"), b"the whole thing").unwrap();
+    let mut meta = SyncMeta::new(SongId(1), 0, 0);
+    meta.put(Resource {
+        kind: Kind::Audio,
+        file: "audio.ogg".into(),
+        source: "x".into(),
+        hash: hash(b"the whole thing"),
+        bytes: 15,
+    });
+    assert!(meta.broken(folder).is_empty());
+
+    std::fs::write(folder.join("audio.ogg"), b"the whole").unwrap();
+    assert_eq!(meta.broken(folder), vec![Kind::Audio]);
+}
+
+#[test]
+fn a_sidecar_from_a_later_build_is_not_guessed_at() {
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path();
+    std::fs::write(
+        SyncMeta::path(folder),
+        r#"{"version":99,"usdb_id":1,"usdb_mtime":0,"fetched_at":0,"resources":[]}"#,
+    )
+    .unwrap();
+    assert!(
+        SyncMeta::read(folder).is_none(),
+        "a newer file was read as if this build understood it"
+    );
+}
+
+#[test]
+fn a_song_edited_on_usdb_is_seen_as_stale() {
+    let meta = SyncMeta::new(SongId(1), 1000, 0);
+    assert!(!meta.stale(1000));
+    assert!(!meta.stale(999));
+    assert!(meta.stale(1001));
+}
+
+// ---------------------------------------------------------------- yt-dlp
+
+#[test]
+fn the_extraction_command_asks_for_what_the_game_can_play() {
+    let into = Path::new("/songs/x");
+    let audio = arguments("https://youtu.be/abc", true, into, "Abba - Waterloo");
+    assert!(audio.contains(&"--no-playlist".to_owned()), "{audio:?}");
+    assert!(audio.contains(&"-x".to_owned()), "audio only");
+    assert!(audio.iter().any(|a| a.contains("bestaudio")));
+    assert!(audio.last().is_some_and(|url| url.contains("youtu.be")));
+    // Nothing but the media itself belongs in a song folder.
+    assert!(audio.contains(&"--no-write-info-json".to_owned()));
+    assert!(audio.contains(&"--no-write-thumbnail".to_owned()));
+
+    let video = arguments("https://youtu.be/abc", false, into, "Abba - Waterloo");
+    assert!(!video.contains(&"-x".to_owned()));
+    assert!(
+        video.iter().any(|a| a.contains("height<=1080")),
+        "a 4K video is four times the bytes for a picture behind lyrics"
+    );
+}
+
+#[test]
+fn a_dead_link_is_told_apart_from_an_unlucky_one() {
+    // Retrying an age-gated video four times with exponential backoff wastes a minute and
+    // ends in the same place.
+    for dead in [
+        "ERROR: Sign in to confirm your age. This video may be inappropriate",
+        "ERROR: Video unavailable",
+        "ERROR: Private video. Sign in if you've been granted access",
+        "The uploader has not made this video available in your country",
+    ] {
+        assert!(is_permanent(dead), "{dead}");
+    }
+    for temporary in [
+        "ERROR: unable to download video data: HTTP Error 503",
+        "WARNING: unable to extract player version; retrying",
+        "ERROR: [Errno 11001] getaddrinfo failed",
+    ] {
+        assert!(!is_permanent(temporary), "{temporary}");
+    }
+}
+
+#[test]
+fn the_written_file_is_found_by_its_stem_and_partials_are_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let into = directory.path();
+    std::fs::write(into.join("Song.part"), b"half").unwrap();
+    std::fs::write(into.join("Song.ytdl"), b"bookkeeping").unwrap();
+    assert_eq!(written(into, "Song"), None, "a partial is not the file");
+
+    std::fs::write(into.join("Song.webm"), b"the whole thing").unwrap();
+    assert_eq!(written(into, "Song"), Some(into.join("Song.webm")));
+    assert_eq!(written(into, "Other"), None);
+}

@@ -1282,6 +1282,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rungstar-download"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rungstar-song",
+ "rungstar-usdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "rungstar-library"
 version = "0.1.0"
 dependencies = [
