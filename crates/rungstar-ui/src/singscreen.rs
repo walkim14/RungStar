@@ -852,17 +852,17 @@ impl SingScreen {
                     // as "yours, not yet sung" without competing with the bar that fills it in
                     // once it has been.
                     Some(colour) => {
-                        list.panel(rect, colour.alpha(0.22), note_h / 2.0);
+                        // Golden fills the bubble, as it does in a solo song — it is the
+                        // loudest thing on the staff and should look it. The outline carries
+                        // whose it is, which is enough; a gold streak through a part-coloured
+                        // bubble was trying to say both things in the same place.
+                        let fill = if note.kind.is_golden() {
+                            style.warning
+                        } else {
+                            colour.alpha(0.22)
+                        };
+                        list.panel(rect, fill, note_h / 2.0);
                         list.outline(rect, colour.alpha(0.85), 2.0, note_h / 2.0);
-                        // Golden is worth double, and that has to survive being coloured by
-                        // part, so it keeps a gold core rather than a gold outline.
-                        if note.kind.is_golden() {
-                            list.panel(
-                                rect.inset_xy(0.0, note_h * 0.3),
-                                style.warning.alpha(0.9),
-                                note_h * 0.2,
-                            );
-                        }
                     }
                     None => {
                         let colour = if note.kind.is_golden() {
