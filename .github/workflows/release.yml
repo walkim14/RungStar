@@ -107,6 +107,10 @@ jobs:
           curl -fsSL -o flatpak-cargo-generator.py \
             https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
           python3 flatpak-cargo-generator.py Cargo.lock -o packaging/linux/cargo-sources.json
+      # Bundled so a fresh Deck install can download a song straight away. Pinned by checksum
+      # because the build has no network; the game keeps a newer one in its data directory.
+      - name: Pin yt-dlp for the bundle
+        run: bash packaging/linux/fetch-ytdlp.sh
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: rungstar.flatpak

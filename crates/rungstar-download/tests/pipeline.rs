@@ -721,3 +721,48 @@ fn a_fetched_copy_is_preferred_over_a_bundled_one() {
     let fetched = tool::install(data, &vec![3u8; 600_000]).unwrap();
     assert_eq!(tool::find(data), Some(fetched));
 }
+
+#[test]
+fn every_delivery_ships_yt_dlp() {
+    // Three packaging paths, and one of them silently did not: the AppImage script got a
+    // bundled copy and the Flatpak manifest did not, which is the delivery that matters on a
+    // Steam Deck. A repository-level invariant is the only place that catches that, because
+    // nothing about the code changes when a packaging file drops a line.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |relative: &str| {
+        let path = root.join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    };
+
+    assert!(
+        read("packaging/windows/portable.ps1").contains("yt-dlp.exe"),
+        "the Windows zip does not bundle yt-dlp"
+    );
+    assert!(
+        read("packaging/linux/appimage.sh").contains("yt-dlp_linux"),
+        "the AppImage does not bundle yt-dlp"
+    );
+
+    // The Flatpak needs both halves: the generated source and the install command. Either one
+    // alone fails the build rather than shipping without it, but the manifest is where a
+    // half-finished edit would sit unnoticed.
+    let manifest = read("packaging/linux/de.rungstar.RungStar.yml");
+    assert!(
+        manifest.contains("ytdlp-source.json"),
+        "the Flatpak declares no yt-dlp source"
+    );
+    assert!(
+        manifest.contains("install -Dm755 yt-dlp /app/bin/yt-dlp"),
+        "the Flatpak fetches yt-dlp and never installs it"
+    );
+    assert!(
+        read("packaging/linux/fetch-ytdlp.sh").contains("sha256"),
+        "the Flatpak source is not pinned by checksum, which an offline build needs"
+    );
+
+    // And the file the generator writes is not committed, because it names one release.
+    assert!(
+        read(".gitignore").contains("ytdlp-source.json"),
+        "a pinned yt-dlp release is committed and will go stale"
+    );
+}

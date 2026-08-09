@@ -11,14 +11,32 @@ Four ways out of the build tree, and one thing that has to be dropped in by hand
 
 ## yt-dlp
 
-Both the Windows and the AppImage scripts fetch the latest yt-dlp and put it beside the
-executable, so a fresh install can download a song immediately. The game looks there — after
-the PATH, and after anything newer it has fetched itself into `%APPDATA%\RungStar	ools`.
+All three deliveries ship one, so a fresh install can download a song immediately. The game
+looks for it in three places, in this order: the **PATH**, then anything **newer it fetched
+itself** into its data directory, then the copy **beside the executable**.
 
-It is bundled but not pinned, and both of those matter. Bundled, because a release that cannot
-download until it has downloaded something else has a hole in it. Not pinned, because YouTube
-changes its extraction often enough that a copy frozen at release time stops working within a
-few months — which is the whole reason the game shells out to it rather than reimplementing it.
+| Delivery | How it gets there |
+|---|---|
+| Windows zip and installer | `portable.ps1` downloads it beside `rungstar.exe` |
+| AppImage | `appimage.sh` downloads it into `usr/bin` |
+| Flatpak | `fetch-ytdlp.sh` pins it by checksum; the manifest installs `/app/bin/yt-dlp` |
+
+The Flatpak is the awkward one and the one that matters on a Steam Deck. `flatpak-builder`
+builds with **no network** — deliberately, so a build can be reproduced — so a bundled binary
+cannot be curled from a build command the way the other two do it. It has to be a declared
+source with a checksum, which is what `fetch-ytdlp.sh` generates. Run it before
+`flatpak-builder`, exactly as with `cargo-sources.json`; CI does both.
+
+That copy is pinned at build time and can never update itself, because `/app` is read-only.
+That is fine and is why the search order is what it is: the game fetches a current yt-dlp into
+`~/.var/app/de.rungstar.RungStar/data/rungstar/tools` when it needs one, and prefers it over the bundled
+copy from then on. YouTube changes its extraction often enough that a binary frozen at release
+time stops working within a few months, which is the whole reason the game shells out to a
+separate tool rather than reimplementing extraction.
+
+The Linux asset is `yt-dlp_linux`, the standalone build, not the plain `yt-dlp` zipapp: the
+zipapp needs a Python interpreter on the machine, and a Steam Deck in Game Mode may not have a
+usable one.
 
 ## The font
 

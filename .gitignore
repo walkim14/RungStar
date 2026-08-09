@@ -10,3 +10,4 @@ assets/fonts/*.otf
 # Packaged output.
 target/package/
 packaging/linux/cargo-sources.json
+packaging/linux/ytdlp-source.json
