@@ -60,9 +60,10 @@ modules:
       # newer one in ~/.var/app/de.rungstar.RungStar/data/tools and prefers that over this.
       - install -Dm755 yt-dlp /app/bin/yt-dlp
       - install -Dm644 -t /app/share/rungstar/assets/themes assets/themes/*
-      # The font, when packaging has put one there. The build does not fail without it — the
-      # game falls back to a system face and says so — but a release should carry one.
-      - 'if ls assets/fonts/*.ttf >/dev/null 2>&1; then install -Dm644 -t /app/share/rungstar/assets/fonts assets/fonts/*.ttf; fi'
+      # Fonts and interface sounds. Both are committed, so an install line that silently did
+      # nothing would hide a broken checkout rather than tolerate a missing extra.
+      - install -Dm644 -t /app/share/rungstar/assets/fonts assets/fonts/*.ttf assets/fonts/OFL-*.txt
+      - install -Dm644 -t /app/share/rungstar/assets/sounds assets/sounds/*.wav
       - install -Dm644 packaging/linux/de.rungstar.RungStar.desktop /app/share/applications/de.rungstar.RungStar.desktop
       - install -Dm644 packaging/linux/de.rungstar.RungStar.metainfo.xml /app/share/metainfo/de.rungstar.RungStar.metainfo.xml
       - install -Dm644 packaging/linux/rungstar.svg /app/share/icons/hicolor/scalable/apps/de.rungstar.RungStar.svg

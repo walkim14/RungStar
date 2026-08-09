@@ -3,10 +3,6 @@
 *.pdb
 .env
 
-# Fonts are dropped in at packaging time; see assets/fonts/README.md.
-assets/fonts/*.ttf
-assets/fonts/*.otf
-
 # Packaged output.
 target/package/
 packaging/linux/cargo-sources.json

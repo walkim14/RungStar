@@ -94,6 +94,11 @@ impl Renderer {
         Ok(())
     }
 
+    /// What is being drawn with.
+    pub fn fonts(&self) -> &FontSet {
+        &self.fonts
+    }
+
     /// Swap the fonts, dropping every cached glyph — they were drawn with the old face.
     pub fn set_fonts(&mut self, fonts: FontSet) {
         self.fonts = fonts;

@@ -6,6 +6,7 @@
 //! replaced — the SDL backend and the wgpu one that follows consume the same list.
 
 pub mod browse;
+pub mod chime;
 pub mod color;
 pub mod draw;
 pub mod editorscreen;
@@ -27,6 +28,7 @@ pub mod theme;
 pub mod usdbscreen;
 
 pub use browse::{Browser, Layout, Placement};
+pub use chime::Chime;
 pub use color::Color;
 pub use draw::{Align, Command, DrawList, Font, ImageId, TextStyle, VAlign};
 pub use geom::{Anchor, Point, Projection, Rect, DESIGN_HEIGHT};

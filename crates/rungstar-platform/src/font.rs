@@ -15,8 +15,27 @@ use std::collections::HashMap;
 use rungstar_ui::draw::Font;
 
 /// A loaded face plus the metrics needed to lay a line out.
+///
+/// Carries a **fallback chain**. No single face worth shipping covers everything a real song
+/// library contains: measured over 8,134 songs, 99.94% of the text is ASCII, but the remainder
+/// includes 28,000 accented letters, 200 Cyrillic characters, a few hundred CJK brackets and a
+/// handful of Hangul — and a face chosen for how it looks will always be missing some of it.
+///
+/// Without a chain the choice is between a face with character and a face with coverage, and
+/// the failure mode of choosing wrong is silent: an empty box where a letter should be. That
+/// already happened once, with the star glyphs in the USDB ratings.
 pub struct Face {
     font: fontdue::Font,
+    /// Tried in order for any character `font` cannot draw.
+    fallbacks: Vec<fontdue::Font>,
+    /// Where this face came from, for `--check` to report.
+    ///
+    /// Which face is in use is otherwise invisible until somebody looks at the screen, and
+    /// the whole failure mode being guarded against here is a machine quietly borrowing a
+    /// different one.
+    source: String,
+    /// The names of the faces behind it, in order.
+    behind: Vec<String>,
 }
 
 /// Why text could not be set up.
@@ -42,7 +61,55 @@ impl Face {
                 reason: reason.to_owned(),
             },
         )?;
-        Ok(Self { font })
+        Ok(Self {
+            font,
+            fallbacks: Vec::new(),
+            source: short_name(label),
+            behind: Vec::new(),
+        })
+    }
+
+    /// What this face is, as a name worth printing.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The faces tried behind it, nearest first.
+    pub fn behind(&self) -> &[String] {
+        &self.behind
+    }
+
+    /// Add a face to try for characters this one does not have.
+    pub fn with_fallback(mut self, other: Face) -> Self {
+        self.fallbacks.push(other.font);
+        self.fallbacks.extend(other.fallbacks);
+        self.behind.push(other.source);
+        self.behind.extend(other.behind);
+        self
+    }
+
+    /// The face that can actually draw this character.
+    ///
+    /// The main face when it has the glyph, otherwise the first fallback that does. When
+    /// nothing has it the main face is returned anyway, so the result is its notdef box —
+    /// which is at least a consistent box rather than a missing advance.
+    pub(crate) fn for_char(&self, c: char) -> &fontdue::Font {
+        if self.font.lookup_glyph_index(c) != 0 {
+            return &self.font;
+        }
+        self.fallbacks
+            .iter()
+            .find(|face| face.lookup_glyph_index(c) != 0)
+            .unwrap_or(&self.font)
+    }
+
+    /// Whether anything in the chain can draw this character.
+    pub fn has(&self, c: char) -> bool {
+        self.font.lookup_glyph_index(c) != 0
+            || self
+                .fallbacks
+                .iter()
+                .any(|face| face.lookup_glyph_index(c) != 0)
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, FontError> {
@@ -59,7 +126,7 @@ impl Face {
     /// with what [`Atlas`] will lay out — both walk the same metrics.
     pub fn width(&self, text: &str, size: f32) -> f32 {
         text.chars()
-            .map(|c| self.font.metrics(c, size).advance_width)
+            .map(|c| self.for_char(c).metrics(c, size).advance_width)
             .sum()
     }
 }
@@ -70,25 +137,13 @@ impl Face {
 /// machine and produces a different-looking game on every other one; a Flatpak has no system
 /// fonts to borrow at all beyond what the runtime happens to carry.
 ///
-/// `assets/fonts/` is empty in the repository on purpose — a font binary is a megabyte of
-/// something nobody reviews in a diff. Packaging drops one in; see `packaging/README.md`.
+/// The faces live in `assets/fonts/` and are committed, not dropped in at packaging time. A
+/// font binary is a megabyte nobody reviews in a diff, which was the argument for keeping it
+/// out — but the cost of keeping it out was that the game looked different on every machine and
+/// nobody saw the shipped one until release. `crates/rungstar-platform/tests/fonts.rs` is what
+/// makes them reviewable instead: it asserts what they can actually draw.
 fn bundled(name: &str) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(beside) = exe.parent() {
-            paths.push(beside.join("assets").join("fonts").join(name));
-            // One level up as well, for `target/release/rungstar` run from the source tree.
-            if let Some(up) = beside.parent() {
-                paths.push(up.join("assets").join("fonts").join(name));
-            }
-        }
-    }
-    paths.push(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/fonts")
-            .join(name),
-    );
-    paths
+    crate::assets::asset_paths("fonts", name)
 }
 
 /// Where the platform looks for a font when the theme does not name one that exists.
@@ -110,6 +165,80 @@ fn system_font_candidates() -> Vec<std::path::PathBuf> {
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/run/host/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ] {
+            paths.push(std::path::PathBuf::from(path));
+        }
+    }
+    paths
+}
+
+/// Characters a chain has to be able to draw, one per script a real library turns out to use.
+///
+/// Measured over 8,134 songs: 99.94% of the text is ASCII, and the remainder is 160,908 curly
+/// quotes, 27,868 accented letters, 202 Cyrillic characters, a few hundred CJK brackets and a
+/// handful of Hangul. One representative of each is enough — a face with `д` has the alphabet.
+///
+/// This is also what stops the chain being built out of everything on the machine. Adding a
+/// face costs parsing a megabyte, and until this existed the game parsed ten of them three
+/// times over at startup, for coverage it mostly already had.
+const PROBE: &[char] = &[
+    '\u{2019}', // ’ — the single most common non-ASCII character in a song library
+    '\u{00F1}', // ñ
+    '\u{0153}', // œ
+    '\u{20AC}', // €
+    '\u{0434}', // д — Cyrillic
+    '\u{03B1}', // α — Greek
+    '\u{300C}', // 「 — CJK punctuation, in Japanese song titles
+    '\u{C228}', // 숨 — Hangul
+    '\u{2605}', // ★ — the star that drew as an empty box on the USDB screen
+    '\u{266A}', // ♪
+];
+
+/// Put coverage faces behind a chosen one, and stop as soon as there is nothing left to cover.
+///
+/// Greedy rather than exhaustive: a candidate joins the chain only if it draws something the
+/// chain cannot already draw, and the search stops once every [`PROBE`] character is covered.
+/// A face that adds nothing is not free — it is a megabyte parsed and held — and the first
+/// version of this added every readable font on the machine, including the chosen face a
+/// second time.
+fn with_coverage(face: Face) -> Face {
+    let mut chained = face;
+    let mut wanted: Vec<char> = PROBE.iter().copied().filter(|c| !chained.has(*c)).collect();
+    for candidate in coverage_candidates() {
+        if wanted.is_empty() {
+            break;
+        }
+        if !candidate.exists() {
+            continue;
+        }
+        let Ok(other) = Face::load(&candidate) else {
+            continue;
+        };
+        if !wanted.iter().any(|c| other.has(*c)) {
+            continue;
+        }
+        wanted.retain(|c| !other.has(*c));
+        chained = chained.with_fallback(other);
+    }
+    chained
+}
+
+/// Faces worth having behind the chosen one, widest coverage first.
+fn coverage_candidates() -> Vec<std::path::PathBuf> {
+    let mut paths = bundled("RungStar-Fallback.ttf");
+    // The system's own faces after that. On Windows Segoe UI covers Cyrillic and Greek, and
+    // the CJK face covers the brackets a handful of Japanese songs use in their titles.
+    paths.extend(system_font_candidates());
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
+        for name in ["msgothic.ttc", "malgun.ttf", "seguisym.ttf"] {
+            paths.push(std::path::Path::new(&root).join("Fonts").join(name));
+        }
+    } else {
+        for path in [
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ] {
             paths.push(std::path::PathBuf::from(path));
         }
@@ -168,15 +297,21 @@ impl FontSet {
         // it: one family drawn at one weight reads better than two families.
         let bold_face = Self::load_or_system(bold, &system_bold_candidates())
             .or_else(|_| Self::load_or_system(bold, &system_font_candidates()))?;
+        // Lyrics are the one thing read from across a room, so they get their own heavier
+        // face rather than the heading weight.
         let lyrics_face = match lyrics.filter(|p| p.exists()) {
             Some(path) => Face::load(path)?,
-            None => Self::load_or_system(None, &system_bold_candidates())
+            None => Self::load_or_system(None, &bundled("RungStar-Lyrics.ttf"))
+                .or_else(|_| Self::load_or_system(None, &system_bold_candidates()))
                 .or_else(|_| Self::load_or_system(None, &system_font_candidates()))?,
         };
+        // Every face gets the same chain behind it, so a Cyrillic title is drawn the same way
+        // wherever it appears and a face is chosen for how it looks rather than for what it
+        // happens to contain.
         Ok(Self {
-            regular: regular_face,
-            bold: bold_face,
-            lyrics: lyrics_face,
+            regular: with_coverage(regular_face),
+            bold: with_coverage(bold_face),
+            lyrics: with_coverage(lyrics_face),
         })
     }
 
@@ -214,6 +349,29 @@ impl FontSet {
     /// Width of a string in pixels.
     pub fn width(&self, font: Font, text: &str, size: f32) -> f32 {
         self.face(font).width(text, size)
+    }
+
+    /// What is actually being drawn with, for `--check`.
+    ///
+    /// `Poppins-Regular.ttf + FiraSans-Regular.ttf` on a good day, `segoeui.ttf` on a machine
+    /// where the bundled faces did not make it into the build — which is precisely the
+    /// difference nobody notices until a release is in front of somebody.
+    pub fn describe(&self) -> String {
+        let one = |face: &Face| {
+            let mut name = face.source().to_owned();
+            if !face.behind().is_empty() {
+                name.push_str(" + ");
+                name.push_str(&face.behind().join(" + "));
+            }
+            name
+        };
+        let regular = one(&self.regular);
+        let lyrics = one(&self.lyrics);
+        if regular == lyrics {
+            regular
+        } else {
+            format!("{regular}, lyrics {lyrics}")
+        }
     }
 }
 
@@ -299,7 +457,9 @@ impl Atlas {
         if let Some(glyph) = self.glyphs.get(&c) {
             return *glyph;
         }
-        let (metrics, bitmap) = face.font.rasterize(c, size);
+        // Through the chain, so a character the chosen face lacks is drawn by one that has
+        // it rather than coming out as an empty box.
+        let (metrics, bitmap) = face.for_char(c).rasterize(c, size);
         let (w, h) = (metrics.width as u32, metrics.height as u32);
 
         // A space has metrics but no pixels. It still needs an entry, or every space would be
@@ -436,4 +596,12 @@ impl AtlasCache {
     pub fn clear(&mut self) {
         self.atlases.clear();
     }
+}
+
+/// A path reduced to something worth printing on one line.
+fn short_name(label: &str) -> String {
+    std::path::Path::new(label)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| label.to_owned())
 }

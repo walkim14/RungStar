@@ -18,9 +18,10 @@ use rungstar_library::{
 };
 use rungstar_platform::font::FontSet;
 use rungstar_platform::render::Renderer;
-use rungstar_platform::{Playback, SdlCapture};
+use rungstar_platform::{Playback, SdlCapture, Sfx, Sound};
 use rungstar_profile::stats::View;
 use rungstar_profile::{Profiles, Score};
+use rungstar_ui::chime::{self, Chime};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::editorscreen::{EditorOutcome, EditorScreen};
 use rungstar_ui::geom::Rect;
@@ -567,8 +568,7 @@ impl App {
                         self.request_sing(id);
                     }
                     None => {
-                        self.status = "that song has no chorus marked and is too short to guess one"
-                            .to_owned()
+                        self.refuse("that song has no chorus marked and is too short to guess one")
                     }
                 }
             }
@@ -1046,12 +1046,16 @@ impl App {
                 match outcome {
                     OptionsOutcome::Pop => Transition::Pop,
                     OptionsOutcome::Changed => {
+                        // A value stepping is the same kind of event as a cursor moving, and
+                        // wants the same quiet blip rather than a confirm.
+                        chime::emit(Chime::Move);
                         self.restyle();
                         self.settings_dirty = true;
                         self.save_settings();
                         Transition::None
                     }
                     OptionsOutcome::Run(action) => {
+                        chime::emit(Chime::Select);
                         self.run_action(action);
                         Transition::None
                     }
@@ -1155,6 +1159,20 @@ impl App {
     }
 
     fn apply(&mut self, transition: Transition) {
+        // The sound follows what the input *did*, not which key was pressed. Leaving a screen
+        // sounds like leaving whether Back, Escape or a Close row did it, and a Confirm that
+        // opened nothing makes no noise. Doing it here rather than in the screens is also what
+        // keeps `rungstar-ui` free of anything that plays a sound.
+        match &transition {
+            Transition::Pop => chime::emit(Chime::Back),
+            Transition::Push(_) => chime::emit(Chime::Select),
+            Transition::Sing(_) => {
+                // The browser's own confirm would otherwise land under the flourish.
+                chime::clear();
+                chime::emit(Chime::Start);
+            }
+            Transition::None | Transition::Quit => {}
+        }
         match transition {
             Transition::None => {}
             Transition::Pop => {
@@ -1242,7 +1260,7 @@ impl App {
                             self.next_plan = session::Plan::default();
                             self.pending_sing = Some(id);
                         }
-                        None => self.status = "there are no songs to play".to_owned(),
+                        None => self.refuse("there are no songs to play"),
                     }
                 }
                 Route::Usdb => {
@@ -1279,7 +1297,7 @@ impl App {
     /// Open a song in the editor.
     fn edit_song(&mut self, id: i64) {
         let Ok(Some(entry)) = self.library.song(id) else {
-            self.status = "that song is no longer in the library".to_owned();
+            self.refuse("that song is no longer in the library");
             return;
         };
         match rungstar_editor::Editor::open(&entry.path) {
@@ -1885,33 +1903,48 @@ impl App {
     /// Everything that touches a device lives in the session; the screen is pure and draws
     /// what it is handed. That is why this is a screen on the same stack as the browser
     /// rather than a second window.
+    /// Say why something did not happen, and make the noise that goes with it.
+    ///
+    /// One call rather than a message here and a sound there, because the two drifting apart
+    /// is how a game ends up with a silent refusal or a buzz with no explanation.
+    fn refuse(&mut self, why: impl Into<String>) {
+        self.status = why.into();
+        // Whatever was queued was for the thing that is not going to happen — most often the
+        // Start flourish from the transition that led here.
+        chime::clear();
+        chime::emit(Chime::No);
+    }
+
     fn sing(&mut self, id: i64, audio: &sdl3::AudioSubsystem, capture: SdlCapture) {
         // Also here, not only in the picker: a song can be started without passing through it.
         self.assume_the_only_singer();
         let Ok(Some(entry)) = self.library.song(id) else {
-            self.status = "that song is no longer in the library".to_owned();
+            self.refuse("that song is no longer in the library");
             return;
         };
         let Some(directory) = entry.directory().map(Path::to_path_buf) else {
-            self.status = "that song has no folder".to_owned();
+            self.refuse("that song has no folder");
             return;
         };
         let Some(audio_name) = entry.audio_file.clone() else {
-            self.status = format!("{} has no audio file", entry.display_name());
+            self.refuse(format!("{} has no audio file", entry.display_name()));
             return;
         };
 
         let bytes = match std::fs::read(&entry.path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.status = format!("could not read the song: {error}");
+                self.refuse(format!("could not read the song: {error}"));
                 return;
             }
         };
         let parsed = match rungstar_song::SongTxt::parse_bytes(&bytes) {
             Ok(parsed) => parsed,
             Err(error) => {
-                self.status = format!("{} is not a usable song: {error}", entry.display_name());
+                self.refuse(format!(
+                    "{} is not a usable song: {error}",
+                    entry.display_name()
+                ));
                 return;
             }
         };
@@ -1950,7 +1983,7 @@ impl App {
         let session = match session {
             Ok(session) => session,
             Err(error) => {
-                self.status = format!("could not start the song: {error}");
+                self.refuse(format!("could not start the song: {error}"));
                 return;
             }
         };
@@ -2349,19 +2382,21 @@ fn main() -> Result<()> {
     let canvas = window.into_canvas();
 
     let fonts = FontSet::load(None, None, None).context(
-        "loading a font. No font is bundled yet, so the game borrows one from the system; \
-         install a standard font package if this fails",
+        "loading a font. The shipped faces live in assets/fonts beside the executable; if          they are missing the game borrows one from the system, and this fails only when          there is nothing to borrow either",
     )?;
     let mut renderer = Renderer::new(canvas, fonts).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let audio_subsystem = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
+    // Never fails: a machine with no sound card gets a quiet game rather than no game.
+    let mut sfx = Sfx::new(&audio_subsystem);
+    sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut text_input_on = false;
     let mut list = DrawList::new();
     let mut last = Instant::now();
 
     if check_only {
-        return self_check(&mut app, &mut renderer, &mut list);
+        return self_check(&mut app, &mut renderer, &mut list, &mut sfx);
     }
 
     while app.running {
@@ -2489,6 +2524,7 @@ fn main() -> Result<()> {
 
         if std::mem::take(&mut app.settings_dirty) {
             app.apply_settings(renderer.canvas().window_mut());
+            sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
             let _ = renderer.resize();
         }
         // SDL3 delivers no `TextInput` events until text input is started for the window, and
@@ -2582,6 +2618,7 @@ fn main() -> Result<()> {
                         } else {
                             // Recorded outside the borrow, since writing needs the whole app.
                             finished_song = true;
+                            chime::emit(Chime::Finish);
                             // The scores go up rather than the screen closing: in a party the
                             // result is the point, and popping straight back to the browser
                             // throws it away before anybody has read it.
@@ -2607,6 +2644,23 @@ fn main() -> Result<()> {
                 app.jukebox = false;
             }
         }
+
+        // Everything the frame did that is worth hearing, played in one place. Draining after
+        // the whole frame rather than per event means a Confirm that also moved a cursor is one
+        // sound, and a held direction that stepped four times is still one blip.
+        for heard in chime::take() {
+            sfx.play(match heard {
+                Chime::Move => Sound::Move,
+                Chime::Select => Sound::Select,
+                Chime::Back => Sound::Back,
+                Chime::Start => Sound::Start,
+                Chime::Golden => Sound::Golden,
+                Chime::Line => Sound::Line,
+                Chime::Finish => Sound::Finish,
+                Chime::No => Sound::No,
+            });
+        }
+        sfx.tick();
 
         list.clear();
         app.draw(&mut list, area);
@@ -2649,12 +2703,30 @@ fn main() -> Result<()> {
 /// here — a font that will not load, a theme that resolves to nothing, a layout that divides
 /// by a zero-width panel — are per screen and would otherwise wait for somebody to navigate
 /// there.
-fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Result<()> {
+fn self_check(
+    app: &mut App,
+    renderer: &mut Renderer,
+    list: &mut DrawList,
+    sfx: &mut Sfx,
+) -> Result<()> {
     let area = renderer.projection().screen();
     println!("window      {:.0}x{:.0} design units", area.w, area.h);
     println!(
         "theme       {} / {}",
         app.theme.meta.name, app.settings.appearance.skin
+    );
+    println!("fonts       {}", renderer.fonts().describe());
+    // Not just "the files parsed": a sound that loads and never reaches the device is the
+    // failure worth catching, and the two broke independently while this was being written.
+    sfx.set_volume(1.0);
+    sfx.play(Sound::Start);
+    sfx.tick();
+    println!(
+        "sounds      {}/{} loaded, device {}, {} bytes queued",
+        sfx.loaded(),
+        Sound::ALL.len(),
+        if sfx.has_device() { "open" } else { "none" },
+        sfx.queued()
     );
     for root in app.song_roots() {
         println!("songs from  {}", root.display());

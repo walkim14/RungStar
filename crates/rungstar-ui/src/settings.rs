@@ -345,6 +345,11 @@ pub struct SoundSettings {
     /// Master, music and preview volumes, `0..=100`.
     pub master_volume: u8,
     pub preview_volume: u8,
+    /// How loud the interface sounds are, `0..=100`. Zero silences them.
+    ///
+    /// Below the music by default. A menu blip is heard hundreds of times an hour and the
+    /// music is the thing anybody came for.
+    pub effects_volume: u8,
     /// Seconds a preview takes to fade in. Zero cuts straight in.
     pub preview_fade: f32,
     /// Milliseconds the microphone lags the speakers. The scoring clock is shifted by this.
@@ -372,6 +377,7 @@ impl Default for SoundSettings {
             detector: Detector::default(),
             master_volume: 80,
             preview_volume: 60,
+            effects_volume: 45,
             preview_fade: 0.4,
             // UltraStar's own default, and close to what a USB microphone plus a desktop
             // audio stack actually costs.

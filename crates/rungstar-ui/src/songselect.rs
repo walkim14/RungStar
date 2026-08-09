@@ -719,6 +719,7 @@ impl SongSelect {
                 if !self.songs.is_empty() {
                     self.browser
                         .jump_to((self.browser.cursor() + 7919) % self.songs.len());
+                    crate::chime::emit(crate::chime::Chime::Move);
                 }
             }
             Input::Type(_) | Input::Backspace | Input::Hover(_) | Input::Click(_) => {}
@@ -761,6 +762,11 @@ impl SongSelect {
                             return Transition::Sing(song.id);
                         }
                     } else {
+                        // A click that only selects. Deliberate, so it makes the same noise as
+                        // steering there would have.
+                        if index != self.browser.cursor() {
+                            crate::chime::emit(crate::chime::Chime::Move);
+                        }
                         self.browser.jump_to(index);
                     }
                 }

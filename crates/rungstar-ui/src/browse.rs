@@ -158,6 +158,12 @@ impl Browser {
     }
 
     /// Jump straight to an index with no animation. Used by search and by "random".
+    /// Put the cursor somewhere directly, without a sound.
+    ///
+    /// Silent because most of what calls this is not the player navigating: re-running a
+    /// search lands the cursor back on the song it was on, and a list arriving from a scan
+    /// does the same. The two places that *are* deliberate — the random jump and a click on a
+    /// song — chime for themselves.
     pub fn jump_to(&mut self, index: usize) {
         if self.count == 0 {
             return;
@@ -180,6 +186,9 @@ impl Browser {
         // The animation follows what actually happened, so a page-down that only had two rows
         // left to give slides by two rather than by a page.
         let moved = (next - self.cursor as isize) as f32;
+        if moved != 0.0 {
+            crate::chime::emit(crate::chime::Chime::Move);
+        }
         self.cursor = next as usize;
         self.lag = (self.lag - moved).clamp(-MAX_LAG, MAX_LAG);
     }

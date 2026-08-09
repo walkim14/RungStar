@@ -38,21 +38,19 @@ The Linux asset is `yt-dlp_linux`, the standalone build, not the plain `yt-dlp` 
 zipapp needs a Python interpreter on the machine, and a Steam Deck in Game Mode may not have a
 usable one.
 
-## The font
+## Fonts and sounds
 
-`assets/fonts/` is empty in the repository, and a packaged build looks there first —
-`RungStar-Regular.ttf` and `RungStar-Bold.ttf`. Drop a face in before packaging.
+`assets/` is committed and every delivery copies it whole — four fonts under `assets/fonts/`
+and eight interface sounds under `assets/sounds/`. Nothing has to be dropped in at packaging
+time, which is the point: the shipped build looks and sounds the way the one on a developer's
+machine does.
 
-It is not committed on purpose. A font binary is a megabyte of something nobody reviews in a
-diff, and picking one is a licensing decision rather than a technical one. Any face whose
-licence permits redistribution works; **DejaVu Sans** and **Noto Sans** are the obvious
-candidates, both cover the Latin, Greek and Cyrillic a real song library contains, and both are
-already on most Linux machines.
+Both are covered by tests rather than by trust — `cargo test -p rungstar-platform` asserts what
+the faces can draw and that every sound file is a WAV the mixer will accept. `assets/fonts/`
+and `assets/sounds/` each carry a README explaining what is in them and how to change them.
 
-Without one the game still starts and borrows a system face — Segoe UI on Windows, DejaVu on
-Linux — and says so if it cannot find either. That is fine for a developer and wrong for a
-release: it makes the game look different on every machine, and a Flatpak has almost no system
-fonts to borrow.
+The game still starts without either: it borrows a system face and stays silent. That is fine
+for a developer and wrong for a release, so every packaging script here copies `assets/`.
 
 ## Windows
 

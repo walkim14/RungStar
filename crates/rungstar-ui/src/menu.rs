@@ -4,6 +4,15 @@
 //! over N items with the same navigation rules, so those rules live here once and are tested
 //! once. The rules themselves are the interesting part: wrapping at the ends, skipping rows
 //! that cannot be selected, and paging by whatever fits on screen.
+//!
+//! Because every menu comes through here, this is also the one place that knows the cursor
+//! *actually moved*, so it is where the move [`Chime`](crate::chime::Chime) is emitted. Doing
+//! it at the key press instead would blip at the bottom of a list that does not wrap, and a
+//! sound for a press that did nothing reads as the input having been missed — which is the
+//! opposite of what it is for. Only the directional methods emit: [`Cursor::set`] is what a
+//! hovering mouse and a re-sorting list call, and neither is the player moving the cursor.
+
+use crate::chime::{emit, Chime};
 
 /// A selection within `count` items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,7 +58,7 @@ impl Cursor {
         if self.count == 0 {
             return;
         }
-        self.index = (self.index as isize + delta).rem_euclid(self.count as isize) as usize;
+        self.moved_to((self.index as isize + delta).rem_euclid(self.count as isize) as usize);
     }
 
     /// Move by `delta` without wrapping, stopping at the ends.
@@ -61,15 +70,23 @@ impl Cursor {
             return;
         }
         let last = self.count as isize - 1;
-        self.index = (self.index as isize + delta).clamp(0, last) as usize;
+        self.moved_to((self.index as isize + delta).clamp(0, last) as usize);
     }
 
     pub fn first(&mut self) {
-        self.index = 0;
+        self.moved_to(0);
     }
 
     pub fn last(&mut self) {
-        self.index = self.count.saturating_sub(1);
+        self.moved_to(self.count.saturating_sub(1));
+    }
+
+    /// Land on an index the player steered to, chiming if that is somewhere new.
+    fn moved_to(&mut self, index: usize) {
+        if index != self.index {
+            self.index = index;
+            emit(Chime::Move);
+        }
     }
 
     /// Move to the next item `selectable` accepts, wrapping, leaving the cursor alone if
@@ -86,7 +103,7 @@ impl Cursor {
         for _ in 0..self.count {
             candidate = (candidate as isize + step).rem_euclid(self.count as isize) as usize;
             if selectable(candidate) {
-                self.index = candidate;
+                self.moved_to(candidate);
                 return;
             }
         }

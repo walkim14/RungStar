@@ -72,9 +72,13 @@ try {
     Write-Warning "could not bundle yt-dlp ($_). The game will fetch it on first download."
 }
 
-$font = Join-Path $out "assets\fonts\RungStar-Regular.ttf"
-if (-not (Test-Path $font)) {
-    Write-Warning "no bundled font in assets/fonts - the build will borrow one from the system. See packaging/README.md."
+# Fonts and sounds are committed, so a missing one is a broken checkout rather than a step
+# somebody forgot. Fail rather than quietly shipping a build that borrows a system face and
+# plays nothing - that difference is invisible until somebody runs the release.
+foreach ($needed in @("assets\fonts\RungStar-Regular.ttf", "assets\sounds\move.wav")) {
+    if (-not (Test-Path (Join-Path $out $needed))) {
+        throw "$needed is missing from the staged build. See packaging/README.md."
+    }
 }
 
 if (Test-Path $zip) { Remove-Item -Force $zip }

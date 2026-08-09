@@ -439,6 +439,11 @@ impl Page {
                     sound.preview_volume as u8, "Preview volume", "Loudness of the clip that plays while browsing.",
                     0.0, 100.0, 5.0, percent
                 ),
+                number_item!(
+                    sound.effects_volume as u8, "Interface sounds",
+                    "Loudness of the menu blips and the sounds while singing. Zero turns them off.",
+                    0.0, 100.0, 5.0, percent
+                ),
                 Item {
                     label: "Preview fade",
                     help: "How long a preview takes to fade in.",

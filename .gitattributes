@@ -1,11 +1,9 @@
-# Source and docs get the platform's line endings on checkout.
-* text=auto
-
-# Song fixtures are byte-exact test data copied from the reference implementation, and two of
-# them deliberately carry CRLF to exercise the reader. Git must not rewrite any of them.
-crates/rungstar-song/tests/fixtures/** -text
-
-# Vendored binaries.
-vendor/sdl3/lib/** binary
-vendor/ffmpeg/bin/** binary
-vendor/ffmpeg/lib/** binary
+# Committed binaries. Git detects these by itself, but a misdetected TTF is a font that will
+# not parse and a misdetected WAV is a burst of noise, and neither failure points at line
+# endings when you go looking for it.
+*.ttf binary
+*.otf binary
+*.ttc binary
+*.wav binary
+*.png binary
+*.jpg binary
