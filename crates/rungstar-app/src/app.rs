@@ -2485,6 +2485,14 @@ fn main() -> Result<()> {
     let mut app = App::new(data_dir)?;
 
     let sdl = sdl3::init().map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Before the window, and before anything else opens a capture device. Listing microphones
+    // has nothing to do with drawing, and somebody running this over SSH or from a Deck's
+    // Konsole should not need a display for it — nor should the game hold a device open while
+    // the listing tries to open the same one.
+    if list_devices {
+        let audio = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
+        return report_devices(&audio);
+    }
     let video = sdl.video().map_err(|e| anyhow::anyhow!("{e}"))?;
     let gamepads = sdl.gamepad().map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut open_pads = Vec::new();
@@ -2513,9 +2521,6 @@ fn main() -> Result<()> {
     let mut renderer = Renderer::new(canvas, fonts).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let audio_subsystem = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
-    if list_devices {
-        return report_devices(&audio_subsystem);
-    }
     // Never fails: a machine with no sound card gets a quiet game rather than no game.
     let mut sfx = Sfx::new(&audio_subsystem);
     sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
