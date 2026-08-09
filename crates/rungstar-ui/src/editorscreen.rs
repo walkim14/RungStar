@@ -762,10 +762,15 @@ impl EditorScreen {
     ) {
         let widgets = Widgets::new(style);
         widgets.scrim(list, area);
-        let row_h = style.gap(3.0);
         // Sized from what is in it rather than from a guess: the heading, the rows, the help
-        // line and the card's own inset. Guessing left the last two rows below the window.
-        let wanted = style.gap(3.2) + row_h * (Item::ALL.len() as f32 + 2.6);
+        // line and the card's own inset. Guessing left the last two rows below the window, and
+        // measuring the rows in spacing units while their text scaled with the Text size
+        // setting put the heading through the first row at anything above 1.0.
+        let heading_size = style.scaled_text(1.2);
+        let row_h = style.row_height(&[style.text_size()]) + style.gap(0.6);
+        let heading_h = style.row_height(&[heading_size]);
+        let help_h = style.row_height(&[style.scaled_text(0.8)]) * 1.4;
+        let wanted = style.gap(3.2) + heading_h + help_h + row_h * Item::ALL.len() as f32;
         let card = area.anchored(
             Anchor::Center,
             (area.w * 0.5).min(760.0),
@@ -774,13 +779,13 @@ impl EditorScreen {
         );
         widgets.card(list, card);
         let inner = card.inset(style.gap(1.6));
-        let (heading, rest) = inner.cut_top(row_h);
+        let (heading, rest) = inner.cut_top(heading_h);
         list.text(
             heading,
             "The whole song",
-            TextStyle::new(style.scaled_text(1.2), style.text).bold(),
+            TextStyle::new(heading_size, style.text).bold(),
         );
-        let (help, rows) = rest.cut_bottom(row_h * 1.6);
+        let (help, rows) = rest.cut_bottom(help_h);
         list.text(
             help,
             Item::ALL[self.menu.min(Item::ALL.len() - 1)].help(),

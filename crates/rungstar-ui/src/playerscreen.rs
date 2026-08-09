@@ -309,7 +309,11 @@ impl PlayerScreen {
         let body = widgets.footer(list, body, hints);
 
         let inner = body.inset(style.gap(2.0));
-        let row_h = style.gap(4.4);
+        // From the name and the history line under it: a constant row put one through the
+        // other as soon as the Text size setting went above 1.0.
+        let name_size = style.text_size();
+        let history_size = style.scaled_text(0.78);
+        let row_h = style.row_height(&[name_size, history_size]) + style.gap(1.0);
 
         for (index, player) in self.players.iter().enumerate() {
             let rect = Rect::new(inner.x, inner.y + row_h * index as f32, inner.w, row_h)
@@ -432,12 +436,16 @@ impl PlayerScreen {
             TextStyle::new(disc.h * 0.5, colour).centered().bold(),
         );
 
+        // The same two sizes the row was measured from, recomputed from the style.
+        let name_size = style.text_size();
+        let history_size = style.scaled_text(0.78);
         let text = rest.inset_xy(style.gap(1.0), 0.0);
-        let (top, bottom) = text.cut_top(text.h * 0.56);
+        let lines = style.stack(text, &[name_size, history_size]);
+        let (top, bottom) = (lines[0], lines[1]);
         list.text(
             top,
             &player.name,
-            TextStyle::new(style.text_size(), style.text)
+            TextStyle::new(name_size, style.text)
                 .bold()
                 .valign(VAlign::Bottom)
                 .overflow(Overflow::Ellipsis),
@@ -450,7 +458,7 @@ impl PlayerScreen {
         list.text(
             bottom,
             history,
-            TextStyle::new(style.scaled_text(0.78), style.muted).valign(VAlign::Top),
+            TextStyle::new(history_size, style.muted).valign(VAlign::Top),
         );
 
         // Whether they are singing, and as which player — the number decides which microphone

@@ -1033,6 +1033,9 @@ impl SongSelect {
         cover: &dyn Fn(i64) -> Option<ImageId>,
     ) {
         self.regions.clear();
+        // A list row holds a title over an artist, so how short it may be is a fact about the
+        // text — and `browse` has no theme in it to work that out for itself.
+        self.browser.row_min = row_min(style);
         let widgets = Widgets::new(style);
         let counted = if self.songs.is_empty() {
             String::new()
@@ -1756,6 +1759,11 @@ impl SongSelect {
 }
 
 /// One row of the list layout.
+/// How short a list row may be, given the two lines of text it holds.
+fn row_min(style: &Style) -> f32 {
+    style.row_height(&[style.text_size(), style.scaled_text(0.8)]) + style.gap(0.6)
+}
+
 fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, selected: bool) {
     let rect = rect.inset_xy(0.0, style.gap(0.25));
     let radius = style.metrics.radius;
@@ -1774,10 +1782,10 @@ fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, se
     } else {
         (style.text, style.muted)
     };
-    let inner = rect.inset_xy(style.gap(1.2), style.gap(0.4));
-    let (top, bottom) = inner.cut_top(inner.h * 0.58);
+    let inner = rect.inset_xy(style.gap(1.2), style.gap(0.3));
+    let lines = style.stack(inner, &[style.text_size(), style.scaled_text(0.8)]);
     list.text(
-        top,
+        lines[0],
         &song.title,
         TextStyle::new(style.text_size(), text)
             .bold()
@@ -1785,7 +1793,7 @@ fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, se
             .overflow(Overflow::Ellipsis),
     );
     list.text(
-        bottom,
+        lines[1],
         &song.artist,
         TextStyle::new(style.scaled_text(0.8), secondary)
             .valign(VAlign::Top)

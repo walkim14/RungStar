@@ -394,12 +394,15 @@ impl Renderer {
         let x = box_px.x + (box_px.w - width) * align_fraction(style.align);
         // Vertical placement uses the cap height rather than the full line height, so a row
         // of text sits where the eye expects rather than being pushed down by descenders no
-        // glyph in it uses.
-        let cap = quantised as f32 * 0.72;
-        // Descenders reach below the baseline, so bottom alignment has to leave room for them.
-        // Putting the baseline on the box edge instead is what makes a label's `g` and `y`
-        // land in the caption underneath it.
-        let descent = quantised as f32 * 0.21;
+        // glyph in it uses. Descenders reach below the baseline, so bottom alignment has to
+        // leave room for them; putting the baseline on the box edge instead is what makes a
+        // label's `g` and `y` land in the caption underneath it.
+        //
+        // The two fractions come from `rungstar-ui` rather than being written here, because a
+        // screen sizing a row has to predict exactly this and a test has to check it without a
+        // window. See `TextStyle::ink`.
+        let cap = quantised as f32 * rungstar_ui::draw::CAP;
+        let descent = quantised as f32 * rungstar_ui::draw::DESCENT;
         let y = match style.valign {
             VAlign::Top => box_px.y + cap,
             VAlign::Middle => box_px.y + (box_px.h + cap) / 2.0,

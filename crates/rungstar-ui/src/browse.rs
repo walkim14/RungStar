@@ -84,6 +84,12 @@ pub struct Placement {
 #[derive(Debug, Clone)]
 pub struct Browser {
     pub layout: Layout,
+    /// The shortest a list row may be, in design units.
+    ///
+    /// Set by the screen from its own text sizes, because this module has no theme in it and
+    /// the row has to hold a title and an artist. A fixed floor was fine until the Text size
+    /// setting went past 1.0, at which point the artist line was drawn through the title.
+    pub row_min: f32,
     count: usize,
     cursor: usize,
     /// How far the view lags the cursor, in items. Eases to zero.
@@ -122,6 +128,7 @@ impl Browser {
             layout: Layout::default(),
             count: 0,
             cursor: 0,
+            row_min: ROW_MIN,
             lag: 0.0,
             grid_columns: 1,
         }
@@ -205,7 +212,7 @@ impl Browser {
     /// How many items a page-up or page-down moves, for the area last laid out.
     pub fn page_size(&self, area: Rect) -> usize {
         match self.layout {
-            Layout::List => rows_in(area).max(1),
+            Layout::List => rows_in(area, self.row_min).max(1),
             Layout::Chessboard => {
                 let (cols, rows) = grid_shape(area);
                 (cols * rows).max(1)
@@ -257,8 +264,8 @@ impl Browser {
     }
 
     fn list_placements(&self, area: Rect) -> Vec<Placement> {
-        let row_h = row_height(area);
-        let visible = rows_in(area);
+        let row_h = row_height(area, self.row_min);
+        let visible = rows_in(area, self.row_min);
         // One extra either side, so a row slides in already drawn rather than appearing.
         let half = (visible / 2) as isize + 1;
         let centre = area.center();
@@ -364,14 +371,22 @@ impl Browser {
 /// Covers shown on the arc, including the front one. Odd, so there is a true centre.
 const ROULETTE_VISIBLE: usize = 9;
 
+/// The shortest a list row is allowed to be when nobody has said otherwise.
+///
+/// A floor rather than the height: rows grow with the area so a tall screen shows more. The
+/// screen raises it to whatever its two lines of text need — see [`Browser::row_min`].
+const ROW_MIN: f32 = 52.0;
+
 /// Design units per list row. Scales with the area so a tall screen shows more, but stays
 /// within a band that keeps text readable and touch targets hittable.
-fn row_height(area: Rect) -> f32 {
-    (area.h / 11.0).clamp(52.0, 96.0)
+fn row_height(area: Rect, minimum: f32) -> f32 {
+    // The upper bound has to clear the lower one. At a large Text size the text needs more
+    // than the old ceiling of 96, and a clamp whose low end exceeds its high end panics.
+    (area.h / 11.0).clamp(minimum, minimum.max(96.0))
 }
 
-fn rows_in(area: Rect) -> usize {
-    (area.h / row_height(area)).floor().max(1.0) as usize
+fn rows_in(area: Rect, minimum: f32) -> usize {
+    (area.h / row_height(area, minimum)).floor().max(1.0) as usize
 }
 
 /// Columns and rows for a chessboard in this area, aiming at roughly square cells.

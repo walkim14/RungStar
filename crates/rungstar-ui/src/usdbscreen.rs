@@ -794,15 +794,18 @@ impl UsdbScreen {
         // USDB has no way to guess that it is a website they have to register on first. Said
         // once at the top and gone the moment they sign in.
         let body = if self.user.is_none() {
-            let (tip, rest) = body.cut_top(style.gap(5.2));
+            let headline = style.text_size();
+            let detail = style.scaled_text(0.85);
+            let (tip, rest) = body.cut_top(style.row_height(&[headline, detail]) + style.gap(1.6));
             let card = tip.inset_xy(style.gap(2.0), style.gap(0.4));
             list.panel(card, style.surface_raised, style.metrics.radius);
-            let inner = card.inset_xy(style.gap(1.4), style.gap(0.4));
-            let (first, second) = inner.cut_top(inner.h * 0.5);
+            let inner = card.inset_xy(style.gap(1.4), style.gap(0.3));
+            let lines = style.stack(inner, &[headline, detail]);
+            let (first, second) = (lines[0], lines[1]);
             list.text(
                 first,
                 "You need a free USDB account to download songs",
-                TextStyle::new(style.text_size(), style.text)
+                TextStyle::new(headline, style.text)
                     .bold()
                     .valign(VAlign::Bottom)
                     .overflow(Overflow::Ellipsis),
@@ -810,7 +813,7 @@ impl UsdbScreen {
             list.text(
                 second,
                 "Register at usdb.animux.de, then sign in here. Browsing and syncing the                  catalogue work without one.",
-                TextStyle::new(style.scaled_text(0.85), style.muted)
+                TextStyle::new(detail, style.muted)
                     .valign(VAlign::Top)
                     .overflow(Overflow::Ellipsis),
             );
@@ -1091,7 +1094,25 @@ impl UsdbScreen {
     }
 
     fn draw_rows(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
-        let row_h = style.gap(3.6);
+        // The "1 of 30" counter gets its own strip rather than being laid over the last row.
+        // It was drawn after the list and outside its clip, so it sat on top of whatever
+        // happened to be at the bottom of the screen.
+        let counter_size = style.scaled_text(0.75);
+        let counter_h = style.row_height(&[counter_size]);
+        // `cut_bottom` returns the strip first and what is left second, which is the way
+        // round that is easy to get backwards.
+        let (area, counter) = if self.rows.len() > 1 {
+            let (strip, rows) = area.cut_bottom(counter_h);
+            (rows, Some(strip))
+        } else {
+            (area, None)
+        };
+
+        // Sized from the title and artist it holds. A constant here meant the artist line
+        // climbed into the title above it as soon as the Text size setting went past 1.0.
+        let title_size = style.text_size();
+        let artist_size = style.scaled_text(0.8);
+        let row_h = style.row_height(&[title_size, artist_size]) + style.gap(0.5);
         let visible = ((area.h / row_h).floor() as usize).max(1);
         self.scroll = self
             .cursor
@@ -1148,18 +1169,18 @@ impl UsdbScreen {
                 }
 
                 let (name, side) = rest.cut_left(rest.w * 0.62);
-                let (top, bottom) = name.cut_top(name.h * 0.56);
+                let lines = style.stack(name, &[title_size, artist_size]);
                 list.text(
-                    top,
+                    lines[0],
                     &row.title,
-                    TextStyle::new(style.text_size(), text)
+                    TextStyle::new(title_size, text)
                         .valign(VAlign::Bottom)
                         .overflow(Overflow::Ellipsis),
                 );
                 list.text(
-                    bottom,
+                    lines[1],
                     &row.artist,
-                    TextStyle::new(style.scaled_text(0.8), muted)
+                    TextStyle::new(artist_size, muted)
                         .valign(VAlign::Top)
                         .overflow(Overflow::Ellipsis),
                 );
@@ -1223,16 +1244,11 @@ impl UsdbScreen {
         });
         self.regions.extend(regions);
 
-        if self.rows.len() > visible {
+        if let Some(counter) = counter.filter(|_| self.rows.len() > visible) {
             list.text(
-                Rect::new(
-                    area.x,
-                    area.bottom() - style.gap(2.0),
-                    area.w,
-                    style.gap(2.0),
-                ),
+                counter,
                 format!("{} of {}", self.cursor + 1, self.rows.len()),
-                TextStyle::new(style.scaled_text(0.75), style.muted).align(Align::End),
+                TextStyle::new(counter_size, style.muted).align(Align::End),
             );
         }
     }

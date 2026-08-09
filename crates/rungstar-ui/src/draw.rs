@@ -33,6 +33,18 @@ pub enum Align {
     End,
 }
 
+/// How far a capital reaches above the baseline, as a fraction of the text size.
+///
+/// The vertical metrics live here rather than in the backend because they are part of the
+/// drawing contract, not a rendering detail: a screen deciding how tall to make a row has to
+/// agree with the thing that draws into it, and when they disagree a caption ends up on top of
+/// the label above it. `rungstar-platform` places baselines with these, and
+/// [`TextStyle::ink`] is how a test sees the same answer with no window open.
+pub const CAP: f32 = 0.72;
+
+/// How far a descender reaches below the baseline, as a fraction of the text size.
+pub const DESCENT: f32 = 0.21;
+
 /// Vertical placement within the text's rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VAlign {
@@ -73,6 +85,44 @@ pub struct TextStyle {
 }
 
 impl TextStyle {
+    /// The band a line of this text actually covers inside `box_rect`.
+    ///
+    /// Not the box: text is placed by its baseline, and the glyphs above and below it can sit
+    /// outside the rectangle they were given. Two rows whose boxes merely touch can therefore
+    /// still collide, which is the bug this exists to make visible.
+    ///
+    /// Only the vertical extent, which is the axis that has to be right — horizontal overflow
+    /// is handled by [`Overflow`] and is visible immediately.
+    pub fn ink(&self, box_rect: crate::geom::Rect) -> (f32, f32) {
+        let cap = self.size * CAP;
+        let descent = self.size * DESCENT;
+        let baseline = match self.valign {
+            VAlign::Top => box_rect.y + cap,
+            VAlign::Middle => box_rect.y + (box_rect.h + cap) / 2.0,
+            VAlign::Bottom => box_rect.y + box_rect.h - descent,
+        };
+        (baseline - cap, baseline + descent)
+    }
+
+    /// The ink height of one line: cap height plus descender, and nothing else.
+    ///
+    /// What a stacked line needs when it is drawn against the top or the bottom of its own
+    /// box, which is how [`crate::theme::Style::stack`] lays them out.
+    pub fn line(size: f32) -> f32 {
+        size * (CAP + DESCENT)
+    }
+
+    /// How tall a box has to be for a line of this text to fit inside it, whatever its
+    /// vertical alignment.
+    ///
+    /// Two descenders' worth rather than one. [`VAlign::Middle`] centres the **cap height**
+    /// rather than the whole ink band — deliberately, because centring the band pushes a line
+    /// of capitals visibly high — so the descenders hang below the middle of the box and a box
+    /// of exactly cap-plus-descent is not enough for them.
+    pub fn height(size: f32) -> f32 {
+        size * (CAP + 2.0 * DESCENT)
+    }
+
     pub fn new(size: f32, color: Color) -> Self {
         Self {
             font: Font::Regular,

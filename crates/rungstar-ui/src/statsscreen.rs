@@ -173,7 +173,7 @@ impl StatsScreen {
         }
 
         // The column headings, because a table of numbers without them is a puzzle.
-        let (heading, table) = inner.cut_top(style.gap(2.6));
+        let (heading, table) = inner.cut_top(style.row_height(&[style.scaled_text(0.75)]));
         let (left, right) = self.view.columns();
         let label_style = TextStyle::new(style.scaled_text(0.75), style.muted);
         // Split where the rows split, so each heading sits over its own column.
@@ -185,7 +185,12 @@ impl StatsScreen {
             style.muted.alpha(0.2),
         );
 
-        let row_h = style.gap(3.2);
+        // From the two lines a row holds rather than from a spacing constant: text scales
+        // with the Text size setting and spacing does not, so a fixed row put the detail line
+        // through the title above it at anything past 1.0.
+        let title_size = style.text_size();
+        let detail_size = style.scaled_text(0.78);
+        let row_h = style.row_height(&[title_size, detail_size]) + style.gap(0.4);
         let visible = ((table.h / row_h).floor() as usize).max(1);
         let first = self
             .scroll
@@ -224,12 +229,15 @@ impl StatsScreen {
                 // The number keeps its own column, so a long song title is cut off before it
                 // reaches the score rather than being drawn underneath it.
                 let (value_box, rest) = rest.cut_right(rest.w * 0.22);
-                let (top, bottom) =
-                    rest.cut_top(rest.h * (if row.detail.is_empty() { 1.0 } else { 0.58 }));
+                let lines = if row.detail.is_empty() {
+                    vec![rest]
+                } else {
+                    style.stack(rest, &[title_size, detail_size])
+                };
                 list.text(
-                    top,
+                    lines[0],
                     &row.label,
-                    TextStyle::new(style.text_size(), style.text)
+                    TextStyle::new(title_size, style.text)
                         .valign(if row.detail.is_empty() {
                             VAlign::Middle
                         } else {
@@ -237,11 +245,11 @@ impl StatsScreen {
                         })
                         .overflow(Overflow::Ellipsis),
                 );
-                if !row.detail.is_empty() {
+                if let Some(under) = lines.get(1) {
                     list.text(
-                        bottom,
+                        *under,
                         &row.detail,
-                        TextStyle::new(style.scaled_text(0.78), style.muted)
+                        TextStyle::new(detail_size, style.muted)
                             .valign(VAlign::Top)
                             .overflow(Overflow::Ellipsis),
                     );
@@ -249,7 +257,7 @@ impl StatsScreen {
                 list.text(
                     value_box,
                     &row.value,
-                    TextStyle::new(style.text_size(), style.text).align(Align::End),
+                    TextStyle::new(title_size, style.text).align(Align::End),
                 );
             }
         });

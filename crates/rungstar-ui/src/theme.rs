@@ -21,6 +21,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
+use crate::draw::TextStyle;
+use crate::geom::Rect;
 
 /// A parsed theme file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +181,51 @@ impl Style {
     /// Spacing in multiples of the base gap.
     pub fn gap(&self, multiple: f32) -> f32 {
         self.metrics.spacing * multiple
+    }
+
+    /// How tall a row holding these lines of text has to be, padding included.
+    ///
+    /// **Rows used to be sized in spacing units while the text in them was sized in text
+    /// units, and only text follows the Text size setting.** At 1.0 a label cleared its caption
+    /// by a unit or two; at 1.6 — which is what somebody playing across a room sets — the two
+    /// were drawn through each other. Deriving the row from its contents is the fix, and it is
+    /// also simply the right way round: a row exists to hold text.
+    pub fn row_height(&self, sizes: &[f32]) -> f32 {
+        // A single line gets room for any alignment, since a one-line row is usually centred.
+        // Stacked lines are laid out against the top and bottom of their own boxes by
+        // [`Self::stack`], so they only need their ink — asking for the centred allowance per
+        // line would make every list twenty per cent shorter for space nothing draws in.
+        let text: f32 = if sizes.len() == 1 {
+            TextStyle::height(sizes[0])
+        } else {
+            sizes.iter().map(|size| TextStyle::line(*size)).sum()
+        };
+        text + self.gap(1.0)
+    }
+
+    /// Stack lines of text down a rectangle, each given the height its own size needs.
+    ///
+    /// Any space left over becomes even leading between the lines and half of it above and
+    /// below, so a roomy row breathes and a tight one still does not collide. When there is
+    /// not enough room the lines are laid out contiguously anyway and run past the bottom
+    /// rather than into each other — [`Self::row_height`] is how a caller avoids that.
+    ///
+    /// Each box is exactly the line's ink, so draw the first against the **bottom** of its box
+    /// and the rest against the **top** of theirs. That is what a label over a caption already
+    /// does, and it is what keeps the pair reading as one thing.
+    pub fn stack(&self, rect: Rect, sizes: &[f32]) -> Vec<Rect> {
+        let heights: Vec<f32> = sizes.iter().map(|size| TextStyle::line(*size)).collect();
+        let needed: f32 = heights.iter().sum();
+        let leading = ((rect.h - needed) / (heights.len() as f32 + 1.0)).max(0.0);
+        let mut y = rect.y + leading;
+        heights
+            .into_iter()
+            .map(|height| {
+                let line = Rect::new(rect.x, y, rect.w, height);
+                y += height + leading;
+                line
+            })
+            .collect()
     }
 }
 

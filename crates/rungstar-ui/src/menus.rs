@@ -172,7 +172,12 @@ impl MainMenu {
             TextStyle::new(style.text_size(), style.muted).valign(VAlign::Top),
         );
 
-        let row_h = style.gap(4.5);
+        // Sized from the two lines it holds rather than from a spacing constant, so raising
+        // the Text size setting makes the rows taller instead of making the caption climb into
+        // the label above it.
+        let label_size = style.scaled_text(1.15);
+        let detail_size = style.scaled_text(0.8);
+        let row_h = style.row_height(&[label_size, detail_size]) + style.gap(0.8);
         let menu = right.anchored(
             Anchor::Center,
             right.w.min(560.0),
@@ -198,19 +203,20 @@ impl MainMenu {
             } else {
                 (style.text, style.muted)
             };
-            let inner = row.inset_xy(style.gap(1.5), style.gap(0.5));
-            let (top, bottom) = inner.cut_top(inner.h * 0.56);
+            let inner = row.inset_xy(style.gap(1.5), style.gap(0.3));
+            let lines = style.stack(inner, &[label_size, detail_size]);
             list.text(
-                top,
+                lines[0],
                 entry.label,
-                TextStyle::new(style.scaled_text(1.15), text)
+                TextStyle::new(label_size, text)
                     .bold()
-                    .valign(VAlign::Bottom),
+                    .valign(VAlign::Bottom)
+                    .overflow(Overflow::Ellipsis),
             );
             list.text(
-                bottom,
+                lines[1],
                 entry.detail,
-                TextStyle::new(style.scaled_text(0.8), secondary)
+                TextStyle::new(detail_size, secondary)
                     .valign(VAlign::Top)
                     .overflow(Overflow::Ellipsis),
             );

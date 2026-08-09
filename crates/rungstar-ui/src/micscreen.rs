@@ -307,7 +307,11 @@ impl MicScreen {
         self.draw_warnings(list, warning_area, style);
 
         let inner = body.inset(style.gap(2.0));
-        let row_h = style.gap(4.0);
+        // The name line and the meter line below it, sized from the text rather than from a
+        // spacing constant so raising the Text size setting grows the row with them.
+        let name_size = style.text_size();
+        let note_size = style.scaled_text(0.78);
+        let row_h = style.row_height(&[name_size, note_size]) + style.gap(0.8);
         let rows = self.rows();
 
         if self.devices.is_empty() {
@@ -378,8 +382,14 @@ impl MicScreen {
             );
         }
 
-        let inner = rect.inset_xy(style.gap(1.2), style.gap(0.4));
-        let (top, bottom) = inner.cut_top(inner.h * 0.55);
+        // The same two sizes the row was measured from. Recomputed rather than threaded
+        // through, because they are a pure function of the style and disagreeing about them
+        // is the whole bug.
+        let name_size = style.text_size();
+        let note_size = style.scaled_text(0.78);
+        let inner = rect.inset_xy(style.gap(1.2), style.gap(0.3));
+        let lines = style.stack(inner, &[name_size, note_size]);
+        let (top, bottom) = (lines[0], lines[1]);
 
         // Device names are long and full of parentheses, so the name gets its own column and
         // is cut off at the edge of it rather than running under the assignment.
@@ -392,7 +402,7 @@ impl MicScreen {
                 name_box.h,
             ),
             name,
-            TextStyle::new(style.text_size(), style.text)
+            TextStyle::new(name_size, style.text)
                 .valign(VAlign::Bottom)
                 .overflow(Overflow::Ellipsis),
         );
@@ -404,7 +414,7 @@ impl MicScreen {
         list.text(
             assignment_box,
             assignment,
-            TextStyle::new(style.text_size(), colour)
+            TextStyle::new(name_size, colour)
                 .align(Align::End)
                 .valign(VAlign::Bottom),
         );
@@ -448,7 +458,9 @@ impl MicScreen {
         list.text(
             label,
             note,
-            TextStyle::new(style.scaled_text(0.78), tint).align(Align::End),
+            TextStyle::new(note_size, tint)
+                .align(Align::End)
+                .valign(VAlign::Top),
         );
     }
 
