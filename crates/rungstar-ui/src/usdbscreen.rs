@@ -24,6 +24,8 @@ pub enum Mode {
     Browsing,
     /// Typing a search.
     Searching,
+    /// The filter panel.
+    Filtering,
     /// Typing a username, then a password.
     LoggingIn { password: bool },
 }
@@ -106,6 +108,86 @@ impl Narrow {
     }
 }
 
+/// A category the catalog can be narrowed by.
+///
+/// The same panel as the song browser's, deliberately: two screens that both filter lists
+/// should not have two different ways of doing it, and somebody who has used one already
+/// knows this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Facet {
+    /// Whether it is already downloaded, and how well rated. One at a time.
+    Kind,
+    Language,
+    Genre,
+    Decade,
+    Edition,
+}
+
+impl Facet {
+    pub const ALL: [Facet; 5] = [
+        Facet::Kind,
+        Facet::Language,
+        Facet::Genre,
+        Facet::Decade,
+        Facet::Edition,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Kind => "Show",
+            Self::Language => "Language",
+            Self::Genre => "Genre",
+            Self::Decade => "Decade",
+            Self::Edition => "Edition",
+        }
+    }
+
+    /// How a stored value is shown. A decade is stored as its first year.
+    pub fn label(self, value: &str) -> String {
+        match self {
+            Self::Decade => format!("{value}s"),
+            _ => value.to_owned(),
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|f| *f == self).unwrap_or(0)
+    }
+}
+
+/// The values each facet has in the catalog, with how many songs each covers.
+///
+/// Supplied by the application, which is the only thing holding the catalog. Counts are of the
+/// whole catalog rather than of the current results: a filter list that empties itself as you
+/// use it cannot be used to widen a search again.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FacetValues {
+    lists: Vec<Vec<(String, i64)>>,
+}
+
+impl FacetValues {
+    pub fn new() -> Self {
+        Self {
+            lists: vec![Vec::new(); Facet::ALL.len()],
+        }
+    }
+
+    pub fn set(&mut self, facet: Facet, values: Vec<(String, i64)>) {
+        if self.lists.len() < Facet::ALL.len() {
+            self.lists = vec![Vec::new(); Facet::ALL.len()];
+        }
+        self.lists[facet.index()] = values;
+    }
+
+    pub fn get(&self, facet: Facet) -> &[(String, i64)] {
+        self.lists.get(facet.index()).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lists.iter().all(Vec::is_empty)
+    }
+}
+
 /// How a song in the catalog stands against the local library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Local {
@@ -127,6 +209,8 @@ pub struct Row {
     pub artist: String,
     pub title: String,
     pub language: String,
+    pub genre: String,
+    pub edition: String,
     pub year: Option<i32>,
     pub rating: f32,
     pub golden: bool,
@@ -140,6 +224,8 @@ impl Row {
             artist: song.artist.clone(),
             title: song.title.clone(),
             language: song.language.clone(),
+            genre: song.genre.clone(),
+            edition: song.edition.clone(),
             year: song.year,
             rating: song.rating,
             golden: song.golden_notes,
@@ -171,6 +257,10 @@ enum Region {
     Key(usize),
     /// The show-password button.
     Reveal,
+    /// A row in the filter panel's category column.
+    Category(usize),
+    /// A row in the filter panel's value column.
+    Value(usize),
 }
 
 /// The USDB browser.
@@ -194,11 +284,14 @@ pub struct UsdbScreen {
     searched: String,
     /// What the list is narrowed to.
     pub narrow: Narrow,
-    /// Only songs in this language, when one is chosen. Taken from the catalog, so it only
-    /// ever offers languages USDB actually has.
-    pub language: Option<String>,
-    /// Every language in the catalog, most common first, supplied by the application.
-    pub languages: Vec<(String, usize)>,
+    /// The values each facet offers, filled in by the application.
+    pub facets: FacetValues,
+    /// Values chosen per facet, in `Facet::ALL` order. Empty means no constraint.
+    picked: Vec<Vec<String>>,
+    facet_cursor: usize,
+    value_cursor: usize,
+    /// `true` while the value column has focus rather than the category column.
+    on_values: bool,
     /// Whether the password is shown as itself rather than as dots.
     ///
     /// Off by default and never remembered. On is for the twenty seconds it takes to check a
@@ -231,8 +324,11 @@ impl UsdbScreen {
             user_typed: String::new(),
             searched: String::new(),
             narrow: Narrow::default(),
-            language: None,
-            languages: Vec::new(),
+            facets: FacetValues::new(),
+            picked: vec![Vec::new(); Facet::ALL.len()],
+            facet_cursor: 0,
+            value_cursor: 0,
+            on_values: false,
             reveal: false,
             cursor: 0,
             scroll: 0,
@@ -279,6 +375,7 @@ impl UsdbScreen {
         match self.mode {
             Mode::Browsing => self.handle_browsing(input),
             Mode::Searching => self.handle_searching(input),
+            Mode::Filtering => self.handle_filtering(input),
             Mode::LoggingIn { password } => self.handle_login(input, password),
         }
     }
@@ -311,21 +408,8 @@ impl UsdbScreen {
             // syncs instead: it is the other thing this screen does.
             Input::Sort => return (Transition::None, UsdbOutcome::Sync),
             Input::CycleFilter => {
-                self.narrow = self.narrow.next();
-                self.stale = true;
-                self.cursor = 0;
-                return (Transition::None, UsdbOutcome::None);
-            }
-            // Through the languages the catalog actually has, plus "any".
-            Input::Random => {
-                let index = self
-                    .language
-                    .as_ref()
-                    .and_then(|held| self.languages.iter().position(|(name, _)| name == held))
-                    .map_or(0, |at| at + 1);
-                self.language = self.languages.get(index).map(|(name, _)| name.clone());
-                self.stale = true;
-                self.cursor = 0;
+                self.mode = Mode::Filtering;
+                self.on_values = false;
                 return (Transition::None, UsdbOutcome::None);
             }
             Input::CycleLayout => {
@@ -357,6 +441,169 @@ impl UsdbScreen {
             // Fetching yt-dlp is a letter rather than a button on the screen: it is done once
             // ever, and a permanent button for a one-off is clutter on every other visit.
             Input::Type('g') | Input::Type('G') => return (Transition::None, UsdbOutcome::GetTool),
+            _ => {}
+        }
+        (Transition::None, UsdbOutcome::None)
+    }
+
+    /// The filter category under the cursor.
+    pub fn facet_title(&self) -> &'static str {
+        self.facet().title()
+    }
+
+    fn facet(&self) -> Facet {
+        Facet::ALL[self.facet_cursor.min(Facet::ALL.len() - 1)]
+    }
+
+    /// The values chosen for a facet.
+    pub fn picked(&self, facet: Facet) -> &[String] {
+        &self.picked[facet.index()]
+    }
+
+    /// How many values are chosen across every facet, for the header.
+    pub fn active_filters(&self) -> usize {
+        usize::from(self.narrow != Narrow::Everything)
+            + self.picked.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// Put every filter back to showing everything.
+    pub fn clear_filters(&mut self) {
+        self.narrow = Narrow::Everything;
+        for picked in &mut self.picked {
+            picked.clear();
+        }
+        self.stale = true;
+        self.cursor = 0;
+    }
+
+    /// Whether a row survives every filter. Values within a facet are OR; facets are AND.
+    pub fn keeps(&self, row: &Row) -> bool {
+        if !self.narrow.keeps(row) {
+            return false;
+        }
+        let matches = |facet: Facet, value: &str| {
+            let picked = self.picked(facet);
+            picked.is_empty() || picked.iter().any(|want| want.eq_ignore_ascii_case(value))
+        };
+        matches(Facet::Language, &row.language)
+            && matches(Facet::Genre, &row.genre)
+            && matches(Facet::Edition, &row.edition)
+            && {
+                let picked = self.picked(Facet::Decade);
+                picked.is_empty()
+                    || row.year.is_some_and(|year| {
+                        let decade = year - year.rem_euclid(10);
+                        picked.iter().any(|want| want.parse() == Ok(decade))
+                    })
+            }
+    }
+
+    /// The rows the panel shows for a facet: label, count, and whether it is chosen.
+    fn rows_for(&self, facet: Facet) -> Vec<(String, String, bool)> {
+        match facet {
+            Facet::Kind => Narrow::ALL
+                .iter()
+                .map(|narrow| {
+                    (
+                        narrow.label().to_owned(),
+                        String::new(),
+                        *narrow == self.narrow,
+                    )
+                })
+                .collect(),
+            _ => {
+                let picked = self.picked(facet);
+                self.facets
+                    .get(facet)
+                    .iter()
+                    .map(|(value, count)| {
+                        (
+                            facet.label(value),
+                            count.to_string(),
+                            picked.iter().any(|c| c == value),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn toggle_value(&mut self, facet: Facet, index: usize) {
+        match facet {
+            // One at a time: "not in my library" and "already have it" together is nothing.
+            Facet::Kind => {
+                let Some(narrow) = Narrow::ALL.get(index).copied() else {
+                    return;
+                };
+                self.narrow = if self.narrow == narrow {
+                    Narrow::Everything
+                } else {
+                    narrow
+                };
+            }
+            _ => {
+                let Some((value, _)) = self.facets.get(facet).get(index).cloned() else {
+                    return;
+                };
+                let picked = &mut self.picked[facet.index()];
+                match picked.iter().position(|c| *c == value) {
+                    Some(at) => {
+                        picked.remove(at);
+                    }
+                    None => picked.push(value),
+                }
+            }
+        }
+        self.stale = true;
+        self.cursor = 0;
+    }
+
+    fn handle_filtering(&mut self, input: Input) -> (Transition, UsdbOutcome) {
+        let rows = self.rows_for(self.facet()).len();
+        match input {
+            Input::Up if self.on_values => {
+                self.value_cursor = self.value_cursor.saturating_sub(1);
+            }
+            Input::Down if self.on_values => {
+                if self.value_cursor + 1 < rows {
+                    self.value_cursor += 1;
+                }
+            }
+            Input::PageUp if self.on_values => {
+                self.value_cursor = self.value_cursor.saturating_sub(8);
+            }
+            Input::PageDown if self.on_values => {
+                self.value_cursor = (self.value_cursor + 8).min(rows.saturating_sub(1));
+            }
+            Input::Up => {
+                self.facet_cursor = self.facet_cursor.saturating_sub(1);
+                self.value_cursor = 0;
+            }
+            Input::Down => {
+                self.facet_cursor = (self.facet_cursor + 1).min(Facet::ALL.len() - 1);
+                self.value_cursor = 0;
+            }
+            Input::Right => self.on_values = true,
+            Input::Left => self.on_values = false,
+            Input::Confirm | Input::Submit => {
+                if self.on_values {
+                    let facet = self.facet();
+                    self.toggle_value(facet, self.value_cursor);
+                } else {
+                    self.on_values = true;
+                }
+            }
+            // The panel is where filters are set, so it is also where they are all undone.
+            // Hunting through five categories for the one still narrowing the list is the
+            // usual way a filter panel loses somebody.
+            Input::Search => self.clear_filters(),
+            Input::Back | Input::CycleFilter => {
+                if self.on_values {
+                    self.on_values = false;
+                } else {
+                    self.mode = Mode::Browsing;
+                }
+            }
             _ => {}
         }
         (Transition::None, UsdbOutcome::None)
@@ -474,6 +721,21 @@ impl UsdbScreen {
             }
             Some(Region::Reveal) if clicked => self.reveal = !self.reveal,
             Some(Region::Reveal) => {}
+            Some(Region::Category(index)) => {
+                if index != self.facet_cursor {
+                    self.facet_cursor = index;
+                    self.value_cursor = 0;
+                }
+                self.on_values = clicked;
+            }
+            Some(Region::Value(index)) => {
+                self.value_cursor = index;
+                self.on_values = true;
+                if clicked {
+                    let facet = self.facet();
+                    self.toggle_value(facet, index);
+                }
+            }
             None => {}
         }
         (Transition::None, UsdbOutcome::None)
@@ -488,8 +750,13 @@ impl UsdbScreen {
         if self.narrow != Narrow::Everything {
             parts.push(self.narrow.label().to_owned());
         }
-        if let Some(language) = &self.language {
-            parts.push(language.clone());
+        match self
+            .active_filters()
+            .saturating_sub(usize::from(self.narrow != Narrow::Everything))
+        {
+            0 => {}
+            1 => parts.push("1 filter".to_owned()),
+            n => parts.push(format!("{n} filters")),
         }
         match &self.user {
             Some(user) => parts.push(user.clone()),
@@ -546,7 +813,7 @@ impl UsdbScreen {
 
         let inner = body.inset(style.gap(2.0));
         if self.rows.is_empty() {
-            let filtered = self.narrow != Narrow::Everything || self.language.is_some();
+            let filtered = self.active_filters() > 0;
             let (title, detail) = match (self.catalog_size, self.search_text().is_empty()) {
                 (0, _) => (
                     "No catalog yet",
@@ -569,10 +836,197 @@ impl UsdbScreen {
             self.draw_rows(list, inner, style);
         }
 
-        if self.mode != Mode::Browsing {
-            let mut overlay = Vec::new();
-            self.draw_typing(list, area, style, &mut overlay);
-            self.regions.extend(overlay);
+        match self.mode {
+            Mode::Browsing => {}
+            Mode::Filtering => {
+                let mut overlay = Vec::new();
+                self.draw_filters(list, area, style, &mut overlay);
+                self.regions.extend(overlay);
+            }
+            Mode::Searching | Mode::LoggingIn { .. } => {
+                let mut overlay = Vec::new();
+                self.draw_typing(list, area, style, &mut overlay);
+                self.regions.extend(overlay);
+            }
+        }
+    }
+
+    /// The filter panel: categories on the left, their values on the right.
+    ///
+    /// The same shape as the song browser's, because two screens that both filter lists should
+    /// not have two different ways of doing it.
+    fn draw_filters(
+        &self,
+        list: &mut DrawList,
+        area: Rect,
+        style: &Style,
+        regions: &mut Vec<(Rect, Region)>,
+    ) {
+        let widgets = Widgets::new(style);
+        widgets.scrim(list, area);
+
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.62).min(1100.0),
+            (area.h * 0.78).min(760.0),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(1.8));
+
+        let row_h = style.gap(3.0);
+        let (heading, body) = inner.cut_top(row_h * 1.3);
+        list.text(
+            heading,
+            "Filter",
+            TextStyle::new(style.scaled_text(1.2), style.text).bold(),
+        );
+        let active = self.active_filters();
+        list.text(
+            heading,
+            match active {
+                0 => "Everything".to_owned(),
+                1 => "1 filter".to_owned(),
+                n => format!("{n} filters"),
+            },
+            TextStyle::new(
+                style.text_size(),
+                if active > 0 {
+                    style.accent
+                } else {
+                    style.muted
+                },
+            )
+            .align(Align::End),
+        );
+
+        let (categories, values) = body.cut_left((body.w * 0.34).min(320.0));
+        for (index, facet) in Facet::ALL.iter().enumerate() {
+            let row = Rect::new(
+                categories.x,
+                categories.y + row_h * index as f32,
+                categories.w - style.gap(1.0),
+                row_h,
+            )
+            .inset_xy(0.0, style.gap(0.2));
+            regions.push((row, Region::Category(index)));
+            let selected = index == self.facet_cursor;
+            let chosen = match facet {
+                Facet::Kind => usize::from(self.narrow != Narrow::Everything),
+                other => self.picked(*other).len(),
+            };
+            widgets.row(
+                list,
+                row,
+                facet.title(),
+                &if chosen == 0 {
+                    String::new()
+                } else {
+                    chosen.to_string()
+                },
+                selected,
+            );
+            if selected && self.on_values {
+                list.outline(
+                    row,
+                    style.accent,
+                    style.metrics.outline,
+                    style.metrics.radius,
+                );
+            }
+        }
+
+        let rows = self.rows_for(self.facet());
+        if rows.is_empty() {
+            list.text(
+                values,
+                "Nothing in the catalogue has one",
+                TextStyle::new(style.text_size(), style.muted).centered(),
+            );
+            return;
+        }
+
+        let visible = ((values.h / row_h).floor() as usize).max(1);
+        let first = self
+            .value_cursor
+            .saturating_sub(visible.saturating_sub(2))
+            .min(rows.len().saturating_sub(visible.min(rows.len())));
+        let mut placed = Vec::new();
+        list.clipped(values, |list| {
+            for (offset, (label, count, chosen)) in
+                rows.iter().skip(first).take(visible).enumerate()
+            {
+                let index = first + offset;
+                let row = Rect::new(values.x, values.y + row_h * offset as f32, values.w, row_h)
+                    .inset_xy(0.0, style.gap(0.2));
+                placed.push((row, Region::Value(index)));
+                let selected = self.on_values && index == self.value_cursor;
+                list.panel(
+                    row,
+                    if selected {
+                        style.accent
+                    } else if *chosen {
+                        style.surface_raised
+                    } else {
+                        style.surface
+                    },
+                    style.metrics.radius,
+                );
+                let text = if selected {
+                    style.on_accent
+                } else {
+                    style.text
+                };
+                let muted = if selected {
+                    style.on_accent
+                } else {
+                    style.muted
+                };
+                let cell = row.inset_xy(style.gap(1.2), 0.0);
+                // The tick has its own column so the labels line up whether ticked or not,
+                // which is what makes a long list scannable.
+                let (mark, rest) = cell.cut_left(style.gap(2.2));
+                if *chosen {
+                    list.text(
+                        mark,
+                        "\u{2713}",
+                        TextStyle::new(
+                            style.text_size(),
+                            if selected {
+                                style.on_accent
+                            } else {
+                                style.accent
+                            },
+                        )
+                        .bold(),
+                    );
+                }
+                let (name, number) = rest.cut_left(rest.w * 0.74);
+                list.text(
+                    Rect::new(name.x, name.y, (name.w - style.gap(1.0)).max(0.0), name.h),
+                    label,
+                    TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
+                );
+                list.text(
+                    number,
+                    count,
+                    TextStyle::new(style.scaled_text(0.82), muted).align(Align::End),
+                );
+            }
+        });
+        regions.extend(placed);
+
+        if rows.len() > visible {
+            list.text(
+                Rect::new(
+                    values.x,
+                    values.bottom() - style.gap(2.0),
+                    values.w,
+                    style.gap(2.0),
+                ),
+                format!("{}/{}", self.value_cursor + 1, rows.len()),
+                TextStyle::new(style.scaled_text(0.75), style.muted).align(Align::End),
+            );
         }
     }
 
@@ -586,7 +1040,6 @@ impl UsdbScreen {
                     (confirm, "Download"),
                     (if pad { "X" } else { "F" }, "Search"),
                     (if pad { "LT" } else { "D" }, "Filter"),
-                    (if pad { "RT" } else { "R" }, "Language"),
                     (if pad { "Y" } else { "F3" }, "Sync"),
                     (
                         if pad { "LB" } else { "Tab" },
@@ -609,6 +1062,12 @@ impl UsdbScreen {
                 hints
             }
             Mode::Searching => vec![(confirm, "Press key"), (back, "Done")],
+            Mode::Filtering => vec![
+                (confirm, "Toggle"),
+                ("\u{2190}\u{2192}", "Column"),
+                (if pad { "X" } else { "F" }, "Clear all"),
+                (back, "Done"),
+            ],
             Mode::LoggingIn { password } => {
                 let mut hints = vec![(confirm, "Press key")];
                 if password {
@@ -830,7 +1289,7 @@ impl UsdbScreen {
             Mode::Searching => "Search USDB",
             Mode::LoggingIn { password: false } => "USDB username",
             Mode::LoggingIn { password: true } => "USDB password",
-            Mode::Browsing => "",
+            Mode::Browsing | Mode::Filtering => "",
         };
         list.text(
             heading,

@@ -243,6 +243,8 @@ fn every_screen_fits_a_steam_deck_and_is_readable_on_it() {
                 artist: format!("Artist {i}"),
                 title: format!("A Long Song Title Number {i}"),
                 language: "English".into(),
+                genre: "Pop".into(),
+                edition: "Best of".into(),
                 year: Some(1974),
                 rating: 4.5,
                 golden: true,

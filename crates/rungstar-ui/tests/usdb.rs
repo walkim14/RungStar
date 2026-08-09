@@ -4,7 +4,9 @@ use rungstar_ui::draw::{Command, DrawList};
 use rungstar_ui::geom::Rect;
 use rungstar_ui::songselect::Input;
 use rungstar_ui::theme::Theme;
-use rungstar_ui::usdbscreen::{Activity, Local, Mode, Row, UsdbOutcome, UsdbScreen};
+use rungstar_ui::usdbscreen::{
+    Activity, Facet, FacetValues, Local, Mode, Row, UsdbOutcome, UsdbScreen,
+};
 use rungstar_usdb::SongId;
 
 fn area() -> Rect {
@@ -34,6 +36,8 @@ fn row(id: i64, artist: &str, title: &str, local: Local) -> Row {
         artist: artist.into(),
         title: title.into(),
         language: "English".into(),
+        genre: "Pop".into(),
+        edition: "Best of".into(),
         year: Some(1974),
         rating: 4.5,
         golden: true,
@@ -395,13 +399,17 @@ fn the_filter_narrows_to_what_is_not_already_held() {
     // scrolls, and most of them are ones you already have.
     let mut screen = loaded();
     assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Everything);
-    let (_, outcome) = screen.handle(Input::CycleFilter);
-    assert_eq!(outcome, UsdbOutcome::None);
+    open_filters(&mut screen, "Show");
+    screen.handle(Input::Right);
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm);
     assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::New);
     assert!(screen.needs_rows(), "it did not ask for the list again");
 
-    // And it says what it is hiding, because a list quietly missing songs looks like a
-    // catalog that does not have them.
+    // And the header says what is hiding songs, because a list quietly missing them looks
+    // like a catalogue that does not have them.
+    screen.handle(Input::Back);
+    screen.handle(Input::Back);
     let text = strings(&draw(&mut screen)).join(" ");
     assert!(text.contains("Not in my library"), "{text}");
 }
@@ -422,24 +430,154 @@ fn every_filter_keeps_what_it_claims_to() {
     assert!(Narrow::Golden.keeps(&absent) && !Narrow::Golden.keeps(&poor));
 }
 
+/// Open the filter panel and put the cursor on the category with this title.
+fn open_filters(screen: &mut UsdbScreen, category: &str) {
+    if screen.mode() != Mode::Filtering {
+        screen.handle(Input::CycleFilter);
+    }
+    assert_eq!(screen.mode(), Mode::Filtering);
+    screen.handle(Input::Left);
+    for _ in 0..Facet::ALL.len() {
+        screen.handle(Input::Up);
+    }
+    for _ in 0..Facet::ALL.len() {
+        if screen.facet_title() == category {
+            return;
+        }
+        screen.handle(Input::Down);
+    }
+    panic!("no filter category called {category:?}");
+}
+
+fn catalog_facets() -> FacetValues {
+    let mut facets = FacetValues::new();
+    facets.set(
+        Facet::Language,
+        vec![("English".to_owned(), 900), ("German".to_owned(), 400)],
+    );
+    facets.set(
+        Facet::Genre,
+        vec![("Pop".to_owned(), 500), ("Rock".to_owned(), 300)],
+    );
+    facets.set(
+        Facet::Decade,
+        vec![("1980".to_owned(), 200), ("1970".to_owned(), 90)],
+    );
+    facets
+}
+
 #[test]
-fn the_language_filter_only_offers_languages_the_catalog_has() {
+fn the_filter_is_a_panel_with_the_categories_beside_their_values() {
+    // The same shape as the song browser's, because two screens that both filter lists should
+    // not have two different ways of doing it.
     let mut screen = loaded();
-    screen.languages = vec![("English".to_owned(), 900), ("German".to_owned(), 400)];
-    assert_eq!(screen.language, None, "everything, to begin with");
+    screen.facets = catalog_facets();
+    screen.handle(Input::CycleFilter);
+    assert_eq!(screen.mode(), Mode::Filtering);
 
-    screen.handle(Input::Random);
-    assert_eq!(screen.language.as_deref(), Some("English"));
-    screen.handle(Input::Random);
-    assert_eq!(screen.language.as_deref(), Some("German"));
-    // Past the end is back to any, rather than stuck on the last one.
-    screen.handle(Input::Random);
-    assert_eq!(screen.language, None);
+    let text = strings(&draw(&mut screen));
+    for expected in ["Filter", "Show", "Language", "Genre", "Decade", "Edition"] {
+        assert!(text.iter().any(|t| t == expected), "{expected}: {text:?}");
+    }
 
-    // With no catalog there is nothing to cycle and it stays at any.
-    let mut empty = loaded();
-    empty.handle(Input::Random);
-    assert_eq!(empty.language, None);
+    // The values of the category under the cursor, with their counts.
+    open_filters(&mut screen, "Language");
+    let text = strings(&draw(&mut screen));
+    assert!(text.iter().any(|t| t == "English"));
+    assert!(text.iter().any(|t| t == "900"));
+    // And a decade reads as a decade rather than as a bare year.
+    open_filters(&mut screen, "Decade");
+    assert!(strings(&draw(&mut screen)).iter().any(|t| t == "1980s"));
+}
+
+#[test]
+fn values_within_a_category_are_any_of_and_categories_are_all_of() {
+    let mut screen = loaded();
+    screen.facets = catalog_facets();
+    open_filters(&mut screen, "Language");
+    screen.handle(Input::Right);
+    screen.handle(Input::Confirm); // English
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm); // and German
+    assert_eq!(screen.picked(Facet::Language), ["English", "German"]);
+
+    let english = row(1, "A", "One", Local::Absent);
+    let mut german = row(2, "B", "Two", Local::Absent);
+    german.language = "German".into();
+    let mut french = row(3, "C", "Three", Local::Absent);
+    french.language = "French".into();
+    assert!(screen.keeps(&english) && screen.keeps(&german));
+    assert!(!screen.keeps(&french), "a third language survived");
+
+    // A second category narrows further rather than widening.
+    open_filters(&mut screen, "Genre");
+    screen.handle(Input::Right);
+    screen.handle(Input::Confirm); // Pop
+    assert!(screen.keeps(&english), "Pop and English");
+    let mut rock = german.clone();
+    rock.genre = "Rock".into();
+    assert!(!screen.keeps(&rock), "German but the wrong genre");
+
+    // Choosing a value again removes it.
+    screen.handle(Input::Confirm);
+    assert!(screen.picked(Facet::Genre).is_empty());
+}
+
+#[test]
+fn the_show_category_is_one_at_a_time() {
+    // "Not in my library" and "already have it" together is an empty list.
+    let mut screen = loaded();
+    open_filters(&mut screen, "Show");
+    screen.handle(Input::Right);
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm);
+    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::New);
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm);
+    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Held);
+    // And choosing the one already chosen turns it off.
+    screen.handle(Input::Confirm);
+    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Everything);
+}
+
+#[test]
+fn every_filter_is_cleared_at_once_from_the_panel() {
+    let mut screen = loaded();
+    screen.facets = catalog_facets();
+    open_filters(&mut screen, "Language");
+    screen.handle(Input::Right);
+    screen.handle(Input::Confirm);
+    open_filters(&mut screen, "Show");
+    screen.handle(Input::Right);
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm);
+    assert_eq!(screen.active_filters(), 2);
+
+    screen.handle(Input::Search);
+    assert_eq!(screen.active_filters(), 0);
+    assert!(screen.needs_rows(), "clearing did not ask for new rows");
+}
+
+#[test]
+fn a_decade_filter_matches_the_years_inside_it() {
+    let mut screen = loaded();
+    screen.facets = catalog_facets();
+    open_filters(&mut screen, "Decade");
+    screen.handle(Input::Right);
+    screen.handle(Input::Confirm); // the 1980s
+
+    let mut eighty_four = row(1, "A", "One", Local::Absent);
+    eighty_four.year = Some(1984);
+    let mut seventy_two = row(2, "B", "Two", Local::Absent);
+    seventy_two.year = Some(1972);
+    let mut undated = row(3, "C", "Three", Local::Absent);
+    undated.year = None;
+    assert!(screen.keeps(&eighty_four));
+    assert!(!screen.keeps(&seventy_two));
+    assert!(
+        !screen.keeps(&undated),
+        "a song with no year is in no decade"
+    );
 }
 
 #[test]

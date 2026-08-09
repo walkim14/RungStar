@@ -35,7 +35,10 @@ use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
-use rungstar_ui::usdbscreen::{Activity, Local, Narrow, Row as UsdbRow, UsdbOutcome, UsdbScreen};
+use rungstar_ui::usdbscreen::{
+    Activity, Facet as UsdbFacet, FacetValues as UsdbFacets, Local, Row as UsdbRow, UsdbOutcome,
+    UsdbScreen,
+};
 use rungstar_ui::Color;
 
 mod session;
@@ -1249,7 +1252,7 @@ impl App {
                     if let Some(job) = &self.usdb {
                         let catalog = job.catalog();
                         screen.catalog_size = catalog.len();
-                        screen.languages = languages_in(&catalog);
+                        screen.facets = facets_in(&catalog);
                     }
                     self.stack.push(Screen::Usdb(Box::new(screen)));
                 }
@@ -1474,22 +1477,13 @@ impl App {
             catalog_changed || matches!(self.stack.last(), Some(Screen::Usdb(s)) if s.needs_rows());
         let known: Vec<UsdbRow> = if wants_rows {
             let catalog = job.catalog();
-            let (text, narrow, language) = match self.stack.last() {
-                Some(Screen::Usdb(screen)) => (
-                    screen.search_text().to_owned(),
-                    screen.narrow,
-                    screen.language.clone(),
-                ),
-                _ => (String::new(), Narrow::default(), None),
+            let text = match self.stack.last() {
+                Some(Screen::Usdb(screen)) => screen.search_text().to_owned(),
+                _ => String::new(),
             };
             catalog
                 .search(&text)
                 .into_iter()
-                .filter(|song| {
-                    language
-                        .as_ref()
-                        .is_none_or(|wanted| song.language.eq_ignore_ascii_case(wanted))
-                })
                 .map(|song| {
                     // Which of these are already on the disk. Matched on the USDB id when the
                     // file carries one, and on the folded artist and title when it does not —
@@ -1504,9 +1498,7 @@ impl App {
                     };
                     UsdbRow::from_catalog(song, local)
                 })
-                .filter(|row| narrow.keeps(row))
-                .take(2000)
-                .collect()
+                .collect::<Vec<UsdbRow>>()
         } else {
             Vec::new()
         };
@@ -1527,7 +1519,14 @@ impl App {
         };
         screen.catalog_size = size;
         if catalog_changed || screen.needs_rows() {
-            screen.set_rows(known);
+            // Filtered here rather than above, because the picks live on the screen and
+            // passing them out and the answer back would be two copies of the same rule.
+            let kept: Vec<UsdbRow> = known
+                .into_iter()
+                .filter(|row| screen.keeps(row))
+                .take(2000)
+                .collect();
+            screen.set_rows(kept);
         }
         if let Some(who) = signed {
             let named = who.is_some();
@@ -2104,17 +2103,46 @@ fn singing_players(chosen: usize, microphones: usize) -> usize {
 ///
 /// Walked rather than stored: the catalog is already in memory, and a second copy is a second
 /// thing to keep in step with a sync.
-fn languages_in(catalog: &rungstar_usdb::Catalog) -> Vec<(String, usize)> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+fn facets_in(catalog: &rungstar_usdb::Catalog) -> UsdbFacets {
+    let mut language: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut genre: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut edition: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut decade: std::collections::HashMap<i32, i64> = std::collections::HashMap::new();
     for song in catalog.all() {
-        if song.language.trim().is_empty() {
-            continue;
+        for (map, value) in [
+            (&mut language, &song.language),
+            (&mut genre, &song.genre),
+            (&mut edition, &song.edition),
+        ] {
+            let value = value.trim();
+            if !value.is_empty() {
+                *map.entry(value.to_owned()).or_default() += 1;
+            }
         }
-        *counts.entry(song.language.clone()).or_default() += 1;
+        if let Some(year) = song.year.filter(|year| *year > 0) {
+            *decade.entry(year - year.rem_euclid(10)).or_default() += 1;
+        }
     }
-    let mut all: Vec<(String, usize)> = counts.into_iter().collect();
-    all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    all
+
+    // Most common first, so the useful ones are at the top of a list nobody scrolls.
+    let ranked = |map: std::collections::HashMap<String, i64>| {
+        let mut all: Vec<(String, i64)> = map.into_iter().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        all
+    };
+    let mut facets = UsdbFacets::new();
+    facets.set(UsdbFacet::Language, ranked(language));
+    facets.set(UsdbFacet::Genre, ranked(genre));
+    facets.set(UsdbFacet::Edition, ranked(edition));
+    // Decades are the exception: a decade list is a timeline, and ordering it by popularity
+    // makes it unreadable.
+    let mut decades: Vec<(String, i64)> = decade
+        .into_iter()
+        .map(|(year, count)| (year.to_string(), count))
+        .collect();
+    decades.sort_by(|a, b| b.0.cmp(&a.0));
+    facets.set(UsdbFacet::Decade, decades);
+    facets
 }
 
 /// Decode a song's audio far enough to draw it.
@@ -2820,6 +2848,8 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
             artist: "Abba".into(),
             title: "Waterloo".into(),
             language: "English".into(),
+            genre: "Pop".into(),
+            edition: "Best of".into(),
             year: Some(1974),
             rating: 4.5,
             golden: true,
@@ -2831,7 +2861,16 @@ fn self_check(app: &mut App, renderer: &mut Renderer, list: &mut DrawList) -> Re
             queued: 1,
         };
         app.stack.push(Screen::Usdb(Box::new(screen)));
-        for step in [Input::Back, Input::Search, Input::Back, Input::CycleFilter] {
+        for step in [
+            Input::Back,
+            Input::Search,
+            Input::Back,
+            Input::CycleFilter,
+            Input::Right,
+            Input::Back,
+            Input::Back,
+            Input::CycleLayout,
+        ] {
             list.clear();
             app.draw(list, area);
             renderer
