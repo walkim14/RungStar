@@ -7,7 +7,7 @@
 use crate::draw::{Align, DrawList, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Rect};
 use crate::menu::Cursor;
-use crate::options::{Action, Control, Page};
+use crate::options::{Action, Page};
 use crate::screen::{Route, Transition, Widgets};
 use crate::settings::Settings;
 use crate::songselect::Input;
@@ -351,7 +351,8 @@ impl OptionsScreen {
             }
             Input::Left | Input::Right => {
                 let item = &self.pages[self.page_cursor.index()].items[self.item_cursor.index()];
-                if item.is_button() {
+                // A row that shows a folder has nothing to step through; it is pressed.
+                if item.pressed().is_some() {
                     return OptionsOutcome::None;
                 }
                 item.adjust(settings, if matches!(input, Input::Right) { 1 } else { -1 });
@@ -360,7 +361,7 @@ impl OptionsScreen {
             }
             Input::Confirm => {
                 let item = &self.pages[self.page_cursor.index()].items[self.item_cursor.index()];
-                if let Control::Button(action) = item.control {
+                if let Some(action) = item.pressed() {
                     if action.confirmation().is_some() {
                         self.pending = Some(action);
                         self.confirm_accept = false;

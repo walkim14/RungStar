@@ -60,8 +60,12 @@ pub enum Event {
     Problem(String),
     /// Nothing is happening any more.
     Idle,
-    /// Whether yt-dlp is available, and which version if so.
-    Tool(Option<String>),
+    /// Which versions of the two external tools are available, yt-dlp then ffmpeg.
+    ///
+    /// ffmpeg is reported as well as yt-dlp because without it yt-dlp cannot merge the
+    /// separate streams YouTube serves above 360p, and the resulting video is much worse. That
+    /// is a difference worth saying out loud rather than leaving to be noticed later.
+    Tool(Option<String>, Option<String>),
 }
 
 /// The handle the application holds.
@@ -202,8 +206,15 @@ fn run(
     // A copy on the PATH wins over one this program fetched: somebody who installed it with
     // their package manager is telling us which one to use.
     let mut tool = rungstar_download::tool::find(&data);
+    // Looked for once. Unlike yt-dlp it is never fetched, so the answer cannot change while
+    // the game is running, and running `ffmpeg -version` is a process launch.
+    let ffmpeg = rungstar_download::ffmpeg::find();
+    let ffmpeg_version = ffmpeg
+        .as_deref()
+        .and_then(rungstar_download::ffmpeg::version);
     let _ = events.send(Event::Tool(
         tool.as_deref().and_then(rungstar_download::tool::version),
+        ffmpeg_version.clone(),
     ));
     let stop = Flag(Arc::clone(&cancel));
     let catalog_path = data.join("usdb-catalog.json");
@@ -323,11 +334,11 @@ fn run(
                     Ok(path) => {
                         let version = rungstar_download::tool::version(&path);
                         tool = Some(path);
-                        let _ = events.send(Event::Tool(version));
+                        let _ = events.send(Event::Tool(version, ffmpeg_version.clone()));
                     }
                     Err(error) => {
                         let _ = events.send(Event::Problem(error));
-                        let _ = events.send(Event::Tool(None));
+                        let _ = events.send(Event::Tool(None, ffmpeg_version.clone()));
                     }
                 }
                 let _ = events.send(Event::Idle);
@@ -349,8 +360,10 @@ fn run(
                     ));
                     match fetch_tool(&files, &data) {
                         Ok(path) => {
-                            let _ =
-                                events.send(Event::Tool(rungstar_download::tool::version(&path)));
+                            let _ = events.send(Event::Tool(
+                                rungstar_download::tool::version(&path),
+                                ffmpeg_version.clone(),
+                            ));
                             tool = Some(path);
                         }
                         Err(error) => {
@@ -363,7 +376,7 @@ fn run(
                     let _ = events.send(Event::Idle);
                     continue;
                 };
-                let extractor = rungstar_download::YtDlp::at(program);
+                let extractor = rungstar_download::YtDlp::at(program).with_ffmpeg(ffmpeg.clone());
                 match fetch_one(
                     &mut usdb, id, &songs, &scratch, &files, &extractor, &stop, &events, &catalog,
                 ) {
@@ -398,7 +411,8 @@ fn run(
                     let extractor = match tool.clone() {
                         Some(program) => rungstar_download::YtDlp::at(program),
                         None => rungstar_download::YtDlp::default(),
-                    };
+                    }
+                    .with_ffmpeg(ffmpeg.clone());
                     let _ = fetch_one(
                         &mut usdb, *id, &songs, &scratch, &files, &extractor, &stop, &events,
                         &catalog,

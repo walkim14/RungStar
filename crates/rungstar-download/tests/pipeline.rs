@@ -560,20 +560,84 @@ fn a_song_edited_on_usdb_is_seen_as_stale() {
 #[test]
 fn the_extraction_command_asks_for_what_the_game_can_play() {
     let into = Path::new("/songs/x");
-    let audio = arguments("https://youtu.be/abc", true, into, "Abba - Waterloo");
+    let ffmpeg = Path::new("/opt/ffmpeg");
+    let audio = arguments(
+        "https://youtu.be/abc",
+        true,
+        into,
+        "Abba - Waterloo",
+        Some(ffmpeg),
+    );
     assert!(audio.contains(&"--no-playlist".to_owned()), "{audio:?}");
     assert!(audio.contains(&"-x".to_owned()), "audio only");
     assert!(audio.iter().any(|a| a.contains("bestaudio")));
+    // Whatever route it takes, what lands has to be something the game can open. YouTube's
+    // default is Opus in WebM, which Symphonia has no decoder for — so a download that
+    // "worked" produced a song that would not play.
+    assert_eq!(
+        audio
+            .iter()
+            .position(|a| a == "--audio-format")
+            .map(|at| audio[at + 1].as_str()),
+        Some("m4a")
+    );
     assert!(audio.last().is_some_and(|url| url.contains("youtu.be")));
     // Nothing but the media itself belongs in a song folder.
     assert!(audio.contains(&"--no-write-info-json".to_owned()));
     assert!(audio.contains(&"--no-write-thumbnail".to_owned()));
 
-    let video = arguments("https://youtu.be/abc", false, into, "Abba - Waterloo");
+    let video = arguments(
+        "https://youtu.be/abc",
+        false,
+        into,
+        "Abba - Waterloo",
+        Some(ffmpeg),
+    );
     assert!(!video.contains(&"-x".to_owned()));
     assert!(
         video.iter().any(|a| a.contains("height<=1080")),
         "a 4K video is four times the bytes for a picture behind lyrics"
+    );
+}
+
+#[test]
+fn ffmpeg_is_pointed_at_rather_than_hoped_for() {
+    // This is the whole of the "ffmpeg is not installed" bug. yt-dlp looks on the PATH and
+    // nowhere else, so a copy shipped beside the game has to be named explicitly — otherwise
+    // every download fails at the last step with the file sitting in the same folder as the
+    // executable that just ran it.
+    let args = arguments(
+        "https://youtu.be/abc",
+        true,
+        Path::new("/songs/x"),
+        "song",
+        Some(Path::new("/games/rungstar/ffmpeg.exe")),
+    );
+    let at = args
+        .iter()
+        .position(|a| a == "--ffmpeg-location")
+        .expect("no --ffmpeg-location");
+    assert_eq!(args[at + 1], "/games/rungstar/ffmpeg.exe");
+}
+
+#[test]
+fn without_ffmpeg_it_asks_for_something_it_can_finish() {
+    // Both of the good format choices need ffmpeg: `-x` is a post-processor, and anything
+    // above 360p on YouTube arrives as separate video and audio that have to be merged. With
+    // no ffmpeg, asking for either fails *after* the bytes have been downloaded. So ask for
+    // formats that need no post-processing instead — worse video, but a song at the end of it.
+    let audio = arguments("https://youtu.be/abc", true, Path::new("/x"), "song", None);
+    assert!(!audio.contains(&"--ffmpeg-location".to_owned()));
+    assert!(!audio.contains(&"-x".to_owned()), "-x always runs ffmpeg");
+    assert!(
+        audio.iter().any(|a| a.contains("bestaudio[ext=m4a]")),
+        "m4a first, because the alternative is Opus in WebM and Symphonia cannot decode it"
+    );
+
+    let video = arguments("https://youtu.be/abc", false, Path::new("/x"), "song", None);
+    assert!(
+        video.iter().all(|a| !a.contains('+')),
+        "a merged format cannot be merged without ffmpeg: {video:?}"
     );
 }
 

@@ -152,11 +152,17 @@ impl Default for Bindings {
     }
 }
 
-/// Which direction a stick is currently pushed, so motion becomes discrete presses.
+/// Which direction each stick is currently pushed, so motion becomes discrete presses.
+///
+/// Four slots rather than two. Sharing one horizontal slot between both sticks means pushing
+/// the right stick while the left is already held produces nothing, and letting the left one
+/// go then releases a direction the right one is still holding.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct StickState {
-    horizontal: Option<Action>,
-    vertical: Option<Action>,
+    left_horizontal: Option<Action>,
+    left_vertical: Option<Action>,
+    right_horizontal: Option<Action>,
+    right_vertical: Option<Action>,
 }
 
 /// Translates device events into [`InputEvent`]s.
@@ -241,8 +247,10 @@ impl InputMapper {
         let player = self.players.get(&gamepad).copied();
         let state = self.sticks.entry(gamepad).or_default();
         let slot = match axis {
-            Axis::LeftX | Axis::RightX => &mut state.horizontal,
-            _ => &mut state.vertical,
+            Axis::LeftX => &mut state.left_horizontal,
+            Axis::LeftY => &mut state.left_vertical,
+            Axis::RightX => &mut state.right_horizontal,
+            _ => &mut state.right_vertical,
         };
         if *slot == direction {
             return Vec::new();
@@ -374,5 +382,33 @@ mod tests {
         mapper.axis(0, Axis::LeftY, 30_000);
         let second = mapper.axis(1, Axis::LeftY, 30_000);
         assert_eq!(second.len(), 1, "a second player's stick is independent");
+    }
+}
+
+#[cfg(test)]
+mod stick_tests {
+    use super::*;
+
+    #[test]
+    fn the_two_sticks_do_not_take_each_others_directions() {
+        // They used to share one horizontal slot, so pushing the right stick while the left
+        // was already held produced nothing at all, and letting the left one go released a
+        // direction the right one was still holding.
+        let mut mapper = InputMapper::default();
+        let left = mapper.axis(0, Axis::LeftX, 30_000);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].action, Action::Right);
+        assert!(left[0].pressed);
+
+        let right = mapper.axis(0, Axis::RightX, 30_000);
+        assert_eq!(right.len(), 1, "the right stick was swallowed: {right:?}");
+        assert!(right[0].pressed);
+
+        // Letting the left one go releases the left one, and nothing else.
+        let released = mapper.axis(0, Axis::LeftX, 0);
+        assert_eq!(released.len(), 1);
+        assert!(!released[0].pressed);
+        // The right stick is still held, so pushing it further reports nothing new.
+        assert!(mapper.axis(0, Axis::RightX, 32_000).is_empty());
     }
 }

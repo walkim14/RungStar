@@ -20,6 +20,7 @@
 //! The parts that need a network are behind traits ([`Fetcher`] and [`Extractor`]), so the
 //! whole pipeline is driven by tests with neither.
 
+pub mod ffmpeg;
 pub mod meta;
 pub mod pipeline;
 pub mod plan;

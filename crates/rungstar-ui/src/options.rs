@@ -24,6 +24,8 @@ pub enum Action {
     /// Forget the index entirely and build it again.
     RebuildIndex,
     AddSongFolder,
+    /// Stop searching the folder added most recently.
+    ForgetSongFolder,
     ManageMicrophones,
     RebindControls,
     /// Read an existing UltraStar Deluxe database, so a returning player keeps their history.
@@ -75,6 +77,11 @@ pub enum Control {
     Text { get: fn(&Settings) -> String },
     /// A button.
     Button(Action),
+    /// A value that is also a button: it shows something, and choosing it does something.
+    Shown {
+        get: fn(&Settings) -> String,
+        press: Action,
+    },
 }
 
 /// One row on an options page.
@@ -96,7 +103,7 @@ impl Item {
                 .unwrap_or("?")
                 .to_owned(),
             Control::Number { get, format, .. } => format(get(settings)),
-            Control::Text { get } => get(settings),
+            Control::Text { get } | Control::Shown { get, .. } => get(settings),
             Control::Button(_) => String::new(),
         }
     }
@@ -109,6 +116,17 @@ impl Item {
 
     pub fn is_button(&self) -> bool {
         matches!(self.control, Control::Button(_))
+    }
+
+    /// The action pressing this row runs, if any.
+    ///
+    /// A `Shown` row has both a value and an action, which is what a row naming a folder
+    /// wants to be: it says which folder, and choosing it changes which folder.
+    pub fn pressed(&self) -> Option<Action> {
+        match self.control {
+            Control::Button(action) | Control::Shown { press: action, .. } => Some(action),
+            _ => None,
+        }
     }
 
     /// Step the value. `direction` is `-1` for left, `1` for right.
@@ -128,7 +146,7 @@ impl Item {
                 // the stick was held a moment too long is a genuinely bad surprise.
                 set(settings, next.clamp(*min, *max));
             }
-            Control::Text { .. } | Control::Button(_) => {}
+            Control::Text { .. } | Control::Shown { .. } | Control::Button(_) => {}
         }
     }
 
@@ -273,11 +291,13 @@ impl Page {
                     "Category tabs",
                     "Group the song list by its sort key instead of showing one flat list."
                 ),
+                // A button rather than a caption. It reads as a value and it was one,
+                // which is why pressing it did nothing — and a row that shows which folder is
+                // in use is the row somebody presses when they want to change it.
                 Item {
                     label: "Song folders",
-                    help: "Where your songs live. Any folder containing a .txt file counts \
-                           as a song; there is no naming convention to follow.",
-                    control: Control::Text {
+                    help: "Where your songs live, and choosing opens a folder picker. Any                            folder containing a .txt file counts as a song; there is no                            naming convention to follow.",
+                    control: Control::Shown {
                         get: |s| {
                             if s.game.song_roots.is_empty() {
                                 "Default folder".to_owned()
@@ -285,12 +305,18 @@ impl Page {
                                 s.game.song_roots.join(", ")
                             }
                         },
+                        press: Action::AddSongFolder,
                     },
                 },
                 Item {
                     label: "Add a song folder",
                     help: "Choose another folder to search for songs.",
                     control: Control::Button(Action::AddSongFolder),
+                },
+                Item {
+                    label: "Forget the last song folder",
+                    help: "Stop searching the folder added most recently. Nothing on disk is                            deleted.",
+                    control: Control::Button(Action::ForgetSongFolder),
                 },
                 Item {
                     label: "Rescan songs",

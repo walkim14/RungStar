@@ -42,6 +42,7 @@ use rungstar_ui::usdbscreen::{
 };
 use rungstar_ui::Color;
 
+mod folder;
 mod session;
 mod usdbjob;
 
@@ -138,6 +139,8 @@ struct App {
     held: rungstar_library::Held,
     /// Whether yt-dlp is available, and which version.
     tool: Option<String>,
+    /// Whether ffmpeg is available. Downloads work without it, at much lower video quality.
+    ffmpeg: Option<String>,
     /// The USDB worker, started the first time the browser is opened.
     ///
     /// Lazily, because it logs in: somebody who never opens it should not have their password
@@ -293,6 +296,7 @@ impl App {
             pending_editor_audio: false,
             held: rungstar_library::Held::default(),
             tool: None,
+            ffmpeg: None,
             usdb: None,
             pending_mics: false,
             singing: None,
@@ -1294,6 +1298,59 @@ impl App {
         }
     }
 
+    /// Ask for a folder and add it to the ones that are searched for songs.
+    ///
+    /// The dialog is opened from here rather than from the options screen because
+    /// `rungstar-ui` has no operating system in it — a screen produces a `DrawList` and an
+    /// `Action`, and what an action means is the application's business. That is also what
+    /// keeps the options pages testable without a desktop.
+    fn add_song_folder(&mut self) {
+        let start = self
+            .settings
+            .game
+            .song_roots
+            .last()
+            .map(PathBuf::from)
+            .or_else(|| self.song_roots().first().cloned());
+        let Some(chosen) = folder::choose("Where are your songs?", start.as_deref()) else {
+            // Cancelled, or there is no portal to ask. Neither is worth a message: somebody
+            // who closed a dialog knows they closed it.
+            return;
+        };
+        match folder::check(&chosen, &self.settings.game.song_roots) {
+            Ok(path) => {
+                self.settings.game.song_roots.push(path);
+                self.save_settings();
+                self.settings_dirty = true;
+                // Scanned straight away. The folder was chosen in order to sing what is in
+                // it, and making that a second trip through the options is a step for nothing.
+                self.start_scan(false);
+                self.status = format!("added {} and looking for songs", chosen.display());
+            }
+            Err(why) => self.refuse(why),
+        }
+    }
+
+    /// Stop searching the most recently added folder.
+    ///
+    /// The last one rather than a chosen one, because a list needs a cursor and this row does
+    /// not have one. Adding a folder is the common action; removing one is undoing a mistake
+    /// that was almost always just made.
+    fn forget_song_folder(&mut self) {
+        match self.settings.game.song_roots.pop() {
+            Some(gone) => {
+                self.save_settings();
+                self.settings_dirty = true;
+                // Rebuild rather than rescan: a plain rescan only looks at files that changed,
+                // and the songs in the folder just removed did not change — they are simply no
+                // longer wanted, and would stay in the list.
+                self.start_scan(true);
+                self.status = format!("no longer looking in {gone}");
+            }
+            None => self.refuse("the default song folder cannot be removed"),
+        }
+    }
+
     /// Open a song in the editor.
     fn edit_song(&mut self, id: i64) {
         let Ok(Some(entry)) = self.library.song(id) else {
@@ -1482,8 +1539,9 @@ impl App {
                 }
                 usdbjob::Event::Problem(why) => problem = Some(why),
                 usdbjob::Event::Idle => idle = true,
-                usdbjob::Event::Tool(version) => {
+                usdbjob::Event::Tool(version, ffmpeg) => {
                     self.tool = version;
+                    self.ffmpeg = ffmpeg;
                     tool_changed = true;
                 }
             }
@@ -1584,6 +1642,12 @@ impl App {
             screen.problem =
                 "yt-dlp is not installed, so nothing can be downloaded yet. Press G to fetch it."
                     .to_owned();
+        } else if tool_changed && self.ffmpeg.is_none() {
+            // Not an error — downloads work. But without ffmpeg yt-dlp cannot merge the two
+            // streams YouTube serves above 360p, so the video quietly arrives much worse, and
+            // finding that out by watching one is finding it out late.
+            screen.problem = "ffmpeg was not found, so videos will download at low quality.                               Songs and audio are unaffected."
+                .to_owned();
         }
     }
 
@@ -2040,12 +2104,8 @@ impl App {
             }
             // These need screens that belong to later phases. Saying so is better than a
             // button that silently does nothing.
-            Action::AddSongFolder => {
-                self.status = format!(
-                    "add song folders by editing {}",
-                    self.data_dir.join("settings.toml").display()
-                )
-            }
+            Action::AddSongFolder => self.add_song_folder(),
+            Action::ForgetSongFolder => self.forget_song_folder(),
             // Needs the audio subsystem, which the frame loop owns.
             Action::ManageMicrophones => self.pending_mics = true,
             Action::RebindControls => {
@@ -2390,6 +2450,11 @@ fn main() -> Result<()> {
     // Never fails: a machine with no sound card gets a quiet game rather than no game.
     let mut sfx = Sfx::new(&audio_subsystem);
     sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
+    // Stick motion turned into presses and releases, with a dead zone. The mapper also owns
+    // which way each stick is currently pushed, so a sweep across the middle releases one
+    // direction before pressing the other.
+    let mut sticks = rungstar_platform::InputMapper::default();
+    let mut held = Held::default();
     let mut events = sdl.event_pump().map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut text_input_on = false;
     let mut list = DrawList::new();
@@ -2488,7 +2553,34 @@ fn main() -> Result<()> {
                         _ => None,
                     };
                     if let Some(input) = input {
+                        // A direction is held rather than tapped, so it repeats.
+                        let input = match direction_of(button) {
+                            Some(direction) => held.press(direction),
+                            None => input,
+                        };
                         app.handle(input, area);
+                    }
+                }
+                Event::ControllerButtonUp { button, .. } => {
+                    if let Some(direction) = direction_of(button) {
+                        held.release(direction);
+                    }
+                }
+                // The sticks. Without this the d-pad was the only way to move, which on a
+                // Steam Deck means the one control nobody's thumb is resting on.
+                Event::ControllerAxisMotion {
+                    which, axis, value, ..
+                } => {
+                    for event in sticks.axis(which, axis, value) {
+                        let Some(direction) = direction_of_action(event.action) else {
+                            continue;
+                        };
+                        if event.pressed {
+                            app.set_control_hints(true);
+                            app.handle(held.press(direction), area);
+                        } else {
+                            held.release(direction);
+                        }
                     }
                 }
                 _ => {}
@@ -2645,6 +2737,16 @@ fn main() -> Result<()> {
             }
         }
 
+        // A direction still being held. `press` already delivered the first step, so this is
+        // only the repeats — and it returns a count rather than a bool, so a frame that ran
+        // long still scrolls the right distance instead of dropping the difference.
+        let (direction, steps) = held.tick(dt);
+        if let Some(direction) = direction {
+            for _ in 0..steps {
+                app.handle(direction, area);
+            }
+        }
+
         // Everything the frame did that is worth hearing, played in one place. Draining after
         // the whole frame rather than per event means a Confirm that also moved a cursor is one
         // sound, and a held direction that stepped four times is still one blip.
@@ -2693,6 +2795,71 @@ fn main() -> Result<()> {
 
     app.save_settings();
     Ok(())
+}
+
+/// A direction being held on a controller, and when to repeat it.
+///
+/// SDL sends one event per button press and none while it stays down, and a stick sends
+/// motion rather than presses at all. A keyboard gets repeats from the operating system, so
+/// holding a key scrolls a list and holding the d-pad moved one row and stopped — which
+/// through eight thousand songs is not navigation, it is tapping.
+///
+/// One direction at a time, whichever was pressed last. Pressing Down while Right is held
+/// takes over rather than repeating both, which is what a menu does and what fingers expect.
+#[derive(Default)]
+struct Held {
+    direction: Option<Input>,
+    repeat: rungstar_ui::Repeat,
+}
+
+impl Held {
+    /// A direction went down. Returns it, to be delivered once immediately.
+    fn press(&mut self, input: Input) -> Input {
+        self.direction = Some(input);
+        self.repeat.press();
+        input
+    }
+
+    /// A direction came up. Only stops the repeat if it is the one being repeated: releasing
+    /// Right while Down is held must not stop Down.
+    fn release(&mut self, input: Input) {
+        if self.direction == Some(input) {
+            self.direction = None;
+            self.repeat.release();
+        }
+    }
+
+    /// How many extra steps this frame.
+    fn tick(&mut self, dt: f32) -> (Option<Input>, usize) {
+        match self.direction {
+            Some(direction) => (Some(direction), self.repeat.tick(dt)),
+            None => (None, 0),
+        }
+    }
+}
+
+/// The direction a gamepad button means, if it means one.
+fn direction_of(button: sdl3::gamepad::Button) -> Option<Input> {
+    use sdl3::gamepad::Button;
+    match button {
+        Button::DPadUp => Some(Input::Up),
+        Button::DPadDown => Some(Input::Down),
+        Button::DPadLeft => Some(Input::Left),
+        Button::DPadRight => Some(Input::Right),
+        _ => None,
+    }
+}
+
+/// The direction a stick action means.
+fn direction_of_action(action: rungstar_platform::Action) -> Option<Input> {
+    use rungstar_platform::Action;
+    match action {
+        Action::Up => Some(Input::Up),
+        Action::Down => Some(Input::Down),
+        Action::Left => Some(Input::Left),
+        Action::Right => Some(Input::Right),
+        _ => None,
+    }
 }
 
 /// Draw one frame of every screen and report what happened.

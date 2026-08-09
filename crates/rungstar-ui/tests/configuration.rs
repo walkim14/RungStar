@@ -200,7 +200,9 @@ fn no_two_options_share_a_label_within_a_page() {
 fn stepping_every_option_changes_it_and_stepping_back_restores_it() {
     for page in Page::all() {
         for item in &page.items {
-            if item.is_button() || matches!(item.control, Control::Text { .. }) {
+            // A button and a row that shows a folder are both pressed rather than stepped;
+            // free text is typed. None of them has a left and a right to come back from.
+            if item.pressed().is_some() || matches!(item.control, Control::Text { .. }) {
                 continue;
             }
             let mut settings = Settings::default();

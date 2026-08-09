@@ -38,6 +38,25 @@ The Linux asset is `yt-dlp_linux`, the standalone build, not the plain `yt-dlp` 
 zipapp needs a Python interpreter on the machine, and a Steam Deck in Game Mode may not have a
 usable one.
 
+## ffmpeg
+
+The Windows deliveries ship `ffmpeg.exe` beside the game, from the same FFmpeg 7.1 build the
+linked DLLs come from. It is **not for the game** — that links the libraries directly and never
+runs the program. It is for **yt-dlp**, which shells out to ffmpeg to pull audio out of a
+container and to merge the separate video and audio streams YouTube serves above 360p, and
+which looks for ffmpeg on the PATH and nowhere else. Naming it explicitly with
+`--ffmpeg-location` is the whole fix for "ffmpeg is not installed" appearing at the end of an
+otherwise successful download.
+
+That costs `avfilter` and `avdevice` in the vendor tree, which the game itself does not link.
+The alternative was an 80 MB static build; the shared one is 39 MB and reuses the DLLs already
+there.
+
+On Linux nothing is bundled. The Flatpak declares the `ffmpeg-full` extension and otherwise
+takes whatever is on the PATH. When there is none, downloads still work — the format selection
+falls back to what needs no post-processing, which means full-quality audio and a lower-quality
+video — and the download screen says so rather than leaving it to be noticed.
+
 ## Fonts and sounds
 
 `assets/` is committed and every delivery copies it whole — four fonts under `assets/fonts/`

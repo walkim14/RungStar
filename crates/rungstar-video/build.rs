@@ -1,4 +1,5 @@
-//! Point the linker at the vendored FFmpeg and put its DLLs next to the executable.
+//! Point the linker at the vendored FFmpeg and put its DLLs — and `ffmpeg.exe` — next to the
+//! executable.
 //!
 //! The same arrangement as `rungstar-platform`'s SDL3 build script, and for the same reason: a
 //! clean machine should be able to build and run the game without installing anything first.
@@ -29,11 +30,20 @@ fn main() {
 
     // The DLLs have to sit beside the executable, because Windows looks there and not in a
     // vendor directory. Copied on every build so an updated vendor tree takes effect.
+    //
+    // `ffmpeg.exe` goes with them, and it is not for us — the game links the libraries
+    // directly and never runs the program. yt-dlp does, for pulling audio out of a container
+    // and for merging the separate streams YouTube serves above 360p, and it looks for ffmpeg
+    // on the PATH and nowhere else. Shipping it here is what lets `rungstar-download` name it.
     if let Some(out) = executable_directory() {
         if let Ok(entries) = std::fs::read_dir(vendor.join("bin")) {
             for entry in entries.filter_map(Result::ok) {
                 let from = entry.path();
-                if from.extension().and_then(|e| e.to_str()) == Some("dll") {
+                let wanted = matches!(
+                    from.extension().and_then(|e| e.to_str()),
+                    Some("dll") | Some("exe")
+                );
+                if wanted {
                     let to = out.join(entry.file_name());
                     let _ = std::fs::copy(&from, &to);
                 }

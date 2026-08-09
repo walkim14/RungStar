@@ -13,6 +13,18 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: rungstar
 
+# The full codec set. The base runtime ships a cut-down FFmpeg, and a song library is 88.8%
+# AV1 video and 99.9% Ogg Vorbis audio — neither of which is in the cut-down build. This is
+# also where a `ffmpeg` binary comes from when the runtime has one, which is what lets yt-dlp
+# merge the separate streams YouTube serves above 360p. Downloads work without it, at worse
+# video quality, and the screen says so.
+add-extensions:
+  org.freedesktop.Platform.ffmpeg-full:
+    directory: lib/ffmpeg
+    add-ld-path: .
+    version: '24.08'
+    autodelete: false
+
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
@@ -53,6 +65,7 @@ modules:
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo --offline build --release -p rungstar-app
+      - install -d /app/lib/ffmpeg
       - install -Dm755 target/release/rungstar /app/bin/rungstar
       - install -Dm755 target/release/rungstar-diagnostics /app/bin/rungstar-diagnostics
       # yt-dlp beside the game, so a fresh install on a Deck can download a song straight

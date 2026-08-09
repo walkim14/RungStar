@@ -40,3 +40,8 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+# The native folder chooser, for picking a song folder. `xdg-portal` rather than the default
+# GTK3 backend: a Flatpak on a Steam Deck in Game Mode has no GTK and no desktop session, and
+# the portal is the only thing that opens a file dialog there. It is also one fewer native
+# dependency on the Linux build.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }

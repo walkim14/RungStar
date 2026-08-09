@@ -39,12 +39,24 @@ foreach ($tool in @("rungstar-diagnostics.exe", "rungstar-sing.exe")) {
     if (Test-Path $path) { Copy-Item $path $out }
 }
 
-# The DLLs the build script already put beside the executable: SDL3 and the five FFmpeg
-# libraries the game links. Copied by wildcard rather than by name so a version bump in
-# vendor/ does not silently produce a zip that cannot start.
+# The DLLs the build script already put beside the executable: SDL3 and the FFmpeg libraries
+# the game links. Copied by wildcard rather than by name so a version bump in vendor/ does not
+# silently produce a zip that cannot start.
 $dlls = Get-ChildItem -Path $built -Filter *.dll -File
 if ($dlls.Count -eq 0) { throw "no DLLs beside the executable; the build script did not run" }
 foreach ($dll in $dlls) { Copy-Item $dll.FullName $out }
+
+# ffmpeg.exe, which is not for the game - it links the libraries directly and never runs the
+# program. yt-dlp runs it, to pull audio out of a container and to merge the separate video and
+# audio streams YouTube serves above 360p, and it looks for ffmpeg on the PATH and nowhere else.
+# Without this the download screen works right up to the last step and then says ffmpeg is not
+# installed, which is how this was found.
+$ffmpeg = Join-Path $built "ffmpeg.exe"
+if (Test-Path $ffmpeg) {
+    Copy-Item $ffmpeg $out
+} else {
+    Write-Warning "no ffmpeg.exe beside the executable - downloaded videos will be low quality"
+}
 
 # Assets, themes and the licence. The licence is not optional: this is GPL-3.0-or-later and a
 # binary without it is a licence violation, not an oversight.
@@ -75,7 +87,7 @@ try {
 # Fonts and sounds are committed, so a missing one is a broken checkout rather than a step
 # somebody forgot. Fail rather than quietly shipping a build that borrows a system face and
 # plays nothing - that difference is invisible until somebody runs the release.
-foreach ($needed in @("assets\fonts\RungStar-Regular.ttf", "assets\sounds\move.wav")) {
+foreach ($needed in @("assets\fonts\RungStar-Regular.ttf", "assets\sounds\move.wav", "ffmpeg.exe")) {
     if (-not (Test-Path (Join-Path $out $needed))) {
         throw "$needed is missing from the staged build. See packaging/README.md."
     }

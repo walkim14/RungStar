@@ -65,12 +65,20 @@ pub struct YtDlp {
     /// The executable, so a managed copy in the data directory can be used in preference to
     /// whatever is on the path.
     pub program: PathBuf,
+    /// Where ffmpeg is, when there is one.
+    ///
+    /// yt-dlp finds ffmpeg on the PATH by itself and nowhere else, so a copy shipped beside
+    /// the game is invisible to it unless it is told. Being told is the whole fix for
+    /// "ffmpeg is not installed": the file was there, in the same folder as the executable,
+    /// and yt-dlp had no reason to look.
+    pub ffmpeg: Option<PathBuf>,
 }
 
 impl Default for YtDlp {
     fn default() -> Self {
         Self {
             program: PathBuf::from("yt-dlp"),
+            ffmpeg: crate::ffmpeg::find(),
         }
     }
 }
@@ -78,7 +86,16 @@ impl Default for YtDlp {
 impl YtDlp {
     /// Use a particular copy, which is how a fetched one in the data directory is reached.
     pub fn at(program: PathBuf) -> Self {
-        Self { program }
+        Self {
+            program,
+            ffmpeg: crate::ffmpeg::find(),
+        }
+    }
+
+    /// Use a particular ffmpeg, or none at all.
+    pub fn with_ffmpeg(mut self, ffmpeg: Option<PathBuf>) -> Self {
+        self.ffmpeg = ffmpeg;
+        self
     }
 }
 
@@ -86,7 +103,13 @@ impl YtDlp {
 ///
 /// Built separately from being run so the command can be asserted in a test — which is the
 /// only way any of this is checkable without a network and a live video.
-pub fn arguments(page: &str, audio_only: bool, into: &Path, stem: &str) -> Vec<String> {
+pub fn arguments(
+    page: &str,
+    audio_only: bool,
+    into: &Path,
+    stem: &str,
+    ffmpeg: Option<&Path>,
+) -> Vec<String> {
     let template = into.join(format!("{stem}.%(ext)s"));
     let mut args: Vec<String> = vec![
         // Never touch anything but the one URL given. A playlist link would otherwise fetch
@@ -101,18 +124,52 @@ pub fn arguments(page: &str, audio_only: bool, into: &Path, stem: &str) -> Vec<S
         "-o".into(),
         template.to_string_lossy().into_owned(),
     ];
-    if audio_only {
-        // Best audio in its original container. Re-encoding to mp3 is what the reference does
-        // and it loses quality for a file the game decodes natively anyway — the library is
-        // 99.9% Ogg Vorbis and Symphonia reads it directly.
-        args.push("-f".into());
-        args.push("bestaudio/best".into());
-        args.push("-x".into());
-    } else {
+    // Where our ffmpeg is. yt-dlp only ever looks on the PATH, so a copy shipped beside the
+    // game is invisible to it without this — which is what made every download fail with
+    // "ffmpeg is not installed" while the file sat in the same folder as the executable.
+    if let Some(path) = ffmpeg {
+        args.push("--ffmpeg-location".into());
+        args.push(path.to_string_lossy().into_owned());
+    }
+
+    match (audio_only, ffmpeg.is_some()) {
+        // **m4a, and asked for twice.** The obvious `bestaudio` plus a bare `-x` keeps
+        // whatever YouTube served, and what YouTube serves is Opus in WebM — which Symphonia
+        // has no decoder for, so the download succeeded and produced a song that would not
+        // play. That was the other half of "downloading does not work", and it was invisible
+        // until the file was opened.
+        //
+        // Naming the format twice is not redundant. The selector prefers an m4a *source* so
+        // there is nothing to re-encode, and `--audio-format m4a` covers the videos that have
+        // no m4a at all by transcoding the Opus. When the source already matches, yt-dlp says
+        // "file is already in target format" and copies it, so the common case stays lossless.
+        (true, true) => {
+            args.push("-f".into());
+            args.push("bestaudio[ext=m4a]/bestaudio/best".into());
+            args.push("-x".into());
+            args.push("--audio-format".into());
+            args.push("m4a".into());
+        }
+        // No ffmpeg, so no `-x`: it is a post-processor and always runs one. An audio-only
+        // format is already a playable file on its own, so ask for one directly. m4a first
+        // for the same reason as above, and here it is the only defence — an Opus-only video
+        // downloads a file the game cannot open, and there is nothing to convert it with.
+        (true, false) => {
+            args.push("-f".into());
+            args.push("bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best".into());
+        }
         // Capped at 1080p: the renderer scales the frame to at most 1280 wide, and a 4K video
         // is four times the bytes and four times the decode for a picture behind lyrics.
-        args.push("-f".into());
-        args.push("bestvideo[height<=1080]+bestaudio/best[height<=1080]/best".into());
+        (false, true) => {
+            args.push("-f".into());
+            args.push("bestvideo[height<=1080]+bestaudio/best[height<=1080]/best".into());
+        }
+        // Merging two streams needs ffmpeg, so take the best single file instead. That is
+        // 720p at best and often 360p, which is a real loss — and still better than refusing.
+        (false, false) => {
+            args.push("-f".into());
+            args.push("best[height<=1080]/best".into());
+        }
     }
     args.push(page.to_owned());
     args
@@ -172,7 +229,7 @@ impl Extractor for YtDlp {
         into: &Path,
         stem: &str,
     ) -> Result<Extraction, ExtractError> {
-        let args = arguments(page, audio_only, into, stem);
+        let args = arguments(page, audio_only, into, stem, self.ffmpeg.as_deref());
         let output = Command::new(&self.program)
             .args(&args)
             .stdin(Stdio::null())
