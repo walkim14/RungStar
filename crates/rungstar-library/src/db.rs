@@ -13,7 +13,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Bump when the schema changes; [`Database::migrate`] applies the difference.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Prefix lengths the FTS index precomputes, so typing "bea" narrows without a full scan.
 const SCHEMA: &str = "
@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS song (
 
     times_played   INTEGER NOT NULL DEFAULT 0,
     last_played    INTEGER,
+    -- Integrated loudness in LUFS, measured the first time the song is played and never by
+    -- a scan: it costs a full decode, and a rescan of eight thousand songs cannot afford one
+    -- each. Like the play count, it belongs to the row rather than to the file.
+    loudness       REAL,
+    -- The loudest sample, as a fraction of full scale. Kept with the loudness because
+    -- loudness alone does not say how much room there is to turn a song up: a sparse
+    -- recording can be quiet and still touch full scale, and boosting it clips every peak.
+    peak           REAL,
     scanned_at     INTEGER NOT NULL
 );
 
@@ -140,6 +148,18 @@ impl Database {
             });
         }
         self.connection.execute_batch(SCHEMA)?;
+        // `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so a
+        // column added later has to be added by hand. Ignoring the error is the idiom here:
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`, and the only way it fails is by already
+        // being there.
+        if found < 2 {
+            let _ = self
+                .connection
+                .execute("ALTER TABLE song ADD COLUMN loudness REAL", []);
+            let _ = self
+                .connection
+                .execute("ALTER TABLE song ADD COLUMN peak REAL", []);
+        }
         self.connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -222,8 +242,15 @@ const SONG_COLUMNS: &str = "path, root, folder, mtime, size, hash, \
 impl Database {
     /// Write parsed songs into the index, replacing any previous entry for the same path.
     ///
-    /// Play counts are deliberately left alone. They are the player's history, not a property
-    /// of the file, and re-scanning a library must not wipe them.
+    /// Play counts and the loudness measurement are deliberately left alone — neither is in
+    /// `SONG_COLUMNS`, so the upsert cannot touch them. A play count is the player's history
+    /// rather than a property of the file; a loudness costs a full decode and re-measuring
+    /// eight thousand songs because one header changed would make every rescan take minutes.
+    ///
+    /// The cost of that is a stale measurement when somebody replaces the audio file beside an
+    /// unchanged `.txt`. The index hashes the note file, not the audio, so it cannot tell —
+    /// and being a few decibels out on a song nobody has re-imported is a smaller problem than
+    /// a library that will not open.
     pub fn upsert_songs(&mut self, songs: &[crate::scan::ParsedSong]) -> Result<(), DbError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

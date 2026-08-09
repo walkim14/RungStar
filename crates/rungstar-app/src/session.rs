@@ -302,6 +302,11 @@ impl Session {
     ///
     /// Remembered rather than only applied, because the Deaf challenge cuts the track in and
     /// out underneath and has to put it back to whatever the player actually chose.
+    /// The audio being played, for measuring how loud it is.
+    pub fn clip(&self) -> &rungstar_audio::AudioClip {
+        self.playback.clip()
+    }
+
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
         self.playback

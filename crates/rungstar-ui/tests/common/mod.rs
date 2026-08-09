@@ -53,6 +53,8 @@ fn song(id: i64, artist: &str, title: &str) -> SongEntry {
         usdb_id: None,
         times_played: 0,
         last_played: None,
+        loudness: None,
+        peak: None,
     }
 }
 

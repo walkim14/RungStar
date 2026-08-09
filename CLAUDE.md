@@ -237,6 +237,39 @@ delete. That path is the rare "I do not trust the index" case, so it has not bee
 **Zero parse failures across all 8,134 files**, including titles with curly quotes and
 non-ASCII folder names. 35 languages, 354 genres, 295 editions.
 
+## Song loudness
+
+A library assembled from a thousand uploads is not level with itself. Measured over sixty songs
+from the real library: **21.6 dB between the loudest and the quietest**, mean -10.3 LUFS. That
+is a factor of twelve, and it is why somebody reaches for the volume between every song.
+
+`rungstar-audio/loudness.rs` is **EBU R128** — K-weighting, 400 ms blocks at 75% overlap, and
+the two-stage gate. Peak is the wrong measure (one drum hit and a quiet track reads as loud) and
+RMS is not much better (it counts bass the ear barely hears). The gate is what makes it a measure
+of the *song*: without it a track with a long fade-out reads several decibels quieter than the
+same track without one.
+
+Three numbers were decided by measurement rather than by copying a standard:
+
+- **The target is -14 LUFS**, not ReplayGain's -18 or broadcast's -23. Against a mean of -10.3,
+  either of those would turn almost every song down by eight decibels and make the whole game
+  quiet.
+- **A boost stops where the headroom does.** The peak is stored beside the loudness, because
+  loudness alone does not say how far a song can be turned up — a sparse recording can be quiet
+  and still touch full scale, and a clipped chorus reads as a broken game where a quiet song
+  reads as a quiet recording.
+- **±12 dB, whatever the measurement says.** A file that is mostly silence measures very quiet,
+  and an unclamped correction answers that with a bang.
+
+The result: **21.6 dB becomes 2.9 dB**, every song landing between -16.9 and -14.0 LUFS.
+
+**Measuring never happens during a scan.** It needs the whole song decoded — a fifth of a second
+each, minutes across eight thousand songs, against a warm rescan that takes half of one. It
+happens the first time the audio is decoded anyway, which is the first play or the first browser
+preview, on its own thread. Decode runs a thousand times faster than playback, so the answer
+usually lands during the same preview that paid for it. It is then kept in the song's row and,
+like the play count, is never written by a scan.
+
 ## The user interface
 
 `rungstar-ui` has **no graphics API in it**. Screens turn state into a `DrawList` of rectangles

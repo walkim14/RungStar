@@ -18,7 +18,7 @@ const SELECT: &str = "song.id, song.path, song.folder, song.artist, song.title, 
      song.duration_secs, song.is_duet, song.audio_file, song.video_file, song.cover_file, \
      song.background_file, song.note_count, song.golden_count, song.difficulty, \
      song.medley_start, song.medley_end, song.preview_start, song.usdb_id, \
-     song.times_played, song.last_played";
+     song.times_played, song.last_played, song.loudness, song.peak";
 
 /// Narrowing applied on top of the free-text search.
 ///
@@ -232,6 +232,8 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<SongEntry> {
         usdb_id: row.get(25)?,
         times_played: row.get(26)?,
         last_played: row.get(27)?,
+        loudness: row.get(28)?,
+        peak: row.get(29)?,
     })
 }
 
@@ -389,6 +391,20 @@ impl Database {
         self.connection().execute(
             "UPDATE song SET times_played = times_played + 1, last_played = ?2 WHERE id = ?1",
             rusqlite::params![id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Remember how loud a song turned out to be, in LUFS.
+    ///
+    /// Written outside a scan and never by one, exactly like the play count: a rescan reads
+    /// files, and this is a property of the row. Measuring costs a full decode, which is a
+    /// second a song on a cold cache and unthinkable across eight thousand of them, so it is
+    /// done once when the audio has been decoded anyway and kept forever after.
+    pub fn record_loudness(&self, id: i64, lufs: f32, peak: f32) -> Result<(), DbError> {
+        self.connection().execute(
+            "UPDATE song SET loudness = ?2, peak = ?3 WHERE id = ?1",
+            rusqlite::params![id, lufs, peak],
         )?;
         Ok(())
     }

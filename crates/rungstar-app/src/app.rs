@@ -43,6 +43,7 @@ use rungstar_ui::usdbscreen::{
 use rungstar_ui::Color;
 
 mod folder;
+mod loudness;
 mod session;
 mod usdbjob;
 
@@ -137,6 +138,8 @@ struct App {
     /// Rebuilt after a scan rather than queried per row: eight thousand rows is two hash sets
     /// and a few milliseconds, and a query per visible row is a query per frame.
     held: rungstar_library::Held,
+    /// How loud each song turned out to be, so they all play at the same level.
+    loudness: loudness::Loudness,
     /// Whether yt-dlp is available, and which version.
     tool: Option<String>,
     /// Whether ffmpeg is available. Downloads work without it, at much lower video quality.
@@ -295,6 +298,7 @@ impl App {
             jukebox: false,
             pending_editor_audio: false,
             held: rungstar_library::Held::default(),
+            loudness: loudness::Loudness::new(),
             tool: None,
             ffmpeg: None,
             usdb: None,
@@ -474,18 +478,34 @@ impl App {
         }
 
         let from = self.preview.as_ref().map(|p| p.from).unwrap_or(0.0);
+        // Measured from the preview's own decode, which is the first time this song's audio
+        // has been read at all. It finishes about a second in, so the correction usually
+        // arrives during the same preview that paid for it.
+        if let Some(clip) = self
+            .preview
+            .as_ref()
+            .and_then(|p| p.playback.as_ref())
+            .map(|playback| playback.clip().clone())
+        {
+            self.loudness.measure(song, &clip);
+        }
+        let gain = self.loudness.gain(Some(song));
         if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
             let _ = playback.pump();
             // Fade out at the end rather than cutting, and never restart: a preview that
             // loops under a cursor left resting is maddening. Measured from where the clip
             // was seeked to, not from the start of the song.
             let played = (playback.position() - from) as f32;
-            if played > PREVIEW_LENGTH {
-                let fade = (1.0 - (played - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0);
-                playback.set_volume(volume * fade);
-                if fade <= 0.0 {
-                    let _ = playback.pause();
-                }
+            let fade = if played > PREVIEW_LENGTH {
+                (1.0 - (played - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            // Set every frame rather than only while fading, so a measurement that lands
+            // mid-preview is applied rather than waiting for the next song.
+            playback.set_volume(volume * gain * fade);
+            if fade <= 0.0 {
+                let _ = playback.pause();
             }
         }
     }
@@ -495,13 +515,27 @@ impl App {
             * (self.settings.sound.master_volume as f32 / 100.0)
     }
 
+    /// Write out anything the loudness workers finished, and keep it.
+    ///
+    /// Called once a frame. Usually there is nothing; when there is, it is one row.
+    fn collect_loudness(&mut self) {
+        for (id, measured) in self.loudness.collect() {
+            if let Err(error) = self
+                .library
+                .record_loudness(id, measured.lufs, measured.peak)
+            {
+                tracing::debug!("could not remember how loud song {id} is: {error}");
+            }
+        }
+    }
+
     /// Open the clip for a song, starting at its preview point.
     ///
     /// Returns the reason on failure rather than an `Option`, because "most songs do not
     /// preview" is unanswerable when a missing file, a refused device and a bad seek all look
     /// the same from outside.
     fn open_preview(
-        &self,
+        &mut self,
         audio: &sdl3::AudioSubsystem,
         id: i64,
     ) -> Result<(Playback, f64), String> {
@@ -539,7 +573,10 @@ impl App {
             .clip()
             .wait_for(start + 1.0, std::time::Duration::from_secs(2));
         playback.seek(start).map_err(|e| e.to_string())?;
-        playback.set_volume(self.preview_volume());
+        // Whatever the index remembered from the last time this song was played, applied
+        // before the first sample rather than a frame later.
+        self.loudness.remember(entry.id, entry.loudness, entry.peak);
+        playback.set_volume(self.preview_volume() * self.loudness.gain(Some(entry.id)));
         playback.start().map_err(|e| e.to_string())?;
         Ok((playback, start))
     }
@@ -896,6 +933,7 @@ impl App {
     /// broken, so this runs whenever one changes.
     fn apply_settings(&mut self, window: &mut sdl3::video::Window) {
         use sdl3::video::FullscreenType;
+        self.loudness.enabled = self.settings.sound.even_volume == Switch::On;
         let graphics = self.settings.graphics.clone();
 
         let fullscreen = match graphics.screen_mode {
@@ -914,7 +952,8 @@ impl App {
             }
         }
 
-        let volume = self.settings.sound.master_volume as f32 / 100.0;
+        let volume =
+            self.settings.sound.master_volume as f32 / 100.0 * self.loudness.gain(self.singing);
         if let Some(Screen::Sing(_, session)) = self.stack.last_mut() {
             session.set_volume(volume);
         }
@@ -2012,6 +2051,9 @@ impl App {
                 return;
             }
         };
+        // What the index remembers about how loud this song is, so the correction is applied
+        // from the first bar rather than from whenever the measurement lands.
+        self.loudness.remember(entry.id, entry.loudness, entry.peak);
         let audio_path =
             resolve_beside(&directory, &audio_name).unwrap_or_else(|| directory.join(&audio_name));
         // The video is optional in every sense: the song may not name one, the file may not be
@@ -2450,6 +2492,7 @@ fn main() -> Result<()> {
     // Never fails: a machine with no sound card gets a quiet game rather than no game.
     let mut sfx = Sfx::new(&audio_subsystem);
     sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
+    app.loudness.enabled = app.settings.sound.even_volume == Switch::On;
     // Stick motion turned into presses and releases, with a dead zone. The mapper also owns
     // which way each stick is currently pushed, so a sweep across the middle releases one
     // direction before pressing the other.
@@ -2647,12 +2690,24 @@ fn main() -> Result<()> {
         app.refresh_songs();
         app.refresh_usdb();
         app.refresh_highscores();
+        app.collect_loudness();
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
         let mut finished_song = false;
         let mut next_jukebox_song = false;
         // Read before the sing screen is borrowed, since that borrow takes the whole app.
         let jukebox = app.jukebox;
+        // The same reason this is read up here: measuring needs `app` and the borrow below
+        // holds all of it. A clip handle is an `Arc`, so cloning one is free.
+        let singing_clip = match (app.singing, app.stack.last()) {
+            (Some(id), Some(Screen::Sing(_, session))) => Some((id, session.clip().clone())),
+            _ => None,
+        };
+        if let Some((id, clip)) = singing_clip {
+            // A song played but never previewed reaches here without a measurement. Its own
+            // decode is the only one it gets.
+            app.loudness.measure(id, &clip);
+        }
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
                 songs.tick(dt);

@@ -15,6 +15,7 @@
 pub mod capture;
 pub mod clock;
 pub mod decode;
+pub mod loudness;
 
 pub use capture::{
     validate, ConfigProblem, DeviceConfig, PlayerBuffers, CHANNEL_OFF, LATENCY_AUTODETECT,

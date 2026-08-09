@@ -465,6 +465,12 @@ impl Page {
                     sound.preview_volume as u8, "Preview volume", "Loudness of the clip that plays while browsing.",
                     0.0, 100.0, 5.0, percent
                 ),
+                choice_item!(
+                    Switch,
+                    sound.even_volume,
+                    "Even out song volume",
+                    "Play every song at the same loudness. Measured the first time a song is                      played, so the very first time you hear one it is as it was recorded."
+                ),
                 number_item!(
                     sound.effects_volume as u8, "Interface sounds",
                     "Loudness of the menu blips and the sounds while singing. Zero turns them off.",

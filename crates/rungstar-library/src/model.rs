@@ -49,6 +49,16 @@ pub struct SongEntry {
     pub times_played: i64,
     /// Unix seconds.
     pub last_played: Option<i64>,
+    /// Integrated loudness in LUFS, once anybody has played the song.
+    ///
+    /// `None` until then, which means "play it as it is". Measuring costs a full decode, so it
+    /// happens the first time the audio is decoded anyway rather than during a scan.
+    pub loudness: Option<f32>,
+    /// The loudest sample, as a fraction of full scale, measured at the same time.
+    ///
+    /// Loudness alone does not say how far a song can be turned up: a sparse recording can be
+    /// quiet and still touch full scale on one hit, and boosting it clips every one of them.
+    pub peak: Option<f32>,
 }
 
 impl SongEntry {
