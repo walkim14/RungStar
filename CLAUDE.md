@@ -325,7 +325,16 @@ rather than downloaded: the generator is reviewable in a diff and there is no li
 honour. Pentatonic on A, because a scale with no semitone clashes lands on top of a song in any
 key as percussion rather than as a wrong note.
 
-They are played from a `Chime`, which is an event and not a sound, emitted by `rungstar-ui` and
+**Menu music is synthesised at startup**, not shipped: a thirty-second loop is 2.6 MB of WAV
+against a hundred lines of arithmetic that runs in 32 ms, and rendering it means the loop can be
+as long as the music wants rather than as long as a repository tolerates. It is a chiptune
+because the constraints of one are what make it bearable under an interface — two pulse
+channels, a stepped triangle and noise, the NES's arrangement, which forces the music to stay
+thin and leaves the middle of the mix free. A minor, matching the sounds. It fades out whenever
+anything else is making noise, because music under a song preview is two pieces of music at once.
+`cargo run --release --example menu_music -p rungstar-platform` writes it out to listen to.
+
+Both are played from a `Chime`, which is an event and not a sound, emitted by `rungstar-ui` and
 turned into audio by `rungstar-platform`. That is what keeps the UI crate free of an audio API
 and makes the sounds testable without a sound card — `tests/sounds.rs` asserts that holding a
 direction at the end of a list is *silent*, which is the failure worth catching. `Cursor` and

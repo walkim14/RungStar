@@ -472,6 +472,11 @@ impl Page {
                     "Play every song at the same loudness. Measured the first time a song is                      played, so the very first time you hear one it is as it was recorded."
                 ),
                 number_item!(
+                    sound.music_volume as u8, "Menu music",
+                    "Loudness of the music under the menus. It fades out on its own while a                      song or a preview is playing. Zero turns it off.",
+                    0.0, 100.0, 5.0, percent
+                ),
+                number_item!(
                     sound.effects_volume as u8, "Interface sounds",
                     "Loudness of the menu blips and the sounds while singing. Zero turns them off.",
                     0.0, 100.0, 5.0, percent

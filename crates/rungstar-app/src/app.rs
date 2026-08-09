@@ -18,7 +18,7 @@ use rungstar_library::{
 };
 use rungstar_platform::font::FontSet;
 use rungstar_platform::render::Renderer;
-use rungstar_platform::{Playback, SdlCapture, Sfx, Sound};
+use rungstar_platform::{Music, Playback, SdlCapture, Sfx, Sound};
 use rungstar_profile::stats::View;
 use rungstar_profile::{Profiles, Score};
 use rungstar_ui::chime::{self, Chime};
@@ -513,6 +513,26 @@ impl App {
     fn preview_volume(&self) -> f32 {
         self.settings.sound.preview_volume as f32 / 100.0
             * (self.settings.sound.master_volume as f32 / 100.0)
+    }
+
+    /// Whether the menu music should be audible right now.
+    ///
+    /// Anything that is itself audio wins: a song, a preview, the editor's playback. The
+    /// music exists to stop an empty menu feeling empty, and the moment there is something
+    /// else to listen to it has no job.
+    fn wants_music(&self) -> bool {
+        if self.is_singing() {
+            return false;
+        }
+        let previewing = self
+            .preview
+            .as_ref()
+            .and_then(|p| p.playback.as_ref())
+            .is_some();
+        // The editor is silent until somebody presses play, but it is a working screen and
+        // music over a piano roll is a distraction rather than atmosphere.
+        let editing = matches!(self.stack.last(), Some(Screen::Editing(_)));
+        !previewing && !editing
     }
 
     /// Write out anything the loudness workers finished, and keep it.
@@ -2492,6 +2512,10 @@ fn main() -> Result<()> {
     // Never fails: a machine with no sound card gets a quiet game rather than no game.
     let mut sfx = Sfx::new(&audio_subsystem);
     sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
+    // Rendered here rather than loaded: a thirty-second loop is 2.6 MB of WAV and about twenty
+    // milliseconds of arithmetic.
+    let mut music = Music::new(&audio_subsystem);
+    music.set_volume(app.settings.sound.music_volume as f32 / 100.0);
     app.loudness.enabled = app.settings.sound.even_volume == Switch::On;
     // Stick motion turned into presses and releases, with a dead zone. The mapper also owns
     // which way each stick is currently pushed, so a sweep across the middle releases one
@@ -2660,6 +2684,7 @@ fn main() -> Result<()> {
         if std::mem::take(&mut app.settings_dirty) {
             app.apply_settings(renderer.canvas().window_mut());
             sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
+            music.set_volume(app.settings.sound.music_volume as f32 / 100.0);
             let _ = renderer.resize();
         }
         // SDL3 delivers no `TextInput` events until text input is started for the window, and
@@ -2816,6 +2841,10 @@ fn main() -> Result<()> {
             });
         }
         sfx.tick();
+        // Out of the way of anything else that is making noise. Menu music under a song
+        // preview is two pieces of music at once, which nobody can listen to.
+        music.set_wanted(app.wants_music());
+        music.tick(dt);
 
         list.clear();
         app.draw(&mut list, area);
@@ -2947,6 +2976,17 @@ fn self_check(
         Sound::ALL.len(),
         if sfx.has_device() { "open" } else { "none" },
         sfx.queued()
+    );
+    println!(
+        "music       {:.1}s loop, rendered in {:.0} ms",
+        rungstar_platform::chiptune::length_secs(),
+        {
+            let started = Instant::now();
+            let rendered = rungstar_platform::chiptune::render();
+            let took = started.elapsed().as_secs_f32() * 1000.0;
+            assert!(!rendered.is_empty());
+            took
+        }
     );
     for root in app.song_roots() {
         println!("songs from  {}", root.display());

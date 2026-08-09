@@ -3,8 +3,10 @@
 
 pub mod assets;
 pub mod capture;
+pub mod chiptune;
 pub mod font;
 pub mod input;
+pub mod music;
 pub mod playback;
 pub mod render;
 pub mod sfx;
@@ -13,6 +15,7 @@ pub use assets::asset_paths;
 pub use capture::SdlCapture;
 pub use font::{Face, FontError, FontSet};
 pub use input::{Action, Bindings, InputEvent, InputMapper, Source};
+pub use music::Music;
 pub use playback::Playback;
 pub use render::{RenderError, Renderer};
 pub use sfx::{Sfx, Sound};

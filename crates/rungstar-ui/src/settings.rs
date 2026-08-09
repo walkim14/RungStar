@@ -351,6 +351,11 @@ pub struct SoundSettings {
     /// its loudest and quietest songs, and reaching for the volume between every one of them
     /// is the job the game should be doing.
     pub even_volume: Switch,
+    /// How loud the menu music is, `0..=100`. Zero turns it off.
+    ///
+    /// Well below the songs. It plays under everything and its job is to make an empty menu
+    /// feel less empty, not to be listened to.
+    pub music_volume: u8,
     /// How loud the interface sounds are, `0..=100`. Zero silences them.
     ///
     /// Below the music by default. A menu blip is heard hundreds of times an hour and the
@@ -385,6 +390,7 @@ impl Default for SoundSettings {
             preview_volume: 60,
             effects_volume: 45,
             even_volume: Switch::On,
+            music_volume: 30,
             preview_fade: 0.4,
             // UltraStar's own default, and close to what a USB microphone plus a desktop
             // audio stack actually costs.
