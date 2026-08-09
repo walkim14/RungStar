@@ -7,3 +7,14 @@
 *.wav binary
 *.png binary
 *.jpg binary
+
+# Files that end up on a Linux machine, and break there if they carry Windows line endings.
+# A `.desktop` with CRLF fails validation, which is what stops the game appearing in the
+# application menu — and therefore in Steam. A shell script with CRLF fails on its first line
+# with `$'\r': command not found`. Both were shipped that way once.
+*.sh        text eol=lf
+*.desktop   text eol=lf
+*.metainfo.xml text eol=lf
+*.svg       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf

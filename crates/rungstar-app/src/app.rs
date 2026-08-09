@@ -2903,6 +2903,7 @@ fn main() -> Result<()> {
 fn report_devices(audio: &sdl3::AudioSubsystem) -> Result<()> {
     use rungstar_audio::CaptureBackend;
 
+    println!("build         {}", env!("RUNGSTAR_BUILD"));
     println!("audio driver  {}", audio.current_audio_driver());
     let capture = SdlCapture::new(audio.clone());
     let devices = capture.devices().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3065,6 +3066,13 @@ fn self_check(
     sfx: &mut Sfx,
 ) -> Result<()> {
     let area = renderer.projection().screen();
+    // First, because the first question about any packaged build is whether it is the one that
+    // was meant to be tested.
+    println!(
+        "build       {} {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("RUNGSTAR_BUILD")
+    );
     println!("window      {:.0}x{:.0} design units", area.w, area.h);
     println!(
         "theme       {} / {}",

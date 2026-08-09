@@ -34,6 +34,13 @@ flatpak install -y --noninteractive --user flathub \
     org.freedesktop.Sdk.Extension.rust-stable//24.08 \
     org.freedesktop.Sdk.Extension.llvm18//24.08
 
+# Which commit this is, written into the copy the build sees. The Flatpak build has no `.git`
+# — the tree is copied without it — so the binary cannot work this out for itself, and a
+# packaged build that cannot say what it is turns "did you rebuild after that fix?" into
+# guesswork.
+build_id="$(git -C "$root" describe --always --dirty 2>/dev/null || echo unknown)"
+echo "==> building $build_id"
+
 echo "==> pinned sources"
 # flatpak-builder builds with **no network**, on purpose: a build that can reach the internet is
 # a build that cannot be reproduced. So every dependency has to be a declared source with a
@@ -63,6 +70,21 @@ if [ "${root#/mnt/}" != "$root" ]; then
 else
     source_dir="$root"
 fi
+echo "$build_id" > "$source_dir/BUILD_ID"
+
+# Windows line endings in anything that lands on a Linux machine. A `.desktop` with them fails
+# validation, which is what stops the game appearing in the application menu and therefore in
+# Steam; a shell script with them fails on its first line with `$'\r': command not found`. Both
+# shipped that way once, and a checkout on Windows can reintroduce either at any time.
+crlf=0
+while IFS= read -r file; do
+    if grep -qU $'\r' "$file"; then
+        echo "$file has Windows line endings and would break on the target" >&2
+        crlf=1
+    fi
+done < <(find "$source_dir/packaging" -type f \( -name '*.sh' -o -name '*.desktop' \
+    -o -name '*.xml' -o -name '*.svg' \))
+[ "$crlf" -eq 0 ] || exit 1
 
 echo "==> building"
 (cd "$source_dir" && flatpak-builder --user --force-clean --repo="$work/repo" \
