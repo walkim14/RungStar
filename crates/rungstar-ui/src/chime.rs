@@ -14,6 +14,13 @@
 //! **Only deliberate movement chimes.** Moving the cursor with a stick or a key emits;
 //! hovering with the mouse, or a list re-sorting under a cursor that stays put, does not. A
 //! sound for something the player did not do reads as a fault.
+//!
+//! **Nothing chimes while a song is playing.** There were sounds for a golden note landing and
+//! for a line sung well, and they were distracting: an interface sound is heard *instead of*
+//! whatever else is happening, which is right in a menu and wrong over the thing somebody came
+//! to listen to. The screen already says both — the note lights up and the rating pops up — and
+//! saying it twice costs the music. Starting and finishing a song still chime, because neither
+//! lands on top of any singing.
 
 use std::cell::RefCell;
 
@@ -28,10 +35,6 @@ pub enum Chime {
     Back,
     /// A song is starting.
     Start,
-    /// A golden note is being hit.
-    Golden,
-    /// A line was sung well.
-    Line,
     /// A song ended.
     Finish,
     /// Something was refused.

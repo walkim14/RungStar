@@ -30,10 +30,6 @@ pub enum Sound {
     Back,
     /// A song is starting.
     Start,
-    /// A golden note was hit.
-    Golden,
-    /// A line was sung well.
-    Line,
     /// A song ended.
     Finish,
     /// Something was refused.
@@ -41,13 +37,11 @@ pub enum Sound {
 }
 
 impl Sound {
-    pub const ALL: [Sound; 8] = [
+    pub const ALL: [Sound; 6] = [
         Sound::Move,
         Sound::Select,
         Sound::Back,
         Sound::Start,
-        Sound::Golden,
-        Sound::Line,
         Sound::Finish,
         Sound::No,
     ];
@@ -58,8 +52,6 @@ impl Sound {
             Self::Select => "select.wav",
             Self::Back => "back.wav",
             Self::Start => "start.wav",
-            Self::Golden => "golden.wav",
-            Self::Line => "line.wav",
             Self::Finish => "finish.wav",
             Self::No => "no.wav",
         }
@@ -358,17 +350,17 @@ mod tests {
     }
 
     #[test]
-    fn a_sound_the_music_has_to_survive_is_quieter_than_a_menu_one() {
-        // Golden notes and line bonuses land on top of somebody singing. A confirm does not.
-        let loudest = |sound| {
-            shipped(sound)
-                .iter()
-                .map(|s| s.unsigned_abs())
-                .max()
-                .unwrap_or(0)
-        };
-        assert!(loudest(Sound::Golden) < loudest(Sound::Select));
-        assert!(loudest(Sound::Line) < loudest(Sound::Select));
+    fn nothing_in_the_set_plays_over_singing() {
+        // The two that did — a golden note landing, a line sung well — were removed for being
+        // distracting, and this is what stops one coming back by accident. Everything left
+        // happens in a menu, or at the very start or end of a song.
+        for sound in Sound::ALL {
+            assert!(
+                !matches!(sound.file(), "golden.wav" | "line.wav"),
+                "{} plays while somebody is singing",
+                sound.file()
+            );
+        }
     }
 
     #[test]

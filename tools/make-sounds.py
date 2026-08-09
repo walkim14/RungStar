@@ -18,6 +18,10 @@ through a mix without fighting it. Everything here sits between 400 Hz and 3 kHz
 bass, below the air — and nothing lasts longer than a third of a second except the two that
 mark the end of something.
 
+Nothing here plays *during* a song. There were two more — a sparkle for a golden note and a
+chime for a line sung well — and they were distracting, because an interface sound is heard
+instead of whatever else is happening. The screen already says both.
+
 **They are in tune with nothing in particular.** The notes come from a pentatonic scale on A,
 which has no semitone clashes in it, so a blip landing on top of a song in any key sounds like
 a percussion hit rather than a wrong note. Picking a major triad instead would clash with
@@ -31,7 +35,6 @@ you hear instead of the music.
 import array
 import math
 import os
-import struct
 import wave
 
 RATE = 44100
@@ -39,9 +42,7 @@ CHANNELS = 1
 
 # A minor pentatonic on A. Frequencies rather than note names, because the arithmetic below
 # multiplies them and a name would only have to be converted back.
-A3, C4, D4, E4, G4, A4, C5, D5, E5, G5, A5 = (
-    220.00, 261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25, 783.99, 880.00,
-)
+A3, C4, D4, A4, C5, E5, A5 = 220.00, 261.63, 293.66, 440.00, 523.25, 659.25, 880.00
 
 
 def envelope(n, total, attack, release, sustain=1.0):
@@ -60,8 +61,7 @@ def envelope(n, total, attack, release, sustain=1.0):
     return sustain
 
 
-def tone(freq, seconds, gain=0.5, attack=0.004, release=None, harmonics=(1.0, 0.25, 0.08),
-         bend=1.0):
+def tone(freq, seconds, gain=0.5, attack=0.004, release=None, harmonics=(1.0, 0.25, 0.08)):
     """One note, as a few harmonics of a sine.
 
     A pure sine is thin over a mix and a square is harsh; three harmonics with the upper two
@@ -72,34 +72,11 @@ def tone(freq, seconds, gain=0.5, attack=0.004, release=None, harmonics=(1.0, 0.
     out = []
     phase = [0.0] * len(harmonics)
     for n in range(total):
-        # `bend` slides the pitch over the note, which is what makes a two-note confirm read as
-        # one gesture rather than as two separate blips.
-        f = freq * (bend ** (n / total))
         value = 0.0
         for index, amount in enumerate(harmonics):
-            phase[index] += 2.0 * math.pi * f * (index + 1) / RATE
+            phase[index] += 2.0 * math.pi * freq * (index + 1) / RATE
             value += amount * math.sin(phase[index])
         out.append(value * gain * envelope(n, total, attack, release))
-    return out
-
-
-def noise(seconds, gain=0.2, attack=0.001, release=None, seed=1):
-    """Filtered noise, for the sparkle in the golden-note sound."""
-    total = int(seconds * RATE)
-    release = seconds * 0.8 if release is None else release
-    state = seed
-    last = 0.0
-    out = []
-    for n in range(total):
-        # xorshift, so the sound is identical every time this script is run and a rebuild does
-        # not produce a diff.
-        state ^= (state << 13) & 0xFFFFFFFF
-        state ^= state >> 17
-        state ^= (state << 5) & 0xFFFFFFFF
-        white = ((state & 0xFFFF) / 32768.0) - 1.0
-        # A one-pole high-pass: the low end of noise is rumble that muddies a mix.
-        last = 0.85 * last + 0.15 * white
-        out.append((white - last) * gain * envelope(n, total, attack, release))
     return out
 
 
@@ -178,29 +155,6 @@ def main():
             tone(E5, 0.30, gain=0.45),
             delays=[0.0, 0.055, 0.11],
         ),
-    )
-
-    # A golden note, while somebody is singing. High, brief and sparkling, so it registers
-    # without stepping on the voice it is congratulating.
-    write(
-        "golden.wav",
-        mix(
-            tone(A5, 0.16, gain=0.30, attack=0.002, harmonics=(1.0, 0.4, 0.2), bend=1.06),
-            noise(0.13, gain=0.10),
-            delays=[0.0, 0.0],
-        ),
-        peak=0.5,
-    )
-
-    # A line sung well. Quieter than golden: it happens every few seconds.
-    write(
-        "line.wav",
-        mix(
-            tone(E5, 0.07, gain=0.28, harmonics=(1.0, 0.2)),
-            tone(G5, 0.10, gain=0.24, harmonics=(1.0, 0.15)),
-            delays=[0.0, 0.035],
-        ),
-        peak=0.4,
     )
 
     # The end of a song. The one sound allowed to take its time, and the only chord in the set.

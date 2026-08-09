@@ -2654,8 +2654,6 @@ fn main() -> Result<()> {
                 Chime::Select => Sound::Select,
                 Chime::Back => Sound::Back,
                 Chime::Start => Sound::Start,
-                Chime::Golden => Sound::Golden,
-                Chime::Line => Sound::Line,
                 Chime::Finish => Sound::Finish,
                 Chime::No => Sound::No,
             });

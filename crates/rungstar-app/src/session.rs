@@ -17,7 +17,6 @@ use rungstar_pitch::{Analyzer, AnalyzerConfig};
 use rungstar_platform::{Playback, SdlCapture};
 use rungstar_score::{Difficulty, ScoreTrack, Scorer};
 use rungstar_song::{Line, SongTxt};
-use rungstar_ui::chime::{emit, Chime};
 use rungstar_ui::singscreen::{Note, NoteKind, NoteLine, Singer, Sung, Syllable};
 
 const SAMPLE_RATE: u32 = 44_100;
@@ -112,8 +111,6 @@ pub struct Session {
     levels: Vec<f32>,
     pitches: Vec<Option<i32>>,
     hitting: Vec<Option<bool>>,
-    /// The golden note each singer is currently inside, so a held one sparkles once.
-    golden_note: Vec<Option<usize>>,
     gate: f32,
     notes: Vec<Note>,
     capture: SdlCapture,
@@ -284,7 +281,6 @@ impl Session {
             levels: vec![0.0; players],
             pitches: vec![None; players],
             hitting: vec![None; players],
-            golden_note: vec![None; players],
             gate: if threshold > 0.0 { threshold } else { gate },
             notes,
             capture,
@@ -435,21 +431,6 @@ impl Session {
                     if let Some(pitch) = sung {
                         self.record_sung(player, beat, pitch, target, result.hit);
                     }
-                    // A golden note landing. On the note starting rather than on every beat
-                    // of it — a held golden note is one event, and a sparkle per beat over a
-                    // sustained note is a machine gun.
-                    let golden = result.hit
-                        && self.scorers[player]
-                            .track()
-                            .notes()
-                            .get(target)
-                            .is_some_and(|note| note.kind.is_golden());
-                    if golden && self.golden_note[player] != Some(target) {
-                        emit(Chime::Golden);
-                    }
-                    if golden {
-                        self.golden_note[player] = Some(target);
-                    }
                 }
 
                 // Close any line the beat has now passed the end of.
@@ -462,12 +443,6 @@ impl Session {
                     if let Some(result) = self.scorers[player].end_line(self.next_line[player]) {
                         self.ratings[player] = Some((result.rating, Instant::now()));
                         self.line_rating[player] = result.perfection as f32;
-                        // Only a line worth congratulating. The rating runs 0..=8, and
-                        // chiming for every line would be a metronome that also happened to
-                        // be wrong about how well it went.
-                        if result.rating >= 6 {
-                            emit(Chime::Line);
-                        }
                     }
                     self.next_line[player] += 1;
                 }
