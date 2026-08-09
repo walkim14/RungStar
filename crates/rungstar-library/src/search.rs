@@ -95,6 +95,46 @@ impl SearchQuery {
     }
 }
 
+/// What the library already has, by USDB id and by name.
+#[derive(Debug, Clone, Default)]
+pub struct Held {
+    pub usdb_ids: std::collections::HashSet<i64>,
+    pub names: std::collections::HashSet<String>,
+}
+
+impl Held {
+    /// Whether a catalog song is already on the disk.
+    pub fn has(&self, usdb_id: Option<i64>, artist: &str, title: &str) -> bool {
+        if usdb_id.is_some_and(|id| self.usdb_ids.contains(&id)) {
+            return true;
+        }
+        self.names.contains(&name_key(artist, title))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.usdb_ids.is_empty() && self.names.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+}
+
+/// The key two spellings of the same song agree on.
+///
+/// The same folding the sort keys use, so "Bjork - Army of Me" and "Björk - Army Of Me" are
+/// one song. Punctuation goes too, because half the libraries in the world write "Dont Stop"
+/// for "Don't Stop" and a catalog that offers both is a catalog nobody trusts.
+fn name_key(artist: &str, title: &str) -> String {
+    let fold = |text: &str| {
+        crate::scan::fold_for_sort(text)
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
+    format!("{}\u{1}{}", fold(artist), fold(title))
+}
+
 /// Turn a typed phrase into an FTS5 expression.
 ///
 /// Every word becomes a prefix term and they are ANDed, so words can be typed in any order
@@ -351,6 +391,34 @@ impl Database {
             rusqlite::params![id, now],
         )?;
         Ok(())
+    }
+
+    /// Everything the library already holds, for telling a catalog what is new.
+    ///
+    /// Two keys per song, because neither alone is enough. A downloaded song carries its USDB
+    /// id in a header and matches exactly; a song somebody added by hand years ago has no id
+    /// and can only be recognised by its artist and title. Offering to download a song that is
+    /// already on the disk is the most annoying thing a catalog browser can do.
+    pub fn held(&self) -> Result<Held, DbError> {
+        let mut statement = self
+            .connection()
+            .prepare("SELECT usdb_id, artist, title FROM song")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut held = Held::default();
+        for row in rows {
+            let (id, artist, title) = row?;
+            if let Some(id) = id {
+                held.usdb_ids.insert(id);
+            }
+            held.names.insert(name_key(&artist, &title));
+        }
+        Ok(held)
     }
 
     /// Distinct values of a column with their counts, for the filter tree.

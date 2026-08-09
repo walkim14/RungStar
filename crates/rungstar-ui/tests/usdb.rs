@@ -116,7 +116,7 @@ fn typing_narrows_the_list_as_it_goes() {
 #[test]
 fn signing_in_asks_for_the_username_then_the_password() {
     let mut screen = loaded();
-    let (_, outcome) = screen.handle(Input::CycleFilter);
+    let (_, outcome) = screen.handle(Input::CycleLayout);
     assert_eq!(outcome, UsdbOutcome::None);
     assert_eq!(screen.mode(), Mode::LoggingIn { password: false });
     assert!(strings(&draw(&mut screen))
@@ -161,7 +161,7 @@ fn signing_in_asks_for_the_username_then_the_password() {
 #[test]
 fn cancelling_a_sign_in_keeps_nothing() {
     let mut screen = loaded();
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     for c in "walki".chars() {
         screen.handle(Input::Type(c));
     }
@@ -169,7 +169,7 @@ fn cancelling_a_sign_in_keeps_nothing() {
     assert_eq!(screen.mode(), Mode::Browsing);
 
     // Starting again asks for the username afresh rather than remembering half a sign-in.
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     assert_eq!(screen.mode(), Mode::LoggingIn { password: false });
     screen.handle(Input::Submit);
     let (_, outcome) = screen.handle(Input::Submit);
@@ -186,7 +186,7 @@ fn cancelling_a_sign_in_keeps_nothing() {
 fn signing_out_is_the_same_key_once_signed_in() {
     let mut screen = loaded();
     screen.user = Some("walki".to_owned());
-    assert_eq!(screen.handle(Input::CycleFilter).1, UsdbOutcome::LogOut);
+    assert_eq!(screen.handle(Input::CycleLayout).1, UsdbOutcome::LogOut);
     assert!(strings(&draw(&mut screen))
         .iter()
         .any(|t| t.contains("walki")));
@@ -198,8 +198,8 @@ fn work_in_progress_is_visible_and_can_be_stopped() {
     let mut screen = loaded();
     assert_eq!(
         screen.handle(Input::ContextMenu).1,
-        UsdbOutcome::None,
-        "nothing to stop"
+        UsdbOutcome::Repair,
+        "with nothing to stop, that key repairs instead"
     );
 
     screen.activity = Activity {
@@ -227,7 +227,10 @@ fn a_problem_is_shown_in_words_rather_than_swallowed() {
 fn syncing_and_repairing_have_their_own_keys() {
     let mut screen = loaded();
     assert_eq!(screen.handle(Input::Sort).1, UsdbOutcome::Sync);
-    assert_eq!(screen.handle(Input::CycleLayout).1, UsdbOutcome::Repair);
+    // Repair shares a key with Stop, decided by whether there is anything to stop: cancelling
+    // is urgent and repairing is not.
+    assert_eq!(screen.handle(Input::ContextMenu).1, UsdbOutcome::Repair);
+    assert_eq!(screen.handle(Input::Type('g')).1, UsdbOutcome::GetTool);
 }
 
 #[test]
@@ -247,7 +250,7 @@ fn the_screen_stays_inside_the_window_at_every_size() {
             }
             if mode == 2 {
                 screen.handle(Input::Back);
-                screen.handle(Input::CycleFilter);
+                screen.handle(Input::CycleLayout);
             }
             let mut list = DrawList::new();
             screen.draw(&mut list, bounds, &style);
@@ -283,7 +286,7 @@ fn a_password_can_be_shown_while_it_is_being_typed() {
     // A password with symbols in it cannot be checked any other way, and a sign-in that fails
     // with no way to see what was typed is one nobody can debug.
     let mut screen = loaded();
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     screen.handle(Input::Submit); // past the username
     for c in "aZ0*^&%".chars() {
         screen.handle(Input::Type(c));
@@ -315,7 +318,7 @@ fn a_password_can_be_shown_while_it_is_being_typed() {
 fn showing_a_password_is_forgotten_when_the_field_is_left() {
     // Never remembered: the next sign-in starts hidden, whatever the last one did.
     let mut screen = loaded();
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     screen.handle(Input::Submit);
     screen.handle(Input::Sort);
     for c in "secret".chars() {
@@ -324,7 +327,7 @@ fn showing_a_password_is_forgotten_when_the_field_is_left() {
     assert!(strings(&draw(&mut screen)).iter().any(|t| t == "secret"));
 
     screen.handle(Input::Back);
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     screen.handle(Input::Submit);
     for c in "secret".chars() {
         screen.handle(Input::Type(c));
@@ -340,7 +343,7 @@ fn the_username_is_never_hidden() {
     // It is not a secret, and hiding it means somebody cannot check the one thing that is
     // easiest to get wrong.
     let mut screen = loaded();
-    screen.handle(Input::CycleFilter);
+    screen.handle(Input::CycleLayout);
     for c in "walki".chars() {
         screen.handle(Input::Type(c));
     }
@@ -356,7 +359,7 @@ fn the_reveal_button_can_be_clicked() {
     let style = Theme::builtin().resolve_default();
     let ready = || {
         let mut screen = loaded();
-        screen.handle(Input::CycleFilter);
+        screen.handle(Input::CycleLayout);
         screen.handle(Input::Submit);
         for c in "secret".chars() {
             screen.handle(Input::Type(c));
@@ -384,4 +387,98 @@ fn the_reveal_button_can_be_clicked() {
         }
     }
     assert!(clicked_somewhere, "the reveal button cannot be clicked");
+}
+
+#[test]
+fn the_filter_narrows_to_what_is_not_already_held() {
+    // The question this screen exists to answer. Thirty thousand songs is not a list anybody
+    // scrolls, and most of them are ones you already have.
+    let mut screen = loaded();
+    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Everything);
+    let (_, outcome) = screen.handle(Input::CycleFilter);
+    assert_eq!(outcome, UsdbOutcome::None);
+    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::New);
+    assert!(screen.needs_rows(), "it did not ask for the list again");
+
+    // And it says what it is hiding, because a list quietly missing songs looks like a
+    // catalog that does not have them.
+    let text = strings(&draw(&mut screen)).join(" ");
+    assert!(text.contains("Not in my library"), "{text}");
+}
+
+#[test]
+fn every_filter_keeps_what_it_claims_to() {
+    use rungstar_ui::usdbscreen::Narrow;
+    let absent = row(1, "A", "One", Local::Absent);
+    let held = row(2, "B", "Two", Local::Held);
+    let mut poor = row(3, "C", "Three", Local::Absent);
+    poor.rating = 2.0;
+    poor.golden = false;
+
+    assert!(Narrow::Everything.keeps(&absent) && Narrow::Everything.keeps(&held));
+    assert!(Narrow::New.keeps(&absent) && !Narrow::New.keeps(&held));
+    assert!(Narrow::Held.keeps(&held) && !Narrow::Held.keeps(&absent));
+    assert!(Narrow::WellRated.keeps(&absent) && !Narrow::WellRated.keeps(&poor));
+    assert!(Narrow::Golden.keeps(&absent) && !Narrow::Golden.keeps(&poor));
+}
+
+#[test]
+fn the_language_filter_only_offers_languages_the_catalog_has() {
+    let mut screen = loaded();
+    screen.languages = vec![("English".to_owned(), 900), ("German".to_owned(), 400)];
+    assert_eq!(screen.language, None, "everything, to begin with");
+
+    screen.handle(Input::Random);
+    assert_eq!(screen.language.as_deref(), Some("English"));
+    screen.handle(Input::Random);
+    assert_eq!(screen.language.as_deref(), Some("German"));
+    // Past the end is back to any, rather than stuck on the last one.
+    screen.handle(Input::Random);
+    assert_eq!(screen.language, None);
+
+    // With no catalog there is nothing to cycle and it stays at any.
+    let mut empty = loaded();
+    empty.handle(Input::Random);
+    assert_eq!(empty.language, None);
+}
+
+#[test]
+fn a_rating_is_drawn_as_shapes_rather_than_as_glyphs() {
+    // It was a star character until somebody saw five empty boxes: the game borrows a system
+    // font, and a borrowed font is not promised to have any particular glyph in it.
+    let mut screen = loaded();
+    let list = draw(&mut screen);
+    assert!(
+        !strings(&list)
+            .iter()
+            .any(|t| t.contains('\u{2605}') || t.contains('\u{2606}')),
+        "the rating is still drawn as text"
+    );
+    // Five pips per row, drawn as rounded rectangles.
+    let pips = list
+        .commands()
+        .iter()
+        .filter(|c| match c {
+            Command::Rect { rect, .. } | Command::Outline { rect, .. } => {
+                (rect.w - rect.h).abs() < 1.0 && rect.w > 2.0 && rect.w < 30.0
+            }
+            _ => false,
+        })
+        .count();
+    assert!(pips >= 15, "only {pips} pips for three rows of five");
+}
+
+#[test]
+fn a_signed_out_visitor_is_told_where_to_get_an_account() {
+    // Browsing works without one and downloading does not, and somebody who has never heard
+    // of USDB cannot guess that it is a website they register on first.
+    let mut screen = loaded();
+    let text = strings(&draw(&mut screen)).join(" ");
+    assert!(text.contains("usdb.animux.de"), "{text}");
+    assert!(text.contains("free USDB account"));
+
+    // And it goes away once they are in, rather than nagging forever.
+    screen.user = Some("walki".to_owned());
+    let text = strings(&draw(&mut screen)).join(" ");
+    assert!(!text.contains("usdb.animux.de"), "still nagging: {text}");
 }

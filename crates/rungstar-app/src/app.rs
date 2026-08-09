@@ -35,7 +35,7 @@ use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
 use rungstar_ui::theme::{Style, Theme};
-use rungstar_ui::usdbscreen::{Activity, Local, Row as UsdbRow, UsdbOutcome, UsdbScreen};
+use rungstar_ui::usdbscreen::{Activity, Local, Narrow, Row as UsdbRow, UsdbOutcome, UsdbScreen};
 use rungstar_ui::Color;
 
 mod session;
@@ -127,6 +127,13 @@ struct App {
     jukebox: bool,
     /// Set when the editor asked to start or stop its preview, which the frame loop owns.
     pending_editor_audio: bool,
+    /// What the library already has, so the catalog can say which songs are new.
+    ///
+    /// Rebuilt after a scan rather than queried per row: eight thousand rows is two hash sets
+    /// and a few milliseconds, and a query per visible row is a query per frame.
+    held: rungstar_library::Held,
+    /// Whether yt-dlp is available, and which version.
+    tool: Option<String>,
     /// The USDB worker, started the first time the browser is opened.
     ///
     /// Lazily, because it logs in: somebody who never opens it should not have their password
@@ -280,6 +287,8 @@ impl App {
             party_scores: None,
             jukebox: false,
             pending_editor_audio: false,
+            held: rungstar_library::Held::default(),
+            tool: None,
             usdb: None,
             pending_mics: false,
             singing: None,
@@ -1234,10 +1243,13 @@ impl App {
                     }
                 }
                 Route::Usdb => {
+                    self.refresh_held();
                     self.start_usdb();
                     let mut screen = UsdbScreen::new();
                     if let Some(job) = &self.usdb {
-                        screen.catalog_size = job.catalog().len();
+                        let catalog = job.catalog();
+                        screen.catalog_size = catalog.len();
+                        screen.languages = languages_in(&catalog);
                     }
                     self.stack.push(Screen::Usdb(Box::new(screen)));
                 }
@@ -1315,6 +1327,14 @@ impl App {
         }
     }
 
+    /// Re-read what the library holds, for marking the catalog.
+    fn refresh_held(&mut self) {
+        match self.library.held() {
+            Ok(held) => self.held = held,
+            Err(error) => tracing::warn!("could not read the library: {error}"),
+        }
+    }
+
     /// Start the USDB worker if it is not already running.
     fn start_usdb(&mut self) {
         if self.usdb.is_some() {
@@ -1355,6 +1375,12 @@ impl App {
                 self.start_usdb();
                 if let Some(job) = &mut self.usdb {
                     job.send(Order_::Download(id));
+                }
+            }
+            UsdbOutcome::GetTool => {
+                self.start_usdb();
+                if let Some(job) = &mut self.usdb {
+                    job.send(Order_::GetTool);
                 }
             }
             UsdbOutcome::Repair => {
@@ -1401,6 +1427,7 @@ impl App {
         let mut signed: Option<Option<String>> = None;
         let mut catalog_size: Option<usize> = None;
         let mut keeping: Option<usdbjob::Keeping> = None;
+        let mut tool_changed = false;
         for event in events {
             match event {
                 usdbjob::Event::Doing(what, fraction) => doing = Some((what, fraction)),
@@ -1434,31 +1461,51 @@ impl App {
                 }
                 usdbjob::Event::Problem(why) => problem = Some(why),
                 usdbjob::Event::Idle => idle = true,
+                usdbjob::Event::Tool(version) => {
+                    self.tool = version;
+                    tool_changed = true;
+                }
             }
         }
 
         let queued = job.queued();
         let fetching = job.fetching();
-        let known: Vec<UsdbRow> = if catalog_changed
-            || matches!(self.stack.last(), Some(Screen::Usdb(s)) if s.needs_rows())
-        {
+        let wants_rows =
+            catalog_changed || matches!(self.stack.last(), Some(Screen::Usdb(s)) if s.needs_rows());
+        let known: Vec<UsdbRow> = if wants_rows {
             let catalog = job.catalog();
-            let text = match self.stack.last() {
-                Some(Screen::Usdb(screen)) => screen.search_text().to_owned(),
-                _ => String::new(),
+            let (text, narrow, language) = match self.stack.last() {
+                Some(Screen::Usdb(screen)) => (
+                    screen.search_text().to_owned(),
+                    screen.narrow,
+                    screen.language.clone(),
+                ),
+                _ => (String::new(), Narrow::default(), None),
             };
             catalog
                 .search(&text)
                 .into_iter()
-                .take(500)
+                .filter(|song| {
+                    language
+                        .as_ref()
+                        .is_none_or(|wanted| song.language.eq_ignore_ascii_case(wanted))
+                })
                 .map(|song| {
+                    // Which of these are already on the disk. Matched on the USDB id when the
+                    // file carries one, and on the folded artist and title when it does not —
+                    // which is every song anybody added by hand. Offering to download a song
+                    // that is already there is the most annoying thing this screen can do.
                     let local = if Some(song.id) == fetching {
                         Local::Fetching
+                    } else if self.held.has(Some(song.id.0), &song.artist, &song.title) {
+                        Local::Held
                     } else {
                         Local::Absent
                     };
                     UsdbRow::from_catalog(song, local)
                 })
+                .filter(|row| narrow.keeps(row))
+                .take(2000)
                 .collect()
         } else {
             Vec::new()
@@ -1467,6 +1514,9 @@ impl App {
 
         if rescan {
             self.start_scan(false);
+            // The scan finishes later, but the song is on the disk now — so the row stops
+            // offering to download it again immediately rather than after the next scan.
+            self.refresh_held();
         }
         if let Some(who) = signed.clone() {
             self.settings.network.usdb_user = who.clone();
@@ -1509,6 +1559,14 @@ impl App {
         }
         if let Some(why) = problem {
             screen.problem = why;
+        }
+        // Said once, when the answer arrives, rather than as a standing warning: without
+        // yt-dlp nothing downloads, and a Download button that fails with no explanation is
+        // the worst version of that.
+        if tool_changed && self.tool.is_none() {
+            screen.problem =
+                "yt-dlp is not installed, so nothing can be downloaded yet. Press G to fetch it."
+                    .to_owned();
         }
     }
 
@@ -2040,6 +2098,23 @@ fn singing_players(chosen: usize, microphones: usize) -> usize {
         0 => microphones.max(1),
         chosen => chosen.min(microphones.max(1)),
     }
+}
+
+/// Every language in the catalog, most common first.
+///
+/// Walked rather than stored: the catalog is already in memory, and a second copy is a second
+/// thing to keep in step with a sync.
+fn languages_in(catalog: &rungstar_usdb::Catalog) -> Vec<(String, usize)> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for song in catalog.all() {
+        if song.language.trim().is_empty() {
+            continue;
+        }
+        *counts.entry(song.language.clone()).or_default() += 1;
+    }
+    let mut all: Vec<(String, usize)> = counts.into_iter().collect();
+    all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    all
 }
 
 /// Decode a song's audio far enough to draw it.

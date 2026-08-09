@@ -610,3 +610,79 @@ fn the_written_file_is_found_by_its_stem_and_partials_are_ignored() {
     assert_eq!(written(into, "Song"), Some(into.join("Song.webm")));
     assert_eq!(written(into, "Other"), None);
 }
+
+// ---------------------------------------------------------------- yt-dlp itself
+
+#[test]
+fn a_copy_on_the_path_is_preferred_over_one_we_fetched() {
+    // Somebody who installed it with their package manager is telling us which one to use,
+    // and downloading a second is both rude and confusing.
+    use rungstar_download::tool;
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path();
+
+    // Nothing anywhere.
+    let found = tool::find(data);
+    if !tool::on_the_path() {
+        assert_eq!(found, None, "it found a yt-dlp that is not there");
+
+        // A fetched one is then used.
+        let pretend = vec![0u8; 600_000];
+        let path = tool::install(data, &pretend).unwrap();
+        assert!(path.is_file());
+        assert_eq!(tool::find(data), Some(path));
+    }
+}
+
+#[test]
+fn an_error_page_is_not_installed_as_a_program() {
+    // GitHub answers a bad asset name with a few hundred bytes of HTML. Writing that out and
+    // marking it executable produces a failure nobody can read.
+    use rungstar_download::tool;
+    let directory = tempfile::tempdir().unwrap();
+    let error = tool::install(directory.path(), b"<html>404</html>").unwrap_err();
+    assert!(matches!(
+        error,
+        rungstar_download::ToolError::NotAProgram(16)
+    ));
+    assert!(!tool::managed_path(directory.path()).exists());
+}
+
+#[test]
+fn installing_leaves_nothing_half_written() {
+    use rungstar_download::tool;
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path();
+    tool::install(data, &vec![7u8; 600_000]).unwrap();
+
+    let left: Vec<String> = std::fs::read_dir(data.join("tools"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        left,
+        vec![tool::file_name().to_owned()],
+        "a part file survived"
+    );
+
+    // And installing again replaces it rather than failing.
+    tool::install(data, &vec![9u8; 600_000]).unwrap();
+    let bytes = std::fs::read(tool::managed_path(data)).unwrap();
+    assert_eq!(bytes[0], 9);
+}
+
+#[test]
+fn the_download_url_names_this_platform() {
+    use rungstar_download::tool;
+    let url = tool::download_url();
+    assert!(url.starts_with("https://github.com/yt-dlp/yt-dlp/releases/latest/"));
+    if cfg!(windows) {
+        assert!(url.ends_with("yt-dlp.exe"), "{url}");
+    } else if cfg!(target_os = "macos") {
+        assert!(url.ends_with("yt-dlp_macos"), "{url}");
+    } else {
+        // The standalone build, not the zipapp: a Deck in Game Mode may have no usable Python.
+        assert!(url.ends_with("yt-dlp_linux"), "{url}");
+    }
+}

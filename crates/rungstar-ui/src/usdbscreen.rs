@@ -46,8 +46,64 @@ pub enum UsdbOutcome {
     LogOut,
     /// Re-fetch everything a downloaded song is missing.
     Repair,
+    /// Fetch yt-dlp, without which nothing can be downloaded.
+    GetTool,
     /// The search text changed, so the rows want refreshing.
     Search(String),
+}
+
+/// What the list is narrowed to.
+///
+/// Thirty thousand songs is not a list anybody scrolls. The one that matters is the first:
+/// **what have they got that I have not**, which is the whole reason to open this screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Narrow {
+    #[default]
+    Everything,
+    /// Not in the library yet. The default question.
+    New,
+    /// Already downloaded, for checking or for fetching again.
+    Held,
+    /// Four stars and up.
+    WellRated,
+    /// Has golden notes, which usually means somebody took care over it.
+    Golden,
+}
+
+impl Narrow {
+    pub const ALL: [Narrow; 5] = [
+        Narrow::Everything,
+        Narrow::New,
+        Narrow::Held,
+        Narrow::WellRated,
+        Narrow::Golden,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Everything => "Everything",
+            Self::New => "Not in my library",
+            Self::Held => "Already have it",
+            Self::WellRated => "4 stars and up",
+            Self::Golden => "With golden notes",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|n| *n == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// Whether a row survives it.
+    pub fn keeps(self, row: &Row) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::New => row.local == Local::Absent,
+            Self::Held => row.local != Local::Absent,
+            Self::WellRated => row.rating >= 4.0,
+            Self::Golden => row.golden,
+        }
+    }
 }
 
 /// How a song in the catalog stands against the local library.
@@ -136,6 +192,13 @@ pub struct UsdbScreen {
     user_typed: String,
     /// The search the rows were fetched for.
     searched: String,
+    /// What the list is narrowed to.
+    pub narrow: Narrow,
+    /// Only songs in this language, when one is chosen. Taken from the catalog, so it only
+    /// ever offers languages USDB actually has.
+    pub language: Option<String>,
+    /// Every language in the catalog, most common first, supplied by the application.
+    pub languages: Vec<(String, usize)>,
     /// Whether the password is shown as itself rather than as dots.
     ///
     /// Off by default and never remembered. On is for the twenty seconds it takes to check a
@@ -167,6 +230,9 @@ impl UsdbScreen {
             keyboard: Keyboard::new(),
             user_typed: String::new(),
             searched: String::new(),
+            narrow: Narrow::default(),
+            language: None,
+            languages: Vec::new(),
             reveal: false,
             cursor: 0,
             scroll: 0,
@@ -245,6 +311,24 @@ impl UsdbScreen {
             // syncs instead: it is the other thing this screen does.
             Input::Sort => return (Transition::None, UsdbOutcome::Sync),
             Input::CycleFilter => {
+                self.narrow = self.narrow.next();
+                self.stale = true;
+                self.cursor = 0;
+                return (Transition::None, UsdbOutcome::None);
+            }
+            // Through the languages the catalog actually has, plus "any".
+            Input::Random => {
+                let index = self
+                    .language
+                    .as_ref()
+                    .and_then(|held| self.languages.iter().position(|(name, _)| name == held))
+                    .map_or(0, |at| at + 1);
+                self.language = self.languages.get(index).map(|(name, _)| name.clone());
+                self.stale = true;
+                self.cursor = 0;
+                return (Transition::None, UsdbOutcome::None);
+            }
+            Input::CycleLayout => {
                 return (
                     Transition::None,
                     match &self.user {
@@ -257,13 +341,22 @@ impl UsdbScreen {
                     },
                 )
             }
-            Input::CycleLayout => return (Transition::None, UsdbOutcome::Repair),
             Input::ContextMenu => {
-                if self.activity.busy() {
-                    return (Transition::None, UsdbOutcome::Cancel);
-                }
+                // One key, two meanings, decided by whether there is anything to stop:
+                // cancelling is urgent and repairing is not, so the urgent one wins.
+                return (
+                    Transition::None,
+                    if self.activity.busy() {
+                        UsdbOutcome::Cancel
+                    } else {
+                        UsdbOutcome::Repair
+                    },
+                );
             }
             Input::Back => return (Transition::Pop, UsdbOutcome::None),
+            // Fetching yt-dlp is a letter rather than a button on the screen: it is done once
+            // ever, and a permanent button for a one-off is clutter on every other visit.
+            Input::Type('g') | Input::Type('G') => return (Transition::None, UsdbOutcome::GetTool),
             _ => {}
         }
         (Transition::None, UsdbOutcome::None)
@@ -389,12 +482,25 @@ impl UsdbScreen {
     pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
         self.regions.clear();
         let widgets = Widgets::new(style);
-        let status = match (&self.user, self.catalog_size) {
-            (Some(user), 0) => format!("{user}  \u{b7}  no catalog yet"),
-            (Some(user), n) => format!("{user}  \u{b7}  {n} songs"),
-            (None, 0) => "not signed in".to_owned(),
-            (None, n) => format!("not signed in  \u{b7}  {n} songs"),
-        };
+        // What is being hidden, because a list quietly missing songs is indistinguishable
+        // from a catalog that does not have them.
+        let mut parts: Vec<String> = Vec::new();
+        if self.narrow != Narrow::Everything {
+            parts.push(self.narrow.label().to_owned());
+        }
+        if let Some(language) = &self.language {
+            parts.push(language.clone());
+        }
+        match &self.user {
+            Some(user) => parts.push(user.clone()),
+            None => parts.push("not signed in".to_owned()),
+        }
+        parts.push(match self.catalog_size {
+            0 => "no catalog yet".to_owned(),
+            n if self.rows.len() < n => format!("{} of {n}", self.rows.len()),
+            n => format!("{n} songs"),
+        });
+        let status = parts.join("  \u{b7}  ");
         let body = widgets.header(list, area, "USDB", &status);
         let body = widgets.footer(list, body, &self.hints());
 
@@ -408,13 +514,49 @@ impl UsdbScreen {
             body
         };
 
+        // A tip while signed out, above the list rather than instead of it: browsing works
+        // without an account and downloading does not, and somebody who has never heard of
+        // USDB has no way to guess that it is a website they have to register on first. Said
+        // once at the top and gone the moment they sign in.
+        let body = if self.user.is_none() {
+            let (tip, rest) = body.cut_top(style.gap(5.2));
+            let card = tip.inset_xy(style.gap(2.0), style.gap(0.4));
+            list.panel(card, style.surface_raised, style.metrics.radius);
+            let inner = card.inset_xy(style.gap(1.4), style.gap(0.4));
+            let (first, second) = inner.cut_top(inner.h * 0.5);
+            list.text(
+                first,
+                "You need a free USDB account to download songs",
+                TextStyle::new(style.text_size(), style.text)
+                    .bold()
+                    .valign(VAlign::Bottom)
+                    .overflow(Overflow::Ellipsis),
+            );
+            list.text(
+                second,
+                "Register at usdb.animux.de, then sign in here. Browsing and syncing the                  catalogue work without one.",
+                TextStyle::new(style.scaled_text(0.85), style.muted)
+                    .valign(VAlign::Top)
+                    .overflow(Overflow::Ellipsis),
+            );
+            rest
+        } else {
+            body
+        };
+
         let inner = body.inset(style.gap(2.0));
         if self.rows.is_empty() {
+            let filtered = self.narrow != Narrow::Everything || self.language.is_some();
             let (title, detail) = match (self.catalog_size, self.search_text().is_empty()) {
                 (0, _) => (
                     "No catalog yet",
                     "Sync to fetch the list of songs USDB has. It is a few hundred requests \
                      the first time and one or two after that.",
+                ),
+                _ if filtered => (
+                    "Nothing matches the filter",
+                    "Nothing in the catalog is left once this filter is applied. Change it or \
+                     turn it off.",
                 ),
                 (_, false) => (
                     "Nothing matches",
@@ -443,9 +585,11 @@ impl UsdbScreen {
                 let mut hints = vec![
                     (confirm, "Download"),
                     (if pad { "X" } else { "F" }, "Search"),
+                    (if pad { "LT" } else { "D" }, "Filter"),
+                    (if pad { "RT" } else { "R" }, "Language"),
                     (if pad { "Y" } else { "F3" }, "Sync"),
                     (
-                        if pad { "LT" } else { "D" },
+                        if pad { "LB" } else { "Tab" },
                         if self.user.is_some() {
                             "Sign out"
                         } else {
@@ -453,9 +597,14 @@ impl UsdbScreen {
                         },
                     ),
                 ];
-                if self.activity.busy() {
-                    hints.push((if pad { "RB" } else { "M" }, "Stop"));
-                }
+                hints.push((
+                    if pad { "RB" } else { "M" },
+                    if self.activity.busy() {
+                        "Stop"
+                    } else {
+                        "Repair"
+                    },
+                ));
                 hints.push((back, "Back"));
                 hints
             }
@@ -566,21 +715,43 @@ impl UsdbScreen {
                         .valign(VAlign::Bottom)
                         .overflow(Overflow::Ellipsis),
                 );
-                // Stars, drawn rather than written: five glyphs read faster than "4.5".
-                list.text(
-                    side,
-                    stars(row.rating),
-                    TextStyle::new(
-                        style.scaled_text(0.78),
-                        if selected {
-                            style.on_accent
-                        } else {
-                            style.warning
-                        },
-                    )
-                    .align(Align::End)
-                    .valign(VAlign::Top),
+                // The rating as five pips, drawn rather than written.
+                //
+                // It was a star glyph and an outlined-star glyph until somebody saw five empty
+                // boxes. The game borrows a system font and a borrowed font is not promised to
+                // contain any particular character; a shape the renderer draws itself cannot
+                // go missing on somebody else's machine.
+                let pip = style.gap(0.9);
+                let pips = Rect::new(
+                    side.right() - pip * 5.0,
+                    side.y + style.gap(0.4),
+                    pip * 5.0,
+                    pip,
                 );
+                let lit = if selected {
+                    style.on_accent
+                } else {
+                    style.warning
+                };
+                for star in 0..5 {
+                    let cell =
+                        Rect::new(pips.x + pip * star as f32, pips.y, pip, pip).inset(pip * 0.16);
+                    let whole = row.rating - star as f32;
+                    if whole >= 1.0 {
+                        list.panel(cell, lit, cell.h / 2.0);
+                    } else if whole >= 0.5 {
+                        // A half is drawn as a half, not rounded away: USDB rates in halves
+                        // and rounding loses the difference between a 3 and a 3.5.
+                        list.outline(cell, lit.alpha(0.5), 1.5, cell.h / 2.0);
+                        list.panel(
+                            Rect::new(cell.x, cell.y, cell.w / 2.0, cell.h),
+                            lit,
+                            cell.h / 2.0,
+                        );
+                    } else {
+                        list.outline(cell, lit.alpha(0.4), 1.5, cell.h / 2.0);
+                    }
+                }
             }
         });
         self.regions.extend(regions);
@@ -784,16 +955,4 @@ impl UsdbScreen {
             );
         }
     }
-}
-
-/// Five glyphs for a rating, halves included.
-fn stars(rating: f32) -> String {
-    let whole = rating.floor().clamp(0.0, 5.0) as usize;
-    let half = usize::from(rating - rating.floor() >= 0.5 && whole < 5);
-    let mut out = "\u{2605}".repeat(whole);
-    if half == 1 {
-        out.push('\u{00BD}');
-    }
-    out.push_str(&"\u{2606}".repeat(5 - whole - half));
-    out
 }

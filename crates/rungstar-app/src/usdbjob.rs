@@ -23,9 +23,14 @@ use rungstar_usdb::{Catalog, Credentials, Session, SongId, Usdb, UsdbError};
 pub enum Order_ {
     Sync,
     Download(SongId),
-    LogIn { user: String, password: String },
+    LogIn {
+        user: String,
+        password: String,
+    },
     LogOut,
     Repair,
+    /// Fetch yt-dlp into the data directory.
+    GetTool,
 }
 
 /// How a sign-in is being kept between launches.
@@ -55,6 +60,8 @@ pub enum Event {
     Problem(String),
     /// Nothing is happening any more.
     Idle,
+    /// Whether yt-dlp is available, and which version if so.
+    Tool(Option<String>),
 }
 
 /// The handle the application holds.
@@ -192,7 +199,12 @@ fn run(
     let files = Files {
         agent: ureq::Agent::new_with_defaults(),
     };
-    let extractor = rungstar_download::YtDlp::default();
+    // A copy on the PATH wins over one this program fetched: somebody who installed it with
+    // their package manager is telling us which one to use.
+    let mut tool = rungstar_download::tool::find(&data);
+    let _ = events.send(Event::Tool(
+        tool.as_deref().and_then(rungstar_download::tool::version),
+    ));
     let stop = Flag(Arc::clone(&cancel));
     let catalog_path = data.join("usdb-catalog.json");
     let scratch = songs.join(".rungstar-downloads");
@@ -305,12 +317,38 @@ fn run(
                 let _ = usdb.page(&rungstar_usdb::Endpoint::Logout);
                 let _ = events.send(Event::Signed(None, keeping));
             }
+            Order_::GetTool => {
+                let _ = events.send(Event::Doing("fetching yt-dlp".to_owned(), None));
+                match fetch_tool(&files, &data) {
+                    Ok(path) => {
+                        let version = rungstar_download::tool::version(&path);
+                        tool = Some(path);
+                        let _ = events.send(Event::Tool(version));
+                    }
+                    Err(error) => {
+                        let _ = events.send(Event::Problem(error));
+                        let _ = events.send(Event::Tool(None));
+                    }
+                }
+                let _ = events.send(Event::Idle);
+            }
             Order_::Sync => {
                 sync(&mut usdb, &catalog, &catalog_path, &cancel, &events);
                 let _ = events.send(Event::Idle);
             }
             Order_::Download(id) => {
                 let _ = events.send(Event::Fetching(id));
+                let Some(program) = tool.clone() else {
+                    let _ = events.send(Event::Problem(
+                        "yt-dlp is needed to download songs, and is not installed. Press G to \
+                         fetch it."
+                            .to_owned(),
+                    ));
+                    let _ = events.send(Event::Downloaded(id, PathBuf::new(), Outcome::Cancelled));
+                    let _ = events.send(Event::Idle);
+                    continue;
+                };
+                let extractor = rungstar_download::YtDlp::at(program);
                 match fetch_one(
                     &mut usdb, id, &songs, &scratch, &files, &extractor, &stop, &events, &catalog,
                 ) {
@@ -342,6 +380,10 @@ fn run(
                         format!("repairing {id}: {}", names.join(", ")),
                         Some((index as f32 + 1.0) / broken.len() as f32),
                     ));
+                    let extractor = match tool.clone() {
+                        Some(program) => rungstar_download::YtDlp::at(program),
+                        None => rungstar_download::YtDlp::default(),
+                    };
                     let _ = fetch_one(
                         &mut usdb, *id, &songs, &scratch, &files, &extractor, &stop, &events,
                         &catalog,
@@ -351,6 +393,17 @@ fn run(
             }
         }
     }
+}
+
+/// Download yt-dlp into the data directory.
+///
+/// From the `latest` redirect rather than a pinned version: YouTube changes its extraction
+/// often enough that a pinned yt-dlp is a broken yt-dlp within weeks, which is the whole
+/// reason this shells out rather than reimplementing it.
+fn fetch_tool(files: &Files, data: &std::path::Path) -> Result<PathBuf, String> {
+    let url = rungstar_download::tool::download_url();
+    let bytes = files.get(&url).map_err(|e| format!("{url}: {e}"))?;
+    rungstar_download::tool::install(data, &bytes).map_err(|e| e.to_string())
 }
 
 fn sync(

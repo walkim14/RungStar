@@ -8,4 +8,4 @@ pub use db::{Database, DbError, Freshness};
 pub use model::{SearchField, SongEntry, SortKey};
 pub use playlist::{Playlist, PlaylistItem};
 pub use scan::{scan, scan_with_progress, Progress, ScanOptions, ScanReport};
-pub use search::{Filters, SearchQuery};
+pub use search::{Filters, Held, SearchQuery};

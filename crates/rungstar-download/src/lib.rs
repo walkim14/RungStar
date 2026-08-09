@@ -23,11 +23,13 @@
 pub mod meta;
 pub mod pipeline;
 pub mod plan;
+pub mod tool;
 pub mod ytdlp;
 
 pub use meta::{Kind, Resource, SyncMeta};
 pub use pipeline::{download, needs_repair, Fetcher, Outcome, Progress, Report, Stop};
 pub use plan::{plan, Plan, Source, Step};
+pub use tool::ToolError;
 pub use ytdlp::{Extraction, Extractor, YtDlp};
 
 /// Why a download failed.

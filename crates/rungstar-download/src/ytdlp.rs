@@ -75,6 +75,13 @@ impl Default for YtDlp {
     }
 }
 
+impl YtDlp {
+    /// Use a particular copy, which is how a fetched one in the data directory is reached.
+    pub fn at(program: PathBuf) -> Self {
+        Self { program }
+    }
+}
+
 /// The arguments for one extraction, as data.
 ///
 /// Built separately from being run so the command can be asserted in a test — which is the
