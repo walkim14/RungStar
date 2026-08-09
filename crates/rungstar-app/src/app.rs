@@ -2476,6 +2476,10 @@ fn main() -> Result<()> {
     // starts" a thing that can be asserted rather than looked at, on a build machine with
     // nobody in front of it.
     let check_only = std::env::args().any(|a| a == "--check");
+    // Everything the audio backend says about the microphones, and what each one actually
+    // delivers. Its own mode because the answer is needed on a machine that is misbehaving,
+    // from somebody who cannot be asked to read a log.
+    let list_devices = std::env::args().any(|a| a == "--devices");
 
     let data_dir = paths::data_directory();
     let mut app = App::new(data_dir)?;
@@ -2509,6 +2513,9 @@ fn main() -> Result<()> {
     let mut renderer = Renderer::new(canvas, fonts).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let audio_subsystem = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
+    if list_devices {
+        return report_devices(&audio_subsystem);
+    }
     // Never fails: a machine with no sound card gets a quiet game rather than no game.
     let mut sfx = Sfx::new(&audio_subsystem);
     sfx.set_volume(app.settings.sound.effects_volume as f32 / 100.0);
@@ -2878,6 +2885,100 @@ fn main() -> Result<()> {
     }
 
     app.save_settings();
+    Ok(())
+}
+
+/// List every capture device and say what each one actually delivers.
+///
+/// **Written because a Steam Deck showed every microphone twice**, and four entries for two
+/// identical USB microphones, with only one of them registering anything. From outside, a
+/// backend listing the same device twice and two real devices that share a name look exactly
+/// alike — the name is all there is to go on. Opening each one and reporting what arrives tells
+/// them apart in two seconds, which no amount of reading the list can.
+fn report_devices(audio: &sdl3::AudioSubsystem) -> Result<()> {
+    use rungstar_audio::CaptureBackend;
+
+    println!("audio driver  {}", audio.current_audio_driver());
+    let capture = SdlCapture::new(audio.clone());
+    let devices = capture.devices().map_err(|e| anyhow::anyhow!("{e}"))?;
+    if devices.is_empty() {
+        println!("no recording devices at all");
+        return Ok(());
+    }
+    println!(
+        "{} recording devices
+",
+        devices.len()
+    );
+
+    for device in &devices {
+        // Every channel on, so a device that only carries audio on its right is not reported
+        // as silent.
+        let config = rungstar_audio::DeviceConfig {
+            name: device.name.clone(),
+            occurrence: device.occurrence,
+            latency_ms: rungstar_audio::capture::LATENCY_AUTODETECT,
+            channel_to_player: vec![1, 2],
+        };
+        let mut one = SdlCapture::new(audio.clone());
+        let opened = one.start(std::slice::from_ref(&config), 44_100);
+
+        let mut buffers = rungstar_audio::PlayerBuffers::new();
+        let mut peak = [0.0f32; 2];
+        let mut frames = 0usize;
+        if opened.is_ok() {
+            // Two seconds is long enough for a device that works to have said something, and
+            // short enough to sit through for each of four entries.
+            let until = Instant::now() + std::time::Duration::from_secs(2);
+            while Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if one.drain(&mut buffers).is_err() {
+                    break;
+                }
+                for (index, slot) in [1u8, 2].iter().enumerate() {
+                    let samples = buffers.player(*slot);
+                    frames += samples.len();
+                    for sample in samples {
+                        peak[index] = peak[index].max(f32::from(sample.saturating_abs()) / 32768.0);
+                    }
+                }
+                // Drained rather than accumulated: the buffers grow for as long as nothing
+                // reads them, and two seconds of two channels is not worth holding.
+                buffers.clear();
+            }
+        }
+        one.stop();
+
+        let name = if devices.iter().filter(|d| d.name == device.name).count() > 1 {
+            format!("{} ({})", device.name, device.occurrence + 1)
+        } else {
+            device.name.clone()
+        };
+        match opened {
+            Err(error) => println!(
+                "  {name}
+      will not open: {error}"
+            ),
+            Ok(()) if frames == 0 => {
+                println!(
+                    "  {name}
+      opens, delivers nothing"
+                )
+            }
+            Ok(()) => println!(
+                "  {name}
+      {frames} samples, peak L {:.0}%  R {:.0}%",
+                peak[0] * 100.0,
+                peak[1] * 100.0
+            ),
+        }
+    }
+
+    println!();
+    println!("Speak into ONE microphone while this runs, and read the peaks:");
+    println!("  two entries that both hear it are the same device listed twice");
+    println!("  one entry hearing it and its twin at 0% are two real microphones");
+    println!("  0% on everything means nothing is reaching the game at all");
     Ok(())
 }
 

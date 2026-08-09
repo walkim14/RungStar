@@ -326,6 +326,13 @@ impl Default for GraphicsSettings {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MicAssignment {
     pub name: String,
+    /// Which device of this name, counting from zero.
+    ///
+    /// Defaulted rather than required, so a settings file written before two identical
+    /// microphones were told apart still reads — it means the first one, which is what it
+    /// always meant.
+    #[serde(default)]
+    pub occurrence: u32,
     /// One entry per channel: `0` for off, otherwise a one-based singer number.
     pub channels: Vec<u8>,
 }

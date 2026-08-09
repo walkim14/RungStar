@@ -28,8 +28,13 @@ pub const LATENCY_AUTODETECT: i32 = -1;
 pub struct DeviceConfig {
     /// Name as reported by the audio backend, used to find it again after a restart.
     pub name: String,
-    /// Which recording source on the device, for hardware that exposes several.
-    pub input_index: u32,
+    /// Which device of this name, counting from zero.
+    ///
+    /// Identity is the pair, not the name. Names are used rather than backend ids because ids
+    /// are reassigned when hardware is re-plugged and a saved setup has to survive that — but
+    /// a name alone cannot tell two identical microphones apart, and a pair of the same model
+    /// is the ordinary way somebody ends up with two.
+    pub occurrence: u32,
     /// Requested latency in milliseconds, or [`LATENCY_AUTODETECT`].
     pub latency_ms: i32,
     /// One entry per channel: [`CHANNEL_OFF`], or a one-based player number.
@@ -41,7 +46,7 @@ impl DeviceConfig {
     pub fn silent(name: impl Into<String>, channels: usize) -> Self {
         Self {
             name: name.into(),
-            input_index: 0,
+            occurrence: 0,
             latency_ms: LATENCY_AUTODETECT,
             channel_to_player: vec![CHANNEL_OFF; channels],
         }
@@ -170,7 +175,7 @@ mod tests {
     fn dual_mic_adapter() -> DeviceConfig {
         DeviceConfig {
             name: "USB Audio Device".to_owned(),
-            input_index: 0,
+            occurrence: 0,
             latency_ms: LATENCY_AUTODETECT,
             channel_to_player: vec![1, 2],
         }
@@ -265,7 +270,7 @@ mod tests {
     fn a_six_channel_interface_can_feed_every_player() {
         let config = DeviceConfig {
             name: "Focusrite".to_owned(),
-            input_index: 0,
+            occurrence: 0,
             latency_ms: 10,
             channel_to_player: vec![1, 2, 3, 4, 5, 6],
         };
@@ -287,7 +292,7 @@ mod more_tests {
     fn device(name: &str, first_slot: u8) -> DeviceConfig {
         DeviceConfig {
             name: name.to_owned(),
-            input_index: 0,
+            occurrence: 0,
             latency_ms: LATENCY_AUTODETECT,
             channel_to_player: vec![first_slot, first_slot + 1],
         }
@@ -333,7 +338,7 @@ mod more_tests {
         let mut buffers = PlayerBuffers::new();
         let config = DeviceConfig {
             name: "one live channel".to_owned(),
-            input_index: 0,
+            occurrence: 0,
             latency_ms: LATENCY_AUTODETECT,
             channel_to_player: vec![1, CHANNEL_OFF],
         };

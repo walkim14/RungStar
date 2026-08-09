@@ -28,6 +28,14 @@ pub use decode::{AudioClip, DecodeError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub name: String,
+    /// Which device of this name it is, counting from zero in enumeration order.
+    ///
+    /// **Two identical microphones report identical names**, which is exactly what a pair of
+    /// the same USB karaoke mics is, and it is the common case rather than a curiosity. Without
+    /// this they are one device as far as everything downstream is concerned: both singers are
+    /// routed to whichever one the backend happened to list first, and the second microphone is
+    /// dead with no indication why.
+    pub occurrence: u32,
     pub channels: usize,
     /// Rates the device will accept, best first. Empty when the backend does not say.
     pub sample_rates: Vec<u32>,
@@ -103,6 +111,7 @@ impl CaptureBackend for ScriptedCapture {
             .enumerate()
             .map(|(i, _)| DeviceInfo {
                 name: format!("Scripted {i}"),
+                occurrence: 0,
                 channels: 2,
                 sample_rates: vec![44_100],
             })

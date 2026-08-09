@@ -702,13 +702,39 @@ fn looks_virtual(name: &str) -> bool {
     VIRTUAL_DEVICES.iter().any(|bad| lower.contains(bad))
 }
 
+/// What to call a device on screen.
+///
+/// Two identical microphones report identical names, so the list shows the same line twice and
+/// there is no way to tell which meter belongs to which hand. Numbered only when there is more
+/// than one — a lone microphone called "Logitech USB Microphone (1)" invites the question of
+/// where the other one is.
+fn label_for(device: &DeviceConfig, all: &[DeviceConfig]) -> String {
+    let same_name = all.iter().filter(|d| d.name == device.name).count();
+    if same_name < 2 {
+        return device.name.clone();
+    }
+    format!("{} ({})", device.name, device.occurrence + 1)
+}
+
 /// Apply a saved assignment to the devices that are actually present.
 ///
-/// Matched by name, and anything unrecognised keeps whatever was worked out for it, so
-/// plugging in a new microphone does not discard the setup for the old ones.
+/// Matched by name **and which device of that name**, and anything unrecognised keeps whatever
+/// was worked out for it, so plugging in a new microphone does not discard the setup for the
+/// old ones. Matching on the name alone gave both of a pair of identical microphones the same
+/// assignment, which is the same singer twice and nobody on the other one.
 pub fn apply_saved(devices: &mut [DeviceConfig], saved: &[rungstar_ui::settings::MicAssignment]) {
     for device in devices.iter_mut() {
-        if let Some(entry) = saved.iter().find(|s| s.name == device.name) {
+        let found = saved
+            .iter()
+            .find(|s| s.name == device.name && s.occurrence == device.occurrence)
+            // A setting written before occurrences existed has none, and there is only one
+            // sensible thing it can mean: the first device of that name.
+            .or_else(|| {
+                saved
+                    .iter()
+                    .find(|s| s.name == device.name && s.occurrence == 0 && device.occurrence == 0)
+            });
+        if let Some(entry) = found {
             // Channel counts can change when a device is re-enumerated; keep whatever fits.
             for (channel, player) in entry.channels.iter().enumerate() {
                 if channel < device.channel_to_player.len() {
@@ -737,9 +763,9 @@ pub fn choose_devices(capture: &SdlCapture, players: usize) -> Vec<DeviceConfig>
         .into_iter()
         .enumerate()
         .filter(|(_, device)| !looks_virtual(&device.name))
-        .map(|(index, device)| DeviceConfig {
+        .map(|(_, device)| DeviceConfig {
             name: device.name.clone(),
-            input_index: index as u32,
+            occurrence: device.occurrence,
             latency_ms: rungstar_audio::capture::LATENCY_AUTODETECT,
             channel_to_player: vec![0; device.channels.max(1)],
         })
@@ -844,6 +870,7 @@ impl Monitor {
             .iter()
             .map(|device| rungstar_ui::settings::MicAssignment {
                 name: device.name.clone(),
+                occurrence: device.occurrence,
                 channels: device.channel_to_player.clone(),
             })
             .collect()
@@ -925,7 +952,7 @@ impl Monitor {
             .iter()
             .enumerate()
             .map(|(index, device)| rungstar_ui::micscreen::Device {
-                name: device.name.clone(),
+                name: label_for(device, &self.devices),
                 assignment: device.channel_to_player.clone(),
                 levels: self.levels.get(index).cloned().unwrap_or_default(),
                 heard: self.heard.get(index).cloned().unwrap_or_default(),
@@ -946,6 +973,87 @@ impl Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mic(name: &str, occurrence: u32) -> DeviceConfig {
+        DeviceConfig {
+            name: name.to_owned(),
+            occurrence,
+            latency_ms: rungstar_audio::capture::LATENCY_AUTODETECT,
+            channel_to_player: vec![0, 0],
+        }
+    }
+
+    fn saved(name: &str, occurrence: u32, channels: &[u8]) -> rungstar_ui::settings::MicAssignment {
+        rungstar_ui::settings::MicAssignment {
+            name: name.to_owned(),
+            occurrence,
+            channels: channels.to_vec(),
+        }
+    }
+
+    #[test]
+    fn two_microphones_of_the_same_model_are_two_microphones() {
+        // A pair of identical USB karaoke microphones report identical names — which is the
+        // ordinary way somebody ends up with two, not a curiosity. Matched on the name alone,
+        // both got the first one's assignment: the same singer twice, and nobody at all on the
+        // other microphone, with nothing on screen to say why.
+        let mut found = vec![mic("Logitech USB Mic", 0), mic("Logitech USB Mic", 1)];
+        apply_saved(
+            &mut found,
+            &[
+                saved("Logitech USB Mic", 0, &[1, 0]),
+                saved("Logitech USB Mic", 1, &[2, 0]),
+            ],
+        );
+        assert_eq!(found[0].channel_to_player, vec![1, 0]);
+        assert_eq!(found[1].channel_to_player, vec![2, 0]);
+    }
+
+    #[test]
+    fn a_setting_written_before_they_were_told_apart_still_reads() {
+        // No `occurrence` in the file means the first device of that name, which is what it
+        // meant when it was written. It must not silently apply to the second one as well.
+        let mut found = vec![mic("Built-in Microphone", 0), mic("Built-in Microphone", 1)];
+        let mut old = saved("Built-in Microphone", 0, &[3, 0]);
+        old.occurrence = 0;
+        apply_saved(&mut found, &[old]);
+        assert_eq!(found[0].channel_to_player, vec![3, 0]);
+        assert_eq!(
+            found[1].channel_to_player,
+            vec![0, 0],
+            "the twin was claimed"
+        );
+    }
+
+    #[test]
+    fn duplicates_are_numbered_and_a_lone_microphone_is_not() {
+        // A single microphone called "Logitech USB Mic (1)" invites the question of where the
+        // other one is.
+        let pair = vec![mic("Logitech USB Mic", 0), mic("Logitech USB Mic", 1)];
+        assert_eq!(label_for(&pair[0], &pair), "Logitech USB Mic (1)");
+        assert_eq!(label_for(&pair[1], &pair), "Logitech USB Mic (2)");
+
+        let alone = vec![mic("Built-in Microphone", 0)];
+        assert_eq!(label_for(&alone[0], &alone), "Built-in Microphone");
+    }
+
+    #[test]
+    fn each_of_a_pair_gets_its_own_singer() {
+        // The automatic assignment, which is what somebody sees before they touch anything:
+        // one singer per device before a second channel of any device.
+        let mut found = vec![mic("Logitech USB Mic", 0), mic("Logitech USB Mic", 1)];
+        let mut assigned = 0u8;
+        for config in found.iter_mut() {
+            assigned += 1;
+            config.channel_to_player[0] = assigned;
+        }
+        assert_eq!(found[0].channel_to_player[0], 1);
+        assert_eq!(found[1].channel_to_player[0], 2);
+        assert_ne!(
+            found[0].occurrence, found[1].occurrence,
+            "they must be openable as different devices"
+        );
+    }
 
     #[test]
     fn a_song_plays_its_outro_rather_than_stopping_on_the_last_note() {

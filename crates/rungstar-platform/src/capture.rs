@@ -32,18 +32,34 @@ impl SdlCapture {
         }
     }
 
-    /// Find a device by the name the backend reported.
+    /// Find the `occurrence`-th device called `name`.
     ///
     /// Names are matched rather than ids because ids are reassigned when hardware is
-    /// re-plugged, and a saved setup has to survive that.
-    fn find(&self, name: &str) -> Result<sdl3::audio::AudioDeviceID, AudioError> {
+    /// re-plugged, and a saved setup has to survive that. The occurrence is what makes the
+    /// name enough: **two identical microphones report identical names**, and matching on the
+    /// name alone returned the first one for both of them — so both singers were routed to one
+    /// microphone and the other was silent, with nothing on screen to say why.
+    fn find(&self, name: &str, occurrence: u32) -> Result<sdl3::audio::AudioDeviceID, AudioError> {
         let ids = self
             .audio
             .audio_recording_device_ids()
             .map_err(|e| AudioError::Backend(e.to_string()))?;
-        ids.into_iter()
-            .find(|id| id.name().is_ok_and(|n| n == name))
-            .ok_or_else(|| AudioError::DeviceNotFound(name.to_owned()))
+        let mut seen = 0;
+        let mut first = None;
+        for id in ids {
+            if !id.name().is_ok_and(|n| n == name) {
+                continue;
+            }
+            if seen == occurrence {
+                return Ok(id);
+            }
+            first.get_or_insert(id);
+            seen += 1;
+        }
+        // One of a pair unplugged since the setup was saved. The remaining one is the better
+        // answer than nothing: a singer on a working microphone beats an error about a
+        // missing one.
+        first.ok_or_else(|| AudioError::DeviceNotFound(name.to_owned()))
     }
 }
 
@@ -53,15 +69,20 @@ impl CaptureBackend for SdlCapture {
             .audio
             .audio_recording_device_ids()
             .map_err(|e| AudioError::Backend(e.to_string()))?;
+        let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         Ok(ids
             .into_iter()
             .filter_map(|id| {
                 let name = id.name().ok()?;
+                let occurrence = seen.entry(name.clone()).or_default();
+                let this = *occurrence;
+                *occurrence += 1;
                 // SDL does not report a channel count before the device is opened. Two is
                 // the useful assumption: the dual-microphone adapters are all stereo, and a
                 // mono device simply leaves its second channel unmapped.
                 Some(DeviceInfo {
                     name,
+                    occurrence: this,
                     channels: 2,
                     sample_rates: Vec::new(),
                 })
@@ -80,7 +101,7 @@ impl CaptureBackend for SdlCapture {
             {
                 continue;
             }
-            let id = self.find(&config.name)?;
+            let id = self.find(&config.name, config.occurrence)?;
             let spec = AudioSpec {
                 freq: Some(sample_rate as i32),
                 channels: Some(config.channels() as i32),
