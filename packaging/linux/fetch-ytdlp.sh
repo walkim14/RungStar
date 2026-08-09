@@ -37,7 +37,32 @@ sha="$(sha256sum "$tmp/$asset" | cut -d' ' -f1)"
 # The URL is the `latest` redirect, so the checksum is what actually pins it. Resolve it to the
 # versioned URL as well, so a rebuild of this exact manifest fetches this exact file rather
 # than whatever "latest" has become since.
-resolved="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$url")"
+#
+# By **tag**, not by following the redirect. `latest/download/...` redirects to a signed asset
+# URL with an expiry an hour away, so writing that into the manifest produces a build that
+# works this afternoon and 403s tomorrow — which is the opposite of pinning.
+#
+# Two things about parsing it. GitHub sends the whole release as a single line, so a greedy
+# pattern over it finds the *last* `tag_name` in the document rather than the first and there
+# are several — hence splitting on commas. And the JSON is fetched to a file rather than piped
+# into `grep -m1`: `grep` closing the pipe after its first match hands curl a SIGPIPE, which
+# under `pipefail` kills the script one line after it has already got the answer it wanted.
+curl -fsSL -o "$tmp/release.json" https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest
+tag="$(tr ',' '
+' < "$tmp/release.json" | grep '"tag_name"' | head -1 | cut -d'"' -f4)"
+if [ -z "$tag" ]; then
+    echo "could not work out which release is current" >&2
+    exit 1
+fi
+resolved="https://github.com/yt-dlp/yt-dlp/releases/download/${tag}/${asset}"
+
+# And check that the tag really serves the bytes that were just hashed, rather than assuming
+# `latest` and the tag are the same thing at the moment this runs.
+curl -fsSL -o "$tmp/by-tag" "$resolved"
+if [ "$(sha256sum "$tmp/by-tag" | cut -d' ' -f1)" != "$sha" ]; then
+    echo "$tag does not serve what latest/ served; try again" >&2
+    exit 1
+fi
 
 cat > "$out" <<JSON
 {

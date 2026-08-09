@@ -16,9 +16,21 @@ pub fn asset_paths(kind: &str, name: &str) -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(beside) = exe.parent() {
             paths.push(beside.join("assets").join(kind).join(name));
-            // One level up as well, for `target/release/rungstar` run from the source tree.
+            // One level up as well, for `target/release/rungstar` run from the source tree,
+            // and for a Windows zip whose executable sits beside an `assets` folder.
             if let Some(up) = beside.parent() {
                 paths.push(up.join("assets").join(kind).join(name));
+                // `<prefix>/share/rungstar/assets`, which is where a Linux package puts them
+                // and where the Flatpak does. Without this the Flatpak started, borrowed
+                // DejaVu and played nothing — it looked like a working build until `--check`
+                // printed `0/6 sounds`, which is exactly what that line is for.
+                paths.push(
+                    up.join("share")
+                        .join("rungstar")
+                        .join("assets")
+                        .join(kind)
+                        .join(name),
+                );
             }
         }
     }

@@ -96,20 +96,60 @@ for the permissions the game actually needs and no more:
 
 - `--socket=pulseaudio` for output **and microphone capture**
 - `--device=all` for controllers, which `--device=dri` alone does not cover
-- `--filesystem=xdg-music` and `xdg-videos` for song folders
+- `--filesystem=xdg-music`, `xdg-videos` and `/run/media` for song folders — the last because
+  on a Deck a library of any size lives on the SD card
 - `--share=network` for USDB
 
 Not requested: `--filesystem=home`. A karaoke game does not need to read everything, and a song
-folder outside the music directory can be granted with `flatpak override` by whoever wants it
-there.
+folder somewhere else can be granted with `flatpak override` by whoever wants it there.
 
 ```bash
-flatpak-builder --user --install --force-clean build packaging/linux/de.rungstar.RungStar.yml
+bash packaging/linux/build-flatpak.sh     # one .flatpak file, ready to copy to a Deck
 bash packaging/linux/appimage.sh          # the AppImage, for everything else
 ```
 
+`build-flatpak.sh` runs on **any** Linux with `flatpak` and `flatpak-builder`, including WSL —
+which is how the first Deck build was made from a Windows machine. The host distribution does
+not matter, because a Flatpak links against `org.freedesktop.Platform` rather than against
+anything installed on the builder. It fetches the runtime, generates the pinned sources, builds,
+and wraps the result as a single `.flatpak` bundle.
+
+Two things the manifest has to do that are not obvious:
+
+- **SDL3 is built from source as a module.** The 24.08 runtime ships SDL2 and nothing newer —
+  SDL3 is younger than the runtime — so there is nothing to link against. It installs to
+  `/app/lib` rather than CMake's default `lib64`, and `LIBRARY_PATH` points the linker there,
+  because the `sdl3` crate emits a bare `-lSDL3` with a relative search path.
+- **`llvm18` is an SDK extension**, for the libclang that `ffmpeg-sys` needs to generate its
+  bindings. The base SDK has gcc and no clang at all.
+
+FFmpeg itself comes from the runtime, and `/usr/bin/ffmpeg` is on the PATH inside the sandbox —
+so yt-dlp can merge streams and downloads are full quality, with nothing bundled.
+
 The AppImage exists for distributions where Flatpak is not set up. It bundles SDL3 and FFmpeg
 and expects a system OpenGL/Vulkan driver, as every AppImage does.
+
+### Installing it on a Steam Deck
+
+In Desktop Mode, with the `.flatpak` file copied across:
+
+```bash
+flatpak install --user ./RungStar.flatpak
+flatpak run de.rungstar.RungStar --check
+```
+
+Run `--check` first. It draws every screen and exits, and prints what the packaged build
+actually found — which is how the assets being installed to `share/rungstar/assets` while the
+game looked beside its own executable was caught. A build with that wrong still starts, borrows
+a system font and plays nothing:
+
+```
+fonts    RungStar-Regular.ttf + RungStar-Fallback.ttf + DejaVuSans.ttf
+sounds   6/6 loaded, device open, 4410 bytes queued
+```
+
+Then, in Game Mode, add it from the Steam library — Desktop Mode's application menu has an entry
+for it, which "Add to Steam" picks up.
 
 ## Steam
 

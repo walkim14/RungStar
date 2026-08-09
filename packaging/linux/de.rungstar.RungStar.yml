@@ -11,6 +11,10 @@ runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, which `ffmpeg-sys` needs to generate its bindings. The base SDK has gcc and no
+  # clang at all, and without this the build fails deep inside a dependency with a message
+  # about a shared library rather than about a missing compiler.
+  - org.freedesktop.Sdk.Extension.llvm18
 command: rungstar
 
 # The full codec set. The base runtime ships a cut-down FFmpeg, and a song library is 88.8%
@@ -26,9 +30,12 @@ add-extensions:
     autodelete: false
 
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm18/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm18/lib
   env:
     CARGO_HOME: /run/build/rungstar/cargo
+    # bindgen looks for libclang here rather than on the linker path.
+    LIBCLANG_PATH: /usr/lib/sdk/llvm18/lib
 
 finish-args:
   # Graphics and windowing. Wayland first, X11 as the fallback, which is also what a Gamescope
@@ -53,8 +60,51 @@ finish-args:
   # everything, and a folder somewhere else can be granted with `flatpak override`.
   - --filesystem=xdg-music
   - --filesystem=xdg-videos
+  # And the SD card, because on a Steam Deck that is where a song library of any size lives.
+  # /run/media is only removable drives — narrower than home by a long way, and the difference
+  # between the game working out of the box on a Deck and needing a terminal first.
+  - --filesystem=/run/media
+
+# Headers and build metadata, thrown away once everything is built. Declared here rather than
+# on the SDL3 module: a module's own `cleanup` runs the moment that module finishes, so putting
+# `/lib/pkgconfig` there deletes `sdl3.pc` *before* the game is compiled, and the build gets all
+# the way to the link step and then cannot find -lSDL3.
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/aclocal
+  - '*.a'
+  - '*.la'
 
 modules:
+  # SDL3 from source. The 24.08 runtime ships SDL2 and nothing newer — SDL3 is younger than
+  # the runtime — so there is nothing to link against and it has to be built. Two things are
+  # turned off deliberately: the tests, which double the build time, and the static library,
+  # which nothing here links.
+  - name: sdl3
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      # `lib`, not the `lib64` CMake picks on x86_64. Flatpak's own convention is `/app/lib`,
+      # and it is what everything downstream — the runtime linker, `LIBRARY_PATH`, the
+      # `add-ld-path` on the ffmpeg extension — already looks at.
+      - -DCMAKE_INSTALL_LIBDIR=lib
+      - -DSDL_SHARED=ON
+      - -DSDL_STATIC=OFF
+      - -DSDL_TESTS=OFF
+      - -DSDL_EXAMPLES=OFF
+      - -DSDL_INSTALL_TESTS=OFF
+      # Wayland and X11 both, because a Deck is Wayland in Game Mode and X11 under a desktop
+      # session, and one binary has to cope with being started either way.
+      - -DSDL_WAYLAND=ON
+      - -DSDL_X11=ON
+      - -DSDL_PULSEAUDIO=ON
+    sources:
+      - type: archive
+        url: https://github.com/libsdl-org/SDL/releases/download/release-3.4.14/SDL3-3.4.14.tar.gz
+        sha256: 30d4aa2b3037718142b32dffd4e72f917ebb6cc5227150e7bb9c45efb2153aeb
+
   - name: rungstar
     buildsystem: simple
     build-options:
@@ -62,6 +112,15 @@ modules:
         # The vendored FFmpeg is a Windows build; on Linux the runtime's own libraries are
         # used, which is what the ffmpeg-sys build script expects to find by default.
         RUSTFLAGS: '-C link-arg=-s'
+        # Where the SDL3 built by the module above ended up. The `sdl3` crate emits a bare
+        # `-lSDL3` with a relative search path, so without this the whole workspace compiles
+        # and then fails at the link with `cannot find -lSDL3` — which reads like a missing
+        # dependency rather than a missing search path.
+        LIBRARY_PATH: /app/lib
+        # `.cargo/config.toml` points FFMPEG_DIR at the vendored Windows tree, which does not
+        # exist here and would send ffmpeg-sys looking for import libraries. Emptied so it
+        # falls back to pkg-config and finds the runtime's own.
+        FFMPEG_DIR: ''
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo --offline build --release -p rungstar-app
@@ -72,7 +131,10 @@ modules:
       # away. /app is read-only, so this copy can never update itself — the game keeps a
       # newer one in ~/.var/app/de.rungstar.RungStar/data/tools and prefers that over this.
       - install -Dm755 yt-dlp /app/bin/yt-dlp
-      - install -Dm644 -t /app/share/rungstar/assets/themes assets/themes/*
+      # Themes really are optional — the built-in one is compiled into the binary, so a build
+      # with none on disk starts and looks right. Fonts and sounds below are not optional, and
+      # are installed unconditionally so a broken checkout fails here rather than shipping.
+      - 'if ls assets/themes/* >/dev/null 2>&1; then install -Dm644 -t /app/share/rungstar/assets/themes assets/themes/*; fi'
       # Fonts and interface sounds. Both are committed, so an install line that silently did
       # nothing would hide a broken checkout rather than tolerate a missing extra.
       - install -Dm644 -t /app/share/rungstar/assets/fonts assets/fonts/*.ttf assets/fonts/OFL-*.txt
