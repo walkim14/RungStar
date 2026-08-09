@@ -398,12 +398,11 @@ fn the_filter_narrows_to_what_is_not_already_held() {
     // The question this screen exists to answer. Thirty thousand songs is not a list anybody
     // scrolls, and most of them are ones you already have.
     let mut screen = loaded();
-    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Everything);
+    assert!(screen.narrow.is_empty(), "it starts showing everything");
     open_filters(&mut screen, "Show");
     screen.handle(Input::Right);
-    screen.handle(Input::Down);
     screen.handle(Input::Confirm);
-    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::New);
+    assert_eq!(screen.narrow, vec![rungstar_ui::usdbscreen::Narrow::New]);
     assert!(screen.needs_rows(), "it did not ask for the list again");
 
     // And the header says what is hiding songs, because a list quietly missing them looks
@@ -423,11 +422,15 @@ fn every_filter_keeps_what_it_claims_to() {
     poor.rating = 2.0;
     poor.golden = false;
 
-    assert!(Narrow::Everything.keeps(&absent) && Narrow::Everything.keeps(&held));
     assert!(Narrow::New.keeps(&absent) && !Narrow::New.keeps(&held));
     assert!(Narrow::Held.keeps(&held) && !Narrow::Held.keeps(&absent));
     assert!(Narrow::WellRated.keeps(&absent) && !Narrow::WellRated.keeps(&poor));
     assert!(Narrow::Golden.keeps(&absent) && !Narrow::Golden.keeps(&poor));
+    // Only the two library states rule each other out.
+    assert_eq!(Narrow::New.contradicts(), Some(Narrow::Held));
+    assert_eq!(Narrow::Held.contradicts(), Some(Narrow::New));
+    assert_eq!(Narrow::WellRated.contradicts(), None);
+    assert_eq!(Narrow::Golden.contradicts(), None);
 }
 
 /// Open the filter panel and put the cursor on the category with this title.
@@ -524,20 +527,44 @@ fn values_within_a_category_are_any_of_and_categories_are_all_of() {
 }
 
 #[test]
-fn the_show_category_is_one_at_a_time() {
-    // "Not in my library" and "already have it" together is an empty list.
+fn the_show_toggles_combine_and_only_the_contradictory_pair_does_not() {
+    // "Four stars and up" and "not in my library" are independent things to want. The first
+    // version made all of Show one choice of five, so asking for well-rated songs silently
+    // stopped asking for new ones.
+    use rungstar_ui::usdbscreen::Narrow;
     let mut screen = loaded();
     open_filters(&mut screen, "Show");
     screen.handle(Input::Right);
+    screen.handle(Input::Confirm); // Not in my library
+    assert_eq!(screen.narrow, vec![Narrow::New]);
     screen.handle(Input::Down);
-    screen.handle(Input::Confirm);
-    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::New);
     screen.handle(Input::Down);
+    screen.handle(Input::Confirm); // and 4 stars and up
+    assert_eq!(screen.narrow, vec![Narrow::New, Narrow::WellRated]);
+
+    let mut good = row(1, "A", "One", Local::Absent);
+    good.rating = 4.5;
+    let mut poor = row(2, "B", "Two", Local::Absent);
+    poor.rating = 2.0;
+    let mut held = row(3, "C", "Three", Local::Held);
+    held.rating = 4.5;
+    assert!(screen.keeps(&good), "new and well rated");
+    assert!(!screen.keeps(&poor), "new but poorly rated");
+    assert!(!screen.keeps(&held), "well rated but already held");
+
+    // Turning one on turns off the one it contradicts, rather than refusing: asking for both
+    // "have it" and "have not" is really asking for the second.
+    open_filters(&mut screen, "Show");
+    screen.handle(Input::Right);
+    screen.handle(Input::Down);
+    screen.handle(Input::Confirm); // Already have it
+    assert_eq!(screen.narrow, vec![Narrow::WellRated, Narrow::Held]);
+    assert!(screen.keeps(&held));
+    assert!(!screen.keeps(&good));
+
+    // And choosing one already on turns it off.
     screen.handle(Input::Confirm);
-    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Held);
-    // And choosing the one already chosen turns it off.
-    screen.handle(Input::Confirm);
-    assert_eq!(screen.narrow, rungstar_ui::usdbscreen::Narrow::Everything);
+    assert_eq!(screen.narrow, vec![Narrow::WellRated]);
 }
 
 #[test]

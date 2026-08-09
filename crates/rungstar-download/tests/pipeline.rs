@@ -686,3 +686,38 @@ fn the_download_url_names_this_platform() {
         assert!(url.ends_with("yt-dlp_linux"), "{url}");
     }
 }
+
+#[test]
+fn a_copy_beside_the_executable_is_found() {
+    // A packaged release ships one so downloading works out of the box. The test runs from
+    // the test binary's folder, which is where a bundled copy would sit next to the game.
+    use rungstar_download::tool;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(folder) = exe.parent() else {
+        return;
+    };
+    let bundled = folder.join(tool::file_name());
+    if bundled.exists() {
+        return; // something real is there; do not tread on it
+    }
+    std::fs::write(&bundled, vec![1u8; 16]).unwrap();
+    assert_eq!(tool::beside_the_executable(), Some(bundled.clone()));
+    let _ = std::fs::remove_file(&bundled);
+    assert_eq!(tool::beside_the_executable(), None);
+}
+
+#[test]
+fn a_fetched_copy_is_preferred_over_a_bundled_one() {
+    // The bundled copy is as old as the release, and a yt-dlp a few months old is a yt-dlp
+    // that has stopped working. Once a newer one has been fetched, that is the one to run.
+    use rungstar_download::tool;
+    if tool::on_the_path() {
+        return; // the PATH wins over both, which its own test covers
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path();
+    let fetched = tool::install(data, &vec![3u8; 600_000]).unwrap();
+    assert_eq!(tool::find(data), Some(fetched));
+}

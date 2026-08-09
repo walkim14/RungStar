@@ -4,14 +4,15 @@
 //! extraction often enough that a copy frozen at release time is broken within weeks, which is
 //! the whole reason this shells out to a separate tool rather than reimplementing it.
 //!
-//! So the game fetches it into its own data directory and keeps it up to date there. Three
-//! rules make that acceptable rather than alarming:
+//! A packaged release ships with a copy beside the executable so downloading works out of the
+//! box, and the game fetches a newer one into its data directory when it needs to. Three rules
+//! make that acceptable rather than alarming:
 //!
 //! - **A copy already on the PATH wins.** Somebody who installed it with their package manager
 //!   is telling us which one to use, and downloading a second is both rude and confusing.
-//! - **It is never fetched silently.** The screen asks, because a program that downloads and
-//!   runs an executable without saying so is doing something the person in front of it should
-//!   have agreed to.
+//! - **Fetching is announced while it happens.** Not asked for first — the first thing anybody
+//!   does on that screen is download a song, and answering it with "press another key" is a
+//!   detour — but never silent either.
 //! - **It is written whole or not at all**, through a temporary file and a rename, so a
 //!   cancelled download cannot leave a truncated executable that fails in a way nobody can
 //!   diagnose.
@@ -54,14 +55,37 @@ pub fn managed_path(data_dir: &Path) -> PathBuf {
 
 /// Where yt-dlp is, if it is anywhere.
 ///
-/// The PATH first. Somebody who installed it themselves gets theirs used, updated by their
-/// package manager, and never shadowed by a copy this program fetched.
+/// Three places, in this order:
+///
+/// 1. **The PATH.** Somebody who installed it themselves gets theirs used, updated by their
+///    package manager, and never shadowed by a copy this program fetched.
+/// 2. **Beside the executable**, which is where a packaged build puts it. A release ships with
+///    one so that downloading works out of the box rather than after a detour.
+/// 3. **The data directory**, where a fetched copy goes — including one that has replaced a
+///    stale bundled version.
 pub fn find(data_dir: &Path) -> Option<PathBuf> {
     if on_the_path() {
         return Some(PathBuf::from("yt-dlp"));
     }
+    // The fetched copy before the bundled one: the bundled one is as old as the release, and
+    // a yt-dlp that is a few months old is a yt-dlp that has stopped working.
     let managed = managed_path(data_dir);
-    managed.is_file().then_some(managed)
+    if managed.is_file() {
+        return Some(managed);
+    }
+    beside_the_executable()
+}
+
+/// A copy shipped next to the game, as a packaged build has.
+pub fn beside_the_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let folder = exe.parent()?;
+    [
+        folder.join(file_name()),
+        folder.join("tools").join(file_name()),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 /// Whether a working yt-dlp is on the PATH.

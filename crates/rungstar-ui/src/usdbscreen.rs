@@ -54,15 +54,18 @@ pub enum UsdbOutcome {
     Search(String),
 }
 
-/// What the list is narrowed to.
+/// One thing the list can be narrowed by, beyond the catalogue's own fields.
 ///
-/// Thirty thousand songs is not a list anybody scrolls. The one that matters is the first:
-/// **what have they got that I have not**, which is the whole reason to open this screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Thirty thousand songs is not a list anybody scrolls, and the question that matters most is
+/// **what have they got that I have not**.
+///
+/// These are toggles rather than one choice of five, because they are not one question. "Four
+/// stars and up" and "not in my library" are independent things to want, and the first version
+/// of this made them exclusive — so asking for well-rated songs silently stopped asking for
+/// new ones. Only the two library states rule each other out, and they do it themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Narrow {
-    #[default]
-    Everything,
-    /// Not in the library yet. The default question.
+    /// Not in the library yet.
     New,
     /// Already downloaded, for checking or for fetching again.
     Held,
@@ -73,17 +76,10 @@ pub enum Narrow {
 }
 
 impl Narrow {
-    pub const ALL: [Narrow; 5] = [
-        Narrow::Everything,
-        Narrow::New,
-        Narrow::Held,
-        Narrow::WellRated,
-        Narrow::Golden,
-    ];
+    pub const ALL: [Narrow; 4] = [Narrow::New, Narrow::Held, Narrow::WellRated, Narrow::Golden];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Everything => "Everything",
             Self::New => "Not in my library",
             Self::Held => "Already have it",
             Self::WellRated => "4 stars and up",
@@ -91,15 +87,21 @@ impl Narrow {
         }
     }
 
-    pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|n| *n == self).unwrap_or(0);
-        Self::ALL[(index + 1) % Self::ALL.len()]
+    /// The one this cannot be on at the same time as.
+    ///
+    /// Having it and not having it is an empty list, and the useful reading of asking for
+    /// both is that the second one is what was meant.
+    pub fn contradicts(self) -> Option<Narrow> {
+        match self {
+            Self::New => Some(Self::Held),
+            Self::Held => Some(Self::New),
+            _ => None,
+        }
     }
 
     /// Whether a row survives it.
     pub fn keeps(self, row: &Row) -> bool {
         match self {
-            Self::Everything => true,
             Self::New => row.local == Local::Absent,
             Self::Held => row.local != Local::Absent,
             Self::WellRated => row.rating >= 4.0,
@@ -282,8 +284,8 @@ pub struct UsdbScreen {
     user_typed: String,
     /// The search the rows were fetched for.
     searched: String,
-    /// What the list is narrowed to.
-    pub narrow: Narrow,
+    /// Which of the toggles are on. Empty means everything.
+    pub narrow: Vec<Narrow>,
     /// The values each facet offers, filled in by the application.
     pub facets: FacetValues,
     /// Values chosen per facet, in `Facet::ALL` order. Empty means no constraint.
@@ -323,7 +325,7 @@ impl UsdbScreen {
             keyboard: Keyboard::new(),
             user_typed: String::new(),
             searched: String::new(),
-            narrow: Narrow::default(),
+            narrow: Vec::new(),
             facets: FacetValues::new(),
             picked: vec![Vec::new(); Facet::ALL.len()],
             facet_cursor: 0,
@@ -462,13 +464,12 @@ impl UsdbScreen {
 
     /// How many values are chosen across every facet, for the header.
     pub fn active_filters(&self) -> usize {
-        usize::from(self.narrow != Narrow::Everything)
-            + self.picked.iter().map(Vec::len).sum::<usize>()
+        self.narrow.len() + self.picked.iter().map(Vec::len).sum::<usize>()
     }
 
     /// Put every filter back to showing everything.
     pub fn clear_filters(&mut self) {
-        self.narrow = Narrow::Everything;
+        self.narrow.clear();
         for picked in &mut self.picked {
             picked.clear();
         }
@@ -478,7 +479,9 @@ impl UsdbScreen {
 
     /// Whether a row survives every filter. Values within a facet are OR; facets are AND.
     pub fn keeps(&self, row: &Row) -> bool {
-        if !self.narrow.keeps(row) {
+        // Every toggle that is on has to be satisfied, which is what a list of checkboxes
+        // looks like it means: new *and* well rated, not new *or* well rated.
+        if !self.narrow.iter().all(|narrow| narrow.keeps(row)) {
             return false;
         }
         let matches = |facet: Facet, value: &str| {
@@ -507,7 +510,7 @@ impl UsdbScreen {
                     (
                         narrow.label().to_owned(),
                         String::new(),
-                        *narrow == self.narrow,
+                        self.narrow.contains(narrow),
                     )
                 })
                 .collect(),
@@ -530,16 +533,23 @@ impl UsdbScreen {
 
     fn toggle_value(&mut self, facet: Facet, index: usize) {
         match facet {
-            // One at a time: "not in my library" and "already have it" together is nothing.
             Facet::Kind => {
                 let Some(narrow) = Narrow::ALL.get(index).copied() else {
                     return;
                 };
-                self.narrow = if self.narrow == narrow {
-                    Narrow::Everything
-                } else {
-                    narrow
-                };
+                match self.narrow.iter().position(|held| *held == narrow) {
+                    Some(at) => {
+                        self.narrow.remove(at);
+                    }
+                    None => {
+                        // Turning one on turns off the one it contradicts, rather than
+                        // refusing: asking for both is really asking for the second.
+                        if let Some(other) = narrow.contradicts() {
+                            self.narrow.retain(|held| *held != other);
+                        }
+                        self.narrow.push(narrow);
+                    }
+                }
             }
             _ => {
                 let Some((value, _)) = self.facets.get(facet).get(index).cloned() else {
@@ -747,16 +757,14 @@ impl UsdbScreen {
         // What is being hidden, because a list quietly missing songs is indistinguishable
         // from a catalog that does not have them.
         let mut parts: Vec<String> = Vec::new();
-        if self.narrow != Narrow::Everything {
-            parts.push(self.narrow.label().to_owned());
+        // The first toggle by name and the rest as a count: "Not in my library +2" fits in a
+        // header and still says that something is hidden, which is the part that matters.
+        if let Some(first) = self.narrow.first() {
+            parts.push(first.label().to_owned());
         }
-        match self
-            .active_filters()
-            .saturating_sub(usize::from(self.narrow != Narrow::Everything))
-        {
+        match self.active_filters() - usize::from(!self.narrow.is_empty()) {
             0 => {}
-            1 => parts.push("1 filter".to_owned()),
-            n => parts.push(format!("{n} filters")),
+            n => parts.push(format!("+{n}")),
         }
         match &self.user {
             Some(user) => parts.push(user.clone()),
@@ -912,7 +920,7 @@ impl UsdbScreen {
             regions.push((row, Region::Category(index)));
             let selected = index == self.facet_cursor;
             let chosen = match facet {
-                Facet::Kind => usize::from(self.narrow != Narrow::Everything),
+                Facet::Kind => self.narrow.len(),
                 other => self.picked(*other).len(),
             };
             widgets.row(

@@ -2273,6 +2273,18 @@ fn produces_text(keycode: Keycode) -> bool {
 }
 
 /// Map a key or button to the semantic input the screens understand./// Map a key or button to the semantic input the screens understand.
+/// The character a printable key stands for, for the screens that bind letters.
+///
+/// From the key's own name rather than from a text event: a shortcut is about which key was
+/// pressed, not about what it would type, so it must not depend on the shift state or on a
+/// text field having focus.
+fn shortcut_char(keycode: Keycode) -> Option<char> {
+    let name = keycode.name();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    (chars.next().is_none() && first.is_ascii_graphic()).then_some(first.to_ascii_lowercase())
+}
+
 fn action_for(keycode: Keycode) -> Option<Input> {
     Some(match keycode {
         Keycode::Up => Input::Up,
@@ -2385,6 +2397,13 @@ fn main() -> Result<()> {
                                 input = Input::Submit;
                             }
                             app.handle(input, area);
+                        } else if let Some(c) = shortcut_char(key) {
+                            // A printable key with no action of its own is a screen's own
+                            // shortcut. Without this the only way a character ever reached a
+                            // screen was through `TextInput`, which is delivered *only* while
+                            // a text field has focus — so every single-letter shortcut in the
+                            // editor and on the USDB browser silently did nothing.
+                            app.handle(Input::Type(c), area);
                         }
                     }
                 }

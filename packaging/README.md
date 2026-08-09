@@ -9,6 +9,17 @@ Four ways out of the build tree, and one thing that has to be dropped in by hand
 | Flatpak | `packaging/linux/de.rungstar.RungStar.yml` | `flatpak-builder` on Linux |
 | AppImage | `packaging/linux/appimage.sh` | Linux with `appimagetool` |
 
+## yt-dlp
+
+Both the Windows and the AppImage scripts fetch the latest yt-dlp and put it beside the
+executable, so a fresh install can download a song immediately. The game looks there — after
+the PATH, and after anything newer it has fetched itself into `%APPDATA%\RungStar	ools`.
+
+It is bundled but not pinned, and both of those matter. Bundled, because a release that cannot
+download until it has downloaded something else has a hole in it. Not pinned, because YouTube
+changes its extraction often enough that a copy frozen at release time stops working within a
+few months — which is the whole reason the game shells out to it rather than reimplementing it.
+
 ## The font
 
 `assets/fonts/` is empty in the repository, and a packaged build looks there first —

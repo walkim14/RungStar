@@ -55,6 +55,23 @@ foreach ($item in @("assets", "LICENSE", "NOTICE.md", "README.md")) {
     }
 }
 
+# yt-dlp, beside the executable. A release that cannot download a song until it has downloaded
+# something else first is a release with a hole in it, and the game looks here before it looks
+# anywhere but the PATH. It still fetches a newer one into the data directory when it needs to,
+# because a copy frozen at release time stops working within a few months.
+$ytdlp = Join-Path $out "yt-dlp.exe"
+try {
+    Write-Host "fetching yt-dlp..." -ForegroundColor Cyan
+    $release = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    Invoke-WebRequest -Uri $release -OutFile $ytdlp -UseBasicParsing
+    if ((Get-Item $ytdlp).Length -lt 500KB) {
+        throw "what GitHub sent back was not a program"
+    }
+} catch {
+    Remove-Item -Force -ErrorAction SilentlyContinue $ytdlp
+    Write-Warning "could not bundle yt-dlp ($_). The game will fetch it on first download."
+}
+
 $font = Join-Path $out "assets\fonts\RungStar-Regular.ttf"
 if (-not (Test-Path $font)) {
     Write-Warning "no bundled font in assets/fonts - the build will borrow one from the system. See packaging/README.md."

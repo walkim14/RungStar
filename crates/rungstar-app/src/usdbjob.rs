@@ -338,12 +338,27 @@ fn run(
             }
             Order_::Download(id) => {
                 let _ = events.send(Event::Fetching(id));
-                let Some(program) = tool.clone() else {
-                    let _ = events.send(Event::Problem(
-                        "yt-dlp is needed to download songs, and is not installed. Press G to \
-                         fetch it."
-                            .to_owned(),
+                // Fetched on demand rather than refused. Downloading a song is the one thing
+                // this screen exists for, and answering that with an instruction to press
+                // another key first is a detour nobody asked for. It is announced while it
+                // happens, which is the part that actually matters.
+                if tool.is_none() {
+                    let _ = events.send(Event::Doing(
+                        "fetching yt-dlp, which downloads need".to_owned(),
+                        None,
                     ));
+                    match fetch_tool(&files, &data) {
+                        Ok(path) => {
+                            let _ =
+                                events.send(Event::Tool(rungstar_download::tool::version(&path)));
+                            tool = Some(path);
+                        }
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
+                    }
+                }
+                let Some(program) = tool.clone() else {
                     let _ = events.send(Event::Downloaded(id, PathBuf::new(), Outcome::Cancelled));
                     let _ = events.send(Event::Idle);
                     continue;

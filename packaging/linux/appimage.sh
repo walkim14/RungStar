@@ -43,6 +43,16 @@ ldd target/release/rungstar | awk '/=> \// {print $3}' | while read -r lib; do
     fi
 done
 
+# yt-dlp beside the executable, so a download works out of the box. The standalone build, not
+# the zipapp: a Deck in Game Mode may have no usable Python. The game fetches a newer one into
+# its data directory when it needs to.
+if curl -fsSL -o "$appdir/usr/bin/yt-dlp"     https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux; then
+    chmod +x "$appdir/usr/bin/yt-dlp"
+else
+    echo "could not bundle yt-dlp; the game will fetch it on first download" >&2
+    rm -f "$appdir/usr/bin/yt-dlp"
+fi
+
 cat > "$appdir/AppRun" <<'RUN'
 #!/usr/bin/env bash
 here="$(dirname "$(readlink -f "${0}")")"
