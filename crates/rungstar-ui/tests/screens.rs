@@ -1443,3 +1443,153 @@ fn a_long_microphone_name_is_cut_off_before_its_value() {
     assert!(list.is_balanced());
     no_side_by_side_text_overlaps(&list, "microphones");
 }
+
+/// The microphone list, when there are more microphones than fit.
+///
+/// Two dual-channel karaoke adapters is four singers and, with the channels split, eight rows
+/// plus the refresh row — not an unusual party. They used to be laid out from the top with no
+/// clip and no scroll offset, so everything past the bottom edge was drawn off the screen and
+/// could not be reached.
+mod many_microphones {
+    use rungstar_ui::draw::{Command, DrawList};
+    use rungstar_ui::geom::Rect;
+    use rungstar_ui::micscreen::{Device, MicScreen};
+    use rungstar_ui::songselect::Input;
+    use rungstar_ui::theme::Theme;
+
+    /// A Steam Deck.
+    const DECK: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1600.0,
+        h: 1000.0,
+    };
+
+    fn crowded() -> MicScreen {
+        let mut screen = MicScreen::new();
+        screen.split_channels = true;
+        screen.devices = (0..8)
+            .map(|n| Device {
+                name: format!("USB Microphone {n}"),
+                assignment: vec![0, 0],
+                levels: vec![0.2, 0.1],
+                heard: vec![true, false],
+            })
+            .collect();
+        screen
+    }
+
+    fn drawn(screen: &mut MicScreen) -> DrawList {
+        let style = Theme::builtin().resolve_default();
+        let mut list = DrawList::new();
+        screen.draw(&mut list, DECK, &style);
+        list
+    }
+
+    /// Everything drawn, with its rectangle, after clipping is taken into account.
+    fn rows_on_screen(list: &DrawList) -> Vec<String> {
+        let mut clips: Vec<Rect> = Vec::new();
+        let mut seen = Vec::new();
+        for command in list.commands() {
+            match command {
+                Command::PushClip(rect) => clips.push(*rect),
+                Command::PopClip => {
+                    clips.pop();
+                }
+                Command::Text { rect, text, .. } if text.contains("Microphone") => {
+                    let inside = clips
+                        .iter()
+                        .all(|clip| rect.y >= clip.y - 1.0 && rect.bottom() <= clip.bottom() + 1.0);
+                    if inside {
+                        seen.push(text.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn nothing_is_drawn_past_the_bottom_of_the_screen() {
+        let mut screen = crowded();
+        let list = drawn(&mut screen);
+        for command in list.commands() {
+            if let Command::Rect { rect, .. } = command {
+                assert!(
+                    rect.bottom() <= DECK.h + 1.0,
+                    "a row is drawn off the bottom at {rect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_cursor_can_reach_the_last_row_and_it_is_visible_when_it_does() {
+        // The whole point: seventeen rows, a screen that holds fewer, and every one of them
+        // reachable. Walking down must eventually show the refresh row at the very end.
+        let mut screen = crowded();
+        let total = screen.devices.len() * 2 + 1;
+        for _ in 0..total - 1 {
+            screen.handle(Input::Down);
+        }
+        assert_eq!(
+            screen.cursor(),
+            total - 1,
+            "the cursor did not reach the end"
+        );
+
+        let list = drawn(&mut screen);
+        let text: Vec<String> = list
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t == "Look again"),
+            "the last row is not on screen: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_view_follows_the_cursor_rather_than_staying_put() {
+        let mut screen = crowded();
+        let first = rows_on_screen(&drawn(&mut screen));
+        assert!(!first.is_empty(), "nothing was drawn at all");
+
+        for _ in 0..12 {
+            screen.handle(Input::Down);
+        }
+        let later = rows_on_screen(&drawn(&mut screen));
+        assert_ne!(first, later, "the list did not scroll");
+    }
+
+    #[test]
+    fn a_list_that_fits_is_not_scrolled_and_says_nothing_about_it() {
+        // One microphone. A counter reading "1 of 2" on a screen showing everything is noise.
+        let mut screen = MicScreen::new();
+        screen.devices = vec![Device {
+            name: "USB Microphone".to_owned(),
+            assignment: vec![1, 0],
+            levels: vec![0.3, 0.0],
+            heard: vec![true, false],
+        }];
+        let list = drawn(&mut screen);
+        let text: Vec<String> = list
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                Command::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.iter().any(|t| t.contains("USB Microphone")));
+        assert!(
+            !text.iter().any(|t| t.contains(" of ")),
+            "a counter on a list that fits: {text:?}"
+        );
+    }
+}

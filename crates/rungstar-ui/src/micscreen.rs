@@ -102,6 +102,13 @@ pub struct MicScreen {
     /// Whether each channel is assigned separately, for a dual-microphone device.
     pub split_channels: bool,
     cursor: usize,
+    /// First row drawn, so a list longer than the screen can be reached.
+    ///
+    /// Four microphones on a Steam Deck is not an unusual setup — two dual-channel karaoke
+    /// adapters is four singers — and with the channels split that is eight rows plus the
+    /// refresh row. They used to be laid out from the top with no clip and no offset, so
+    /// anything past the bottom edge was drawn off the screen and could not be reached.
+    scroll: usize,
     regions: Vec<(Rect, usize)>,
 }
 
@@ -119,6 +126,7 @@ impl MicScreen {
             gamepad: false,
             split_channels: false,
             cursor: 0,
+            scroll: 0,
             regions: Vec::new(),
         }
     }
@@ -329,17 +337,60 @@ impl MicScreen {
             return;
         }
 
-        for (index, row) in rows.iter().enumerate() {
-            let rect = Rect::new(inner.x, inner.y + row_h * index as f32, inner.w, row_h)
-                .inset_xy(0.0, style.gap(0.3));
-            self.regions.push((rect, index));
-            self.draw_row(list, rect, style, *row, index == self.cursor);
-        }
+        // The refresh row is the last item, so it scrolls with the rest rather than being
+        // pinned somewhere the cursor can reach it out of order.
+        let total = rows.len() + 1;
+        let counter_size = style.scaled_text(0.75);
+        let counter_h = style.row_height(&[counter_size]);
+        let fits = ((inner.h / row_h).floor() as usize).max(1);
+        // The counter only appears when it is needed, and taking its strip can push one more
+        // row off — so what fits is worked out again once the strip is gone.
+        let (inner, counter) = if total > fits {
+            let (strip, rest) = inner.cut_bottom(counter_h);
+            (rest, Some(strip))
+        } else {
+            (inner, None)
+        };
+        let visible = ((inner.h / row_h).floor() as usize).max(1);
 
-        let refresh = Rect::new(inner.x, inner.y + row_h * rows.len() as f32, inner.w, row_h)
-            .inset_xy(0.0, style.gap(0.3));
-        self.regions.push((refresh, rows.len()));
-        widgets.row(list, refresh, "Look again", "", self.cursor == rows.len());
+        // Move the view as little as it takes to keep the cursor on it. Up and down wrap at
+        // the ends, so this has to cope with the cursor jumping the whole way in one step.
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + visible {
+            self.scroll = self.cursor + 1 - visible;
+        }
+        // And never past the end, for when a microphone is unplugged and the list shrinks
+        // underneath a view that was scrolled down.
+        self.scroll = self.scroll.min(total.saturating_sub(visible.min(total)));
+
+        let first = self.scroll;
+        let mut regions = Vec::new();
+        list.clipped(inner, |list| {
+            for index in first..(first + visible).min(total) {
+                let rect = Rect::new(
+                    inner.x,
+                    inner.y + row_h * (index - first) as f32,
+                    inner.w,
+                    row_h,
+                )
+                .inset_xy(0.0, style.gap(0.3));
+                regions.push((rect, index));
+                match rows.get(index) {
+                    Some(row) => self.draw_row(list, rect, style, *row, index == self.cursor),
+                    None => widgets.row(list, rect, "Look again", "", index == self.cursor),
+                }
+            }
+        });
+        self.regions.extend(regions);
+
+        if let Some(counter) = counter {
+            list.text(
+                counter,
+                format!("{} of {total}", self.cursor + 1),
+                TextStyle::new(counter_size, style.muted).align(Align::End),
+            );
+        }
     }
 
     fn draw_row(&self, list: &mut DrawList, rect: Rect, style: &Style, row: Row, selected: bool) {
