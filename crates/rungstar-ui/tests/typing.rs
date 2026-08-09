@@ -107,7 +107,7 @@ fn every_page_is_reachable_and_the_controls_are_on_all_of_them() {
     // press backspace.
     let mut keyboard = Keyboard::new();
     let mut seen = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         seen.push(keyboard.page());
         let keys = keyboard.keys();
         for control in [
@@ -125,15 +125,19 @@ fn every_page_is_reachable_and_the_controls_are_on_all_of_them() {
         }
         keyboard.apply(Key::Shift);
     }
-    assert_eq!(seen, vec![Page::Letters, Page::Symbols, Page::Accents]);
+    assert_eq!(
+        seen,
+        vec![Page::Letters, Page::Capitals, Page::Symbols, Page::Accents]
+    );
     assert_eq!(keyboard.page(), Page::Letters, "the pages must cycle");
 }
 
 #[test]
 fn accented_characters_are_typable_so_a_european_library_is_searchable() {
     let mut keyboard = Keyboard::new();
-    keyboard.apply(Key::Shift);
-    keyboard.apply(Key::Shift);
+    for _ in 0..3 {
+        keyboard.apply(Key::Shift);
+    }
     assert_eq!(keyboard.page(), Page::Accents);
     type_with_dpad(&mut keyboard, "öü");
     assert_eq!(keyboard.text(), "öü");
@@ -260,4 +264,82 @@ fn a_stalled_frame_still_scrolls_the_right_distance_without_exploding() {
     let steps = repeat.tick(1.0);
     assert!(steps > 1, "a long frame should catch up");
     assert!(steps <= 32, "a long frame should not fire {steps} steps");
+}
+
+#[test]
+fn every_printable_ascii_character_can_be_typed_from_a_controller() {
+    // The on-screen keyboard was built for search, which is case-insensitive and uses about
+    // twenty punctuation marks. A password is neither. Before this, a capital letter simply
+    // could not be typed from a controller at all, which locks somebody out of their account
+    // with nothing on screen to say why.
+    //
+    // Asserted over the whole printable range rather than over a chosen list, so the next
+    // person with an unusual password does not find a new gap.
+    let mut reachable: std::collections::HashSet<char> = std::collections::HashSet::new();
+    let mut keyboard = Keyboard::new();
+    for _ in 0..8 {
+        for key in keyboard.keys() {
+            match key {
+                Key::Char(c) => {
+                    reachable.insert(c);
+                }
+                Key::Space => {
+                    reachable.insert(' ');
+                }
+                _ => {}
+            }
+        }
+        keyboard.apply(Key::Shift);
+    }
+
+    let missing: Vec<char> = (0x20u8..0x7F)
+        .map(char::from)
+        .filter(|c| !reachable.contains(c))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cannot be typed from a controller: {missing:?}"
+    );
+}
+
+#[test]
+fn the_pages_come_round_rather_than_stopping() {
+    // Four pages now: lower case, capitals, symbols, accents. A shift key that stops on the
+    // last one strands whoever is on it.
+    let mut keyboard = Keyboard::new();
+    let first = keyboard.page();
+    let mut seen = vec![first];
+    for _ in 0..3 {
+        keyboard.apply(Key::Shift);
+        seen.push(keyboard.page());
+    }
+    assert_eq!(seen.len(), 4);
+    keyboard.apply(Key::Shift);
+    assert_eq!(keyboard.page(), first, "the pages did not come round");
+}
+
+#[test]
+fn a_mixed_password_types_the_same_way_it_reads() {
+    // Driven through the on-screen keyboard a key at a time, as a controller would, with the
+    // page switched whenever the next character is on a different one.
+    let mut keyboard = Keyboard::new().limit(64);
+    let wanted = "aZ0*^&%_Xv";
+    for want in wanted.chars() {
+        let mut found = false;
+        for _ in 0..4 {
+            if let Some(index) = keyboard
+                .keys()
+                .iter()
+                .position(|key| *key == Key::Char(want))
+            {
+                keyboard.set_cursor(index);
+                keyboard.press();
+                found = true;
+                break;
+            }
+            keyboard.apply(Key::Shift);
+        }
+        assert!(found, "{want:?} is on no page of the keyboard");
+    }
+    assert_eq!(keyboard.text(), wanted);
 }

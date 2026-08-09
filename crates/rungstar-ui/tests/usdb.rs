@@ -277,3 +277,111 @@ fn the_cursor_stops_at_both_ends() {
     }
     assert_eq!(screen.selected().map(|r| r.id), Some(SongId(3)));
 }
+
+#[test]
+fn a_password_can_be_shown_while_it_is_being_typed() {
+    // A password with symbols in it cannot be checked any other way, and a sign-in that fails
+    // with no way to see what was typed is one nobody can debug.
+    let mut screen = loaded();
+    screen.handle(Input::CycleFilter);
+    screen.handle(Input::Submit); // past the username
+    for c in "aZ0*^&%".chars() {
+        screen.handle(Input::Type(c));
+    }
+
+    let hidden = strings(&draw(&mut screen));
+    assert!(
+        !hidden.iter().any(|t| t.contains("aZ0")),
+        "it was legible before being asked: {hidden:?}"
+    );
+    assert!(hidden.iter().any(|t| t == "Show it"), "no way to show it");
+
+    // F3, or the button, or Y on a pad.
+    screen.handle(Input::Sort);
+    let shown = strings(&draw(&mut screen));
+    assert!(
+        shown.iter().any(|t| t == "aZ0*^&%"),
+        "showing it did not: {shown:?}"
+    );
+    assert!(shown.iter().any(|t| t == "Hide it"));
+
+    screen.handle(Input::Sort);
+    assert!(!strings(&draw(&mut screen))
+        .iter()
+        .any(|t| t.contains("aZ0")));
+}
+
+#[test]
+fn showing_a_password_is_forgotten_when_the_field_is_left() {
+    // Never remembered: the next sign-in starts hidden, whatever the last one did.
+    let mut screen = loaded();
+    screen.handle(Input::CycleFilter);
+    screen.handle(Input::Submit);
+    screen.handle(Input::Sort);
+    for c in "secret".chars() {
+        screen.handle(Input::Type(c));
+    }
+    assert!(strings(&draw(&mut screen)).iter().any(|t| t == "secret"));
+
+    screen.handle(Input::Back);
+    screen.handle(Input::CycleFilter);
+    screen.handle(Input::Submit);
+    for c in "secret".chars() {
+        screen.handle(Input::Type(c));
+    }
+    assert!(
+        !strings(&draw(&mut screen)).iter().any(|t| t == "secret"),
+        "the next sign-in started with the password on show"
+    );
+}
+
+#[test]
+fn the_username_is_never_hidden() {
+    // It is not a secret, and hiding it means somebody cannot check the one thing that is
+    // easiest to get wrong.
+    let mut screen = loaded();
+    screen.handle(Input::CycleFilter);
+    for c in "walki".chars() {
+        screen.handle(Input::Type(c));
+    }
+    assert!(strings(&draw(&mut screen)).iter().any(|t| t == "walki"));
+    assert!(
+        !strings(&draw(&mut screen)).iter().any(|t| t == "Show it"),
+        "the username offered a reveal it does not need"
+    );
+}
+
+#[test]
+fn the_reveal_button_can_be_clicked() {
+    let style = Theme::builtin().resolve_default();
+    let ready = || {
+        let mut screen = loaded();
+        screen.handle(Input::CycleFilter);
+        screen.handle(Input::Submit);
+        for c in "secret".chars() {
+            screen.handle(Input::Type(c));
+        }
+        screen
+    };
+    let mut clicked_somewhere = false;
+    for x in (0..1600).step_by(8) {
+        for y in (0..1000).step_by(8) {
+            let mut screen = ready();
+            let mut list = DrawList::new();
+            screen.draw(&mut list, area(), &style);
+            screen.handle(Input::Click(rungstar_ui::geom::Point::new(
+                x as f32, y as f32,
+            )));
+            let mut after = DrawList::new();
+            screen.draw(&mut after, area(), &style);
+            if strings(&after).iter().any(|t| t == "secret") {
+                clicked_somewhere = true;
+                break;
+            }
+        }
+        if clicked_somewhere {
+            break;
+        }
+    }
+    assert!(clicked_somewhere, "the reveal button cannot be clicked");
+}

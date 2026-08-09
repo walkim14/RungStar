@@ -14,7 +14,13 @@
 pub enum Page {
     #[default]
     Letters,
-    /// Digits and the punctuation that actually turns up in song titles.
+    /// The same letters in upper case.
+    ///
+    /// Not needed to search — that is case-insensitive — but a password is not, and without
+    /// this a capital in one simply cannot be typed from a controller.
+    Capitals,
+    /// Digits and punctuation. Everything printable in ASCII, because this is also how a
+    /// password gets typed and picking a subset means picking whose password works.
     Symbols,
     /// Accented Latin, so a European library is searchable as it is spelled.
     Accents,
@@ -24,6 +30,7 @@ impl Page {
     pub fn label(self) -> &'static str {
         match self {
             Self::Letters => "abc",
+            Self::Capitals => "ABC",
             Self::Symbols => "123",
             Self::Accents => "áöü",
         }
@@ -31,7 +38,8 @@ impl Page {
 
     pub fn next(self) -> Self {
         match self {
-            Self::Letters => Self::Symbols,
+            Self::Letters => Self::Capitals,
+            Self::Capitals => Self::Symbols,
             Self::Symbols => Self::Accents,
             Self::Accents => Self::Letters,
         }
@@ -59,7 +67,7 @@ impl Key {
             Self::Space => "space".to_owned(),
             Self::Backspace => "\u{232b}".to_owned(),
             Self::Clear => "clear".to_owned(),
-            Self::Shift => "abc/123".to_owned(),
+            Self::Shift => "next".to_owned(),
             Self::Done => "done".to_owned(),
         }
     }
@@ -74,7 +82,13 @@ impl Key {
 pub const COLUMNS: usize = 10;
 
 const LETTERS: &str = "abcdefghijklmnopqrstuvwxyz";
-const SYMBOLS: &str = "0123456789.,'&-()!?/:+*#";
+const CAPITALS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/// Every printable ASCII symbol, not a chosen few.
+///
+/// The subset that turns up in song titles was enough while this only searched. It is not
+/// enough to type a password with, and a keyboard that is missing one character is a keyboard
+/// that locks somebody out of their account with no way to tell why.
+const SYMBOLS: &str = r##"0123456789.,;:'"!?-_+=*/\&%$#@^~|<>()[]{}`"##;
 const ACCENTS: &str = "áàâäãåæçéèêëíìîïñóòôöõøßúùûüý";
 
 /// State of a text field being edited with the on-screen keyboard.
@@ -144,6 +158,7 @@ impl Keyboard {
     pub fn keys(&self) -> Vec<Key> {
         let characters = match self.page {
             Page::Letters => LETTERS,
+            Page::Capitals => CAPITALS,
             Page::Symbols => SYMBOLS,
             Page::Accents => ACCENTS,
         };

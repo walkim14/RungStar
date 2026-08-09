@@ -113,6 +113,8 @@ impl Activity {
 enum Region {
     Song(usize),
     Key(usize),
+    /// The show-password button.
+    Reveal,
 }
 
 /// The USDB browser.
@@ -134,6 +136,11 @@ pub struct UsdbScreen {
     user_typed: String,
     /// The search the rows were fetched for.
     searched: String,
+    /// Whether the password is shown as itself rather than as dots.
+    ///
+    /// Off by default and never remembered. On is for the twenty seconds it takes to check a
+    /// password with symbols in it, which is the only reason anybody wants this.
+    reveal: bool,
     cursor: usize,
     scroll: usize,
     regions: Vec<(Rect, Region)>,
@@ -160,6 +167,7 @@ impl UsdbScreen {
             keyboard: Keyboard::new(),
             user_typed: String::new(),
             searched: String::new(),
+            reveal: false,
             cursor: 0,
             scroll: 0,
             regions: Vec::new(),
@@ -305,11 +313,19 @@ impl UsdbScreen {
         match input {
             Input::Back => {
                 self.mode = Mode::Browsing;
+                self.reveal = false;
                 self.user_typed.clear();
             }
             Input::Type(c) => self.keyboard.push(c),
             Input::Backspace => {
                 self.keyboard.apply(Key::Backspace);
+            }
+            // Keys that type nothing, so they still work while every letter is text rather
+            // than a shortcut.
+            Input::Sort | Input::CycleFilter => {
+                if password {
+                    self.reveal = !self.reveal;
+                }
             }
             Input::Up => self.keyboard.navigate(0, -1),
             Input::Down => self.keyboard.navigate(0, 1),
@@ -323,6 +339,7 @@ impl UsdbScreen {
                 let typed = self.keyboard.text().to_owned();
                 if password {
                     self.mode = Mode::Browsing;
+                    self.reveal = false;
                     let user = std::mem::take(&mut self.user_typed);
                     self.keyboard = Keyboard::new();
                     return (
@@ -362,6 +379,8 @@ impl UsdbScreen {
                     return self.handle(Input::Confirm);
                 }
             }
+            Some(Region::Reveal) if clicked => self.reveal = !self.reveal,
+            Some(Region::Reveal) => {}
             None => {}
         }
         (Transition::None, UsdbOutcome::None)
@@ -441,7 +460,17 @@ impl UsdbScreen {
                 hints
             }
             Mode::Searching => vec![(confirm, "Press key"), (back, "Done")],
-            Mode::LoggingIn { .. } => vec![(confirm, "Press key"), (back, "Cancel")],
+            Mode::LoggingIn { password } => {
+                let mut hints = vec![(confirm, "Press key")];
+                if password {
+                    hints.push((
+                        if pad { "Y" } else { "F3" },
+                        if self.reveal { "Hide it" } else { "Show it" },
+                    ));
+                }
+                hints.push((back, "Cancel"));
+                hints
+            }
         }
     }
 
@@ -639,24 +668,59 @@ impl UsdbScreen {
         );
 
         let (field, keys) = rest.cut_top(style.gap(4.0));
+        // A password is dots by default. Not for shoulder-surfing on a sofa — for the
+        // screenshot somebody takes of the party and puts online.
+        //
+        // But it can be shown, because a password with symbols in it cannot be checked any
+        // other way, and a sign-in that fails with no way to see what was typed is one nobody
+        // can debug. Off again the moment the field is left.
+        let typing_password = matches!(self.mode, Mode::LoggingIn { password: true });
         list.panel(
             field.inset_xy(0.0, style.gap(0.4)),
             style.surface_sunken,
             style.metrics.radius,
         );
-        // A password is shown as dots. Not for shoulder-surfing on a sofa — for the screenshot
-        // somebody takes of the party and puts online.
-        let shown = match self.mode {
-            Mode::LoggingIn { password: true } => {
-                "\u{2022}".repeat(self.keyboard.text().chars().count())
-            }
-            _ => self.keyboard.text().to_owned(),
+        let (eye, field) = if typing_password {
+            field.cut_right(style.gap(7.0))
+        } else {
+            (Rect::default(), field)
+        };
+        let shown = if typing_password && !self.reveal {
+            "\u{2022}".repeat(self.keyboard.text().chars().count())
+        } else {
+            self.keyboard.text().to_owned()
         };
         list.text(
             field.inset_xy(style.gap(1.4), 0.0),
             shown,
             TextStyle::new(style.text_size(), style.text).overflow(Overflow::Ellipsis),
         );
+        if typing_password {
+            let button = eye.inset_xy(style.gap(0.4), style.gap(0.8));
+            regions.push((button, Region::Reveal));
+            list.panel(
+                button,
+                if self.reveal {
+                    style.accent
+                } else {
+                    style.surface_raised
+                },
+                style.metrics.radius,
+            );
+            list.text(
+                button,
+                if self.reveal { "Hide" } else { "Show" },
+                TextStyle::new(
+                    style.scaled_text(0.8),
+                    if self.reveal {
+                        style.on_accent
+                    } else {
+                        style.text
+                    },
+                )
+                .centered(),
+            );
+        }
 
         self.draw_keys(list, keys, style, regions);
     }
