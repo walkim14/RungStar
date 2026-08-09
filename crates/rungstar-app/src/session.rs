@@ -1041,7 +1041,7 @@ mod tests {
     fn each_of_a_pair_gets_its_own_singer() {
         // The automatic assignment, which is what somebody sees before they touch anything:
         // one singer per device before a second channel of any device.
-        let mut found = vec![mic("Logitech USB Mic", 0), mic("Logitech USB Mic", 1)];
+        let mut found = [mic("Logitech USB Mic", 0), mic("Logitech USB Mic", 1)];
         let mut assigned = 0u8;
         for config in found.iter_mut() {
             assigned += 1;
