@@ -21,6 +21,7 @@ use rungstar_platform::render::Renderer;
 use rungstar_platform::{Music, Playback, SdlCapture, Sfx, Sound};
 use rungstar_profile::stats::View;
 use rungstar_profile::{Profiles, Score};
+use rungstar_ui::calibratescreen::{CalibrateScreen, Doing, Pass, Report};
 use rungstar_ui::chime::{self, Chime};
 use rungstar_ui::draw::{DrawList, ImageId, TextStyle};
 use rungstar_ui::editorscreen::{EditorOutcome, EditorScreen};
@@ -85,6 +86,8 @@ enum Screen {
     Main(MainMenu),
     Songs(Box<SongSelect>),
     Options(Box<OptionsScreen>),
+    /// Measuring how far a microphone lags the speakers.
+    Calibrating(Box<CalibrateScreen>),
     /// Singing. The session owns the devices; the screen only draws.
     Sing(Box<SingScreen>, Box<session::Session>),
     /// Microphone setup, with capture running so the meters are live.
@@ -145,6 +148,8 @@ struct App {
     pending_calibration: bool,
     /// And is about to run, once the frame explaining that has been drawn.
     calibrating: bool,
+    /// A measurement in progress, stepped a few milliseconds at a time by the frame loop.
+    calibrator: Option<rungstar_platform::calibrate::Calibrator>,
     /// Whether yt-dlp is available, and which version.
     tool: Option<String>,
     /// Whether ffmpeg is available. Downloads work without it, at much lower video quality.
@@ -306,6 +311,7 @@ impl App {
             loudness: loudness::Loudness::new(),
             pending_calibration: false,
             calibrating: false,
+            calibrator: None,
             tool: None,
             ffmpeg: None,
             usdb: None,
@@ -1089,6 +1095,7 @@ impl App {
             Some(Screen::Main(menu)) => menu.gamepad = gamepad,
             Some(Screen::Songs(songs)) => songs.gamepad = gamepad,
             Some(Screen::Options(options)) => options.gamepad = gamepad,
+            Some(Screen::Calibrating(screen)) => screen.gamepad = gamepad,
             Some(Screen::Sing(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Mics(screen, _)) => screen.gamepad = gamepad,
             Some(Screen::Players(screen)) => screen.gamepad = gamepad,
@@ -1111,6 +1118,7 @@ impl App {
         let transition = match self.stack.last_mut() {
             Some(Screen::Main(menu)) => menu.handle(input),
             Some(Screen::Songs(songs)) => songs.handle(input, area),
+            Some(Screen::Calibrating(screen)) => screen.handle(input),
             Some(Screen::Options(options)) => {
                 let outcome = options.handle(input, &mut self.settings);
                 match outcome {
@@ -1364,71 +1372,112 @@ impl App {
         }
     }
 
-    /// Play a sweep, listen for it, and set the microphone delay to what comes back.
+    /// Which microphones a delay measurement should cover.
     ///
-    /// The measurement is [`rungstar_platform::measure`]; this chooses which microphone to
-    /// measure on and decides what to do with the answer.
-    ///
-    /// It blocks for about four seconds. That is the honest arrangement for something the
-    /// player asked for and has to be quiet during — a progress bar over a measurement that
-    /// needs silence would be a thing to watch rather than a thing to wait out.
+    /// **The ones a singer is actually on**, taken from the saved assignment rather than from a
+    /// fresh guess. The first version measured whichever device the backend listed first, which
+    /// on this machine is a headset nobody sings into — so it measured the wrong hardware and
+    /// said nothing about which. Nothing assigned yet means everything found, because somebody
+    /// measuring before they have set anything up still wants an answer.
+    fn microphones_to_measure(&self, capture: &SdlCapture) -> Vec<rungstar_audio::DeviceConfig> {
+        let mut found =
+            session::choose_devices(capture, self.settings.game.players.max(1) as usize);
+        session::apply_saved(&mut found, &self.settings.sound.microphones);
+        let assigned: Vec<_> = found
+            .iter()
+            .filter(|device| device.channel_to_player.iter().any(|player| *player != 0))
+            .cloned()
+            .collect();
+        if assigned.is_empty() {
+            found
+        } else {
+            assigned
+        }
+    }
+
+    /// Open the measurement screen and start measuring.
     fn measure_mic_delay(&mut self, audio: &sdl3::AudioSubsystem) {
         let capture = SdlCapture::new(audio.clone());
-        let devices = session::choose_devices(&capture, 1);
-        // Whichever microphone a singer is actually on. Measuring a device nobody uses gives a
-        // number that is right about the wrong hardware.
-        let Some(device) = devices
-            .iter()
-            .find(|d| d.channel_to_player.iter().any(|p| *p != 0))
-            .or_else(|| devices.first())
-            .cloned()
-        else {
-            self.refuse("no microphone to measure");
-            return;
-        };
+        let devices = self.microphones_to_measure(&capture);
         drop(capture);
 
-        let found = match rungstar_platform::measure(
-            audio,
-            &device,
-            rungstar_platform::calibrate::PASSES,
-        ) {
-            Ok(found) => found,
-            Err(why) => return self.refuse(why),
+        let mut screen = CalibrateScreen::new();
+        screen.gamepad =
+            matches!(self.stack.last(), Some(Screen::Options(options)) if options.gamepad);
+        match rungstar_platform::calibrate::Calibrator::start(audio, &devices) {
+            Ok(calibrator) => self.calibrator = Some(calibrator),
+            Err(why) => screen.trouble = Some(why),
+        }
+        self.stack.push(Screen::Calibrating(Box::new(screen)));
+    }
+
+    /// Advance a measurement, and put what it is doing on the screen showing it.
+    ///
+    /// Stepped from the frame loop rather than run in one go: five passes across two
+    /// microphones is fifteen seconds, and a game frozen for fifteen seconds with no meter and
+    /// no pass count cannot be told from one that has crashed.
+    fn step_calibration(&mut self) {
+        let Some(calibrator) = &mut self.calibrator else {
+            return;
         };
-        match found.settled {
-            Ok(millis) => {
-                let millis = millis.round().clamp(0.0, 500.0) as u32;
-                self.settings.sound.mic_delay_ms = millis;
-                self.save_settings();
-                let confident = found
+        let running = calibrator.tick();
+        let doing = calibrator.progress().map(|p| Doing {
+            device: p.device,
+            device_index: p.device_index,
+            devices: p.devices,
+            pass: p.pass,
+            passes: p.passes,
+            playing: p.playing,
+            level: p.level,
+        });
+        let reports: Vec<Report> = calibrator
+            .outcomes()
+            .iter()
+            .map(|outcome| Report {
+                name: outcome.name.clone(),
+                delay: outcome.settled.clone(),
+                passes: outcome
                     .passes
                     .iter()
-                    .filter(|p| p.confidence >= rungstar_audio::latency::CONFIDENT)
-                    .count();
-                self.status = format!(
-                    "{} lags by {millis} ms, from {confident} of {} measurements",
-                    device.name,
-                    found.passes.len()
-                );
+                    .map(|pass| Pass {
+                        millis: pass.millis,
+                        confidence: pass.confidence,
+                        heard: pass.confidence >= rungstar_audio::latency::CONFIDENT,
+                        level: pass.level,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        if running {
+            if let Some(Screen::Calibrating(screen)) = self.stack.last_mut() {
+                screen.doing = doing;
+                screen.reports = reports;
             }
-            // Split by which fault it is. A microphone that is not working and one that simply
-            // cannot hear the speakers look identical from here, and telling somebody to turn
-            // the volume up when the device is dead wastes their evening.
-            Err(why) => {
-                let loudest = found.passes.iter().map(|p| p.level).fold(0.0f32, f32::max);
-                self.refuse(if loudest < 0.02 {
-                    format!(
-                        "{why}. It barely recorded anything at all \u{2014} check the right \
-                         microphone is plugged in and not muted."
-                    )
-                } else {
-                    format!(
-                        "{why}. It has to play through speakers this microphone can hear, \
-                         with nobody talking."
-                    )
-                });
-            }
+            return;
+        }
+
+        // Finished. One value covers every microphone, so the median of the ones that answered
+        // is the honest choice — the largest would make a fast microphone late, and the
+        // smallest would make a slow one early.
+        self.calibrator = None;
+        let mut answers: Vec<f32> = reports
+            .iter()
+            .filter_map(|r| r.delay.as_ref().ok().copied())
+            .collect();
+        answers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let applied = answers.get(answers.len() / 2).map(|millis| {
+            let millis = millis.round().clamp(0.0, 500.0) as u32;
+            self.settings.sound.mic_delay_ms = millis;
+            millis
+        });
+        if applied.is_some() {
+            self.save_settings();
+        }
+        if let Some(Screen::Calibrating(screen)) = self.stack.last_mut() {
+            screen.doing = None;
+            screen.reports = reports;
+            screen.applied = applied;
         }
     }
 
@@ -2275,6 +2324,7 @@ impl App {
                 songs.draw(list, area, &self.style, &|id| covers.get(id));
             }
             Some(Screen::Options(options)) => options.draw(list, area, &self.style, &self.settings),
+            Some(Screen::Calibrating(screen)) => screen.draw(list, area, &self.style),
             Some(Screen::Sing(screen, session)) => {
                 let beat = session.visual_beat();
                 // One part for an ordinary song, two for a duet. Gathered first because the
@@ -2823,6 +2873,7 @@ fn main() -> Result<()> {
         app.refresh_usdb();
         app.refresh_highscores();
         app.collect_loudness();
+        app.step_calibration();
         app.update_preview(&audio_subsystem);
         app.load_visible_covers(&mut renderer);
         let mut finished_song = false;
@@ -2968,7 +3019,8 @@ fn main() -> Result<()> {
             .render(&list, app.style.background)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        // After the frame that says what is about to happen is on screen, not before it.
+        // Opened after the frame that led here has been drawn, so the screen appears
+        // immediately rather than after the first pass.
         if std::mem::take(&mut app.calibrating) {
             app.measure_mic_delay(&audio_subsystem);
         }
@@ -3033,14 +3085,23 @@ fn report_calibration(audio: &sdl3::AudioSubsystem) -> Result<()> {
     println!("This plays a short sweep five times. Speakers, not headphones, and quiet please.");
     println!();
 
-    let found =
-        match rungstar_platform::measure(audio, &device, rungstar_platform::calibrate::PASSES) {
-            Ok(found) => found,
+    let mut calibrator =
+        match rungstar_platform::Calibrator::start(audio, std::slice::from_ref(&device)) {
+            Ok(calibrator) => calibrator,
             Err(why) => {
                 println!("could not run the measurement: {why}");
                 return Ok(());
             }
         };
+    // The same stepped calibrator the screen uses, spun as fast as it will go. One
+    // implementation, so a fault found here is a fault fixed there.
+    while calibrator.tick() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let Some(found) = calibrator.outcomes().first().cloned() else {
+        println!("the measurement produced nothing at all");
+        return Ok(());
+    };
 
     for (index, pass) in found.passes.iter().enumerate() {
         let mark = if pass.confidence >= rungstar_audio::latency::CONFIDENT {

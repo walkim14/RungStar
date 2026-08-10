@@ -139,6 +139,70 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
     players.draw(&mut list, area, style);
     record("singers", &list, &mut out);
 
+    // The microphone delay measurement, while it runs and once it has finished.
+    {
+        use rungstar_ui::calibratescreen::{CalibrateScreen, Doing, Pass, Report};
+        let heard = |millis: f32| Pass {
+            millis,
+            confidence: 0.9,
+            heard: true,
+            level: 0.4,
+        };
+        let mut screen = CalibrateScreen::new();
+        screen.doing = Some(Doing {
+            device: "Realtek(R) Audio High Definition Microphone Array".to_owned(),
+            device_index: 2,
+            devices: 3,
+            pass: 3,
+            passes: 5,
+            playing: true,
+            level: 0.42,
+        });
+        screen.reports = vec![Report {
+            name: "USB Microphone".to_owned(),
+            delay: Ok(96.0),
+            passes: vec![heard(95.0), heard(96.0), heard(97.0)],
+        }];
+        list.clear();
+        screen.draw(&mut list, area, style);
+        record("measuring the delay", &list, &mut out);
+
+        // Finished, with one that worked and two that did not — the case where the screen has
+        // the most to say and the most room to get it wrong.
+        screen.doing = None;
+        screen.applied = Some(96);
+        screen.reports.push(Report {
+            name: "Headset Microphone (a very long device name indeed)".to_owned(),
+            delay: Err("the microphone did not hear the sound".to_owned()),
+            passes: vec![Pass {
+                millis: 210.0,
+                confidence: 0.04,
+                heard: false,
+                level: 0.03,
+            }],
+        });
+        screen.reports.push(Report {
+            name: "Silent Device".to_owned(),
+            delay: Err("the microphone recorded silence".to_owned()),
+            passes: vec![Pass {
+                millis: 0.0,
+                confidence: 0.0,
+                heard: false,
+                level: 0.0,
+            }],
+        });
+        list.clear();
+        screen.draw(&mut list, area, style);
+        record("delay measured", &list, &mut out);
+
+        // And nothing to measure at all.
+        let mut refused = CalibrateScreen::new();
+        refused.trouble = Some("no speakers to play through".to_owned());
+        list.clear();
+        refused.draw(&mut list, area, style);
+        record("delay refused", &list, &mut out);
+    }
+
     // Statistics.
     let mut stats = StatsScreen::new();
     stats.set_rows(

@@ -265,6 +265,18 @@ listens for it. Four decisions in it:
 and "it recorded the room but not the sweep" are different faults — a dead device against
 speakers pointing the wrong way — and both look like zero confidence.
 
+**It measures every microphone a singer is assigned to**, taken from the saved assignment. The
+first version measured whichever device the backend listed first, which on a laptop is usually a
+headset nobody sings into: it measured the wrong hardware and said nothing about which.
+
+**And it is a screen, stepped a few milliseconds at a time**, not a call that blocks. Five
+passes across two microphones is fifteen seconds, and a game frozen that long with no meter and
+no pass count cannot be told from one that has crashed. `Calibrator::tick` does one drain and
+returns, so the screen names the microphone, counts the passes, and shows a live level — which
+is the one thing that makes a dead device obvious while it happens rather than afterwards. One
+value covers every microphone, so the median of the ones that answered is what gets set, and the
+screen says so.
+
 ## Song loudness
 
 A library assembled from a thousand uploads is not level with itself. Measured over sixty songs
