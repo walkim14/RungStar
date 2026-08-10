@@ -24,6 +24,8 @@ pub enum Action {
     /// Forget the index entirely and build it again.
     RebuildIndex,
     AddSongFolder,
+    /// Play a sound and listen for it, to work out how far the microphone lags.
+    MeasureMicDelay,
     /// Stop searching the folder added most recently.
     ForgetSongFolder,
     ManageMicrophones,
@@ -453,6 +455,11 @@ impl Page {
                      this, so getting it wrong shifts every hit.",
                     0.0, 500.0, 10.0, milliseconds
                 ),
+                Item {
+                    label: "Measure it",
+                    help: "Plays a short sweep through the speakers five times and listens for                            it coming back. Needs speakers rather than headphones, and a quiet                            few seconds.",
+                    control: Control::Button(Action::MeasureMicDelay),
+                },
                 number_item!(
                     sound.av_delay_ms as i32, "Audio delay",
                     "For a television that processes the picture and arrives late.",

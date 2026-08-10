@@ -15,6 +15,7 @@
 pub mod capture;
 pub mod clock;
 pub mod decode;
+pub mod latency;
 pub mod loudness;
 
 pub use capture::{

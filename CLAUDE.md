@@ -237,6 +237,34 @@ delete. That path is the rare "I do not trust the index" case, so it has not bee
 **Zero parse failures across all 8,134 files**, including titles with curly quotes and
 non-ASCII folder names. 35 languages, 354 genres, 295 editions.
 
+## Microphone delay
+
+`mic_delay_ms` shifts the whole scoring clock, so a wrong value shifts every hit — sing
+perfectly, score badly, nothing on screen to say why. The 140 ms default is a guess, and a
+Bluetooth speaker adds twice that on its own.
+
+Options -> Sound -> **Measure it**, or `rungstar --calibrate [--mic <name>]`, plays a sweep and
+listens for it. Four decisions in it:
+
+- **Which gap.** The song clock comes from frames the output device has *consumed*, so SDL's
+  output queue is already accounted for and counting it again would double it. What is left is
+  the device's own buffer, the air, and the capture path — which is exactly what a loopback
+  measures, provided the capture is drained immediately before the sweep is pushed. Those three
+  lines in that order are the whole measurement.
+- **A swept sine, not a click.** A click's energy is in one sample and a room loses it.
+  Correlating a 300 Hz-3 kHz sweep concentrates it all back into one sharp peak.
+- **Normalised correlation.** A raw correlation grows with how loud the recording is, so no
+  threshold on it means anything. Divided by both energies it runs 0 to 1 whatever the level:
+  noise peaks at 0.095, a sweep 12 dB *under* the noise still reaches 0.13, an ordinary room
+  0.9. `CONFIDENT` is 0.12 and a test pins the gap it sits in.
+- **Agreement decides, not confidence.** Five passes, median, and a majority must land within
+  5 ms. Noise matches best at a different lag every time; a real delay lands in the same place
+  every time. That separation is not close, where the confidence one is.
+
+`Heard` carries the recording's peak level as well, because "the microphone recorded silence"
+and "it recorded the room but not the sweep" are different faults — a dead device against
+speakers pointing the wrong way — and both look like zero confidence.
+
 ## Song loudness
 
 A library assembled from a thousand uploads is not level with itself. Measured over sixty songs

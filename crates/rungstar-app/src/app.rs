@@ -140,6 +140,11 @@ struct App {
     held: rungstar_library::Held,
     /// How loud each song turned out to be, so they all play at the same level.
     loudness: loudness::Loudness,
+    /// A microphone delay measurement has been asked for. Carried out by the frame loop,
+    /// which is what holds the audio subsystem.
+    pending_calibration: bool,
+    /// And is about to run, once the frame explaining that has been drawn.
+    calibrating: bool,
     /// Whether yt-dlp is available, and which version.
     tool: Option<String>,
     /// Whether ffmpeg is available. Downloads work without it, at much lower video quality.
@@ -299,6 +304,8 @@ impl App {
             pending_editor_audio: false,
             held: rungstar_library::Held::default(),
             loudness: loudness::Loudness::new(),
+            pending_calibration: false,
+            calibrating: false,
             tool: None,
             ffmpeg: None,
             usdb: None,
@@ -1357,6 +1364,74 @@ impl App {
         }
     }
 
+    /// Play a sweep, listen for it, and set the microphone delay to what comes back.
+    ///
+    /// The measurement is [`rungstar_platform::measure`]; this chooses which microphone to
+    /// measure on and decides what to do with the answer.
+    ///
+    /// It blocks for about four seconds. That is the honest arrangement for something the
+    /// player asked for and has to be quiet during — a progress bar over a measurement that
+    /// needs silence would be a thing to watch rather than a thing to wait out.
+    fn measure_mic_delay(&mut self, audio: &sdl3::AudioSubsystem) {
+        let capture = SdlCapture::new(audio.clone());
+        let devices = session::choose_devices(&capture, 1);
+        // Whichever microphone a singer is actually on. Measuring a device nobody uses gives a
+        // number that is right about the wrong hardware.
+        let Some(device) = devices
+            .iter()
+            .find(|d| d.channel_to_player.iter().any(|p| *p != 0))
+            .or_else(|| devices.first())
+            .cloned()
+        else {
+            self.refuse("no microphone to measure");
+            return;
+        };
+        drop(capture);
+
+        let found = match rungstar_platform::measure(
+            audio,
+            &device,
+            rungstar_platform::calibrate::PASSES,
+        ) {
+            Ok(found) => found,
+            Err(why) => return self.refuse(why),
+        };
+        match found.settled {
+            Ok(millis) => {
+                let millis = millis.round().clamp(0.0, 500.0) as u32;
+                self.settings.sound.mic_delay_ms = millis;
+                self.save_settings();
+                let confident = found
+                    .passes
+                    .iter()
+                    .filter(|p| p.confidence >= rungstar_audio::latency::CONFIDENT)
+                    .count();
+                self.status = format!(
+                    "{} lags by {millis} ms, from {confident} of {} measurements",
+                    device.name,
+                    found.passes.len()
+                );
+            }
+            // Split by which fault it is. A microphone that is not working and one that simply
+            // cannot hear the speakers look identical from here, and telling somebody to turn
+            // the volume up when the device is dead wastes their evening.
+            Err(why) => {
+                let loudest = found.passes.iter().map(|p| p.level).fold(0.0f32, f32::max);
+                self.refuse(if loudest < 0.02 {
+                    format!(
+                        "{why}. It barely recorded anything at all \u{2014} check the right \
+                         microphone is plugged in and not muted."
+                    )
+                } else {
+                    format!(
+                        "{why}. It has to play through speakers this microphone can hear, \
+                         with nobody talking."
+                    )
+                });
+            }
+        }
+    }
+
     /// Ask for a folder and add it to the ones that are searched for songs.
     ///
     /// The dialog is opened from here rather than from the options screen because
@@ -2167,6 +2242,8 @@ impl App {
             // These need screens that belong to later phases. Saying so is better than a
             // button that silently does nothing.
             Action::AddSongFolder => self.add_song_folder(),
+            // Needs the audio subsystem, which the frame loop owns.
+            Action::MeasureMicDelay => self.pending_calibration = true,
             Action::ForgetSongFolder => self.forget_song_folder(),
             // Needs the audio subsystem, which the frame loop owns.
             Action::ManageMicrophones => self.pending_mics = true,
@@ -2480,6 +2557,8 @@ fn main() -> Result<()> {
     // delivers. Its own mode because the answer is needed on a machine that is misbehaving,
     // from somebody who cannot be asked to read a log.
     let list_devices = std::env::args().any(|a| a == "--devices");
+    // The same measurement the options button runs, from a terminal, showing its working.
+    let calibrate = std::env::args().any(|a| a == "--calibrate");
 
     let data_dir = paths::data_directory();
     let mut app = App::new(data_dir)?;
@@ -2492,6 +2571,10 @@ fn main() -> Result<()> {
     if list_devices {
         let audio = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
         return report_devices(&audio);
+    }
+    if calibrate {
+        let audio = sdl.audio().map_err(|e| anyhow::anyhow!("no audio: {e}"))?;
+        return report_calibration(&audio);
     }
     let video = sdl.video().map_err(|e| anyhow::anyhow!("{e}"))?;
     let gamepads = sdl.gamepad().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2668,6 +2751,18 @@ fn main() -> Result<()> {
 
         // A song the browser asked for. Started here because it needs the audio subsystem,
         // and a fresh capture handle so the microphones belong to this session alone.
+        // Asked for this frame: say so, and measure on the next one. The measurement blocks
+        // for four seconds, so running it here would freeze on the frame *before* the message
+        // explaining why — a silent four-second hang, which reads as a crash.
+        if std::mem::take(&mut app.pending_calibration) {
+            app.status = "listening for the speakers, please be quiet\u{2026}".to_owned();
+            app.calibrating = true;
+            // Nothing else may be making a noise while it listens.
+            music.set_wanted(false);
+            music.tick(1.0);
+            app.stop_preview();
+        }
+
         if std::mem::take(&mut app.pending_mics) {
             app.stop_preview();
             let capture = SdlCapture::new(audio_subsystem.clone());
@@ -2873,6 +2968,11 @@ fn main() -> Result<()> {
             .render(&list, app.style.background)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+        // After the frame that says what is about to happen is on screen, not before it.
+        if std::mem::take(&mut app.calibrating) {
+            app.measure_mic_delay(&audio_subsystem);
+        }
+
         // A menu with nothing moving does not need to redraw as fast as the display can go,
         // and on a handheld that is battery for no picture. A song always has something
         // moving, so it never sleeps.
@@ -2890,6 +2990,96 @@ fn main() -> Result<()> {
     }
 
     app.save_settings();
+    Ok(())
+}
+
+/// Measure the microphone delay and show every pass.
+///
+/// The options button gives one number. This gives the five it came from, which is what tells
+/// a bad measurement from a good one: five passes agreeing to a millisecond is an answer, and
+/// five scattered across two hundred milliseconds is a room with a television on in it.
+fn report_calibration(audio: &sdl3::AudioSubsystem) -> Result<()> {
+    println!("build         {}", env!("RUNGSTAR_BUILD"));
+    let capture = SdlCapture::new(audio.clone());
+    let devices = session::choose_devices(&capture, 1);
+    drop(capture);
+
+    // `--mic <part of the name>` picks which one, because the first device in the list is
+    // often a headset — whose microphone is the one piece of hardware in the room that
+    // genuinely cannot hear the speakers.
+    let wanted = std::env::args()
+        .skip_while(|a| a != "--mic")
+        .nth(1)
+        .map(|name| name.to_lowercase());
+    let device = match &wanted {
+        Some(part) => devices
+            .iter()
+            .find(|d| d.name.to_lowercase().contains(part))
+            .cloned(),
+        None => devices.first().cloned(),
+    };
+    let Some(device) = device else {
+        match wanted {
+            Some(part) => println!("no microphone whose name contains {part:?}"),
+            None => println!("no microphone to measure"),
+        }
+        for device in &devices {
+            println!("  {}", device.name);
+        }
+        return Ok(());
+    };
+
+    println!("microphone    {}", device.name);
+    println!("This plays a short sweep five times. Speakers, not headphones, and quiet please.");
+    println!();
+
+    let found =
+        match rungstar_platform::measure(audio, &device, rungstar_platform::calibrate::PASSES) {
+            Ok(found) => found,
+            Err(why) => {
+                println!("could not run the measurement: {why}");
+                return Ok(());
+            }
+        };
+
+    for (index, pass) in found.passes.iter().enumerate() {
+        let mark = if pass.confidence >= rungstar_audio::latency::CONFIDENT {
+            ""
+        } else {
+            "   (not heard)"
+        };
+        println!(
+            "  pass {}      {:6.1} ms   match {:.2}   loudest {:3.0}%{mark}",
+            index + 1,
+            pass.millis,
+            pass.confidence,
+            pass.level * 100.0
+        );
+    }
+    println!();
+
+    match found.settled {
+        Ok(millis) => {
+            println!("microphone delay {millis:.0} ms");
+            println!("Set it in Options -> Sound -> Microphone delay, or press Measure it there.");
+        }
+        Err(why) => {
+            println!("no measurement: {why}");
+            println!();
+            let loudest = found.passes.iter().map(|p| p.level).fold(0.0f32, f32::max);
+            if loudest < 0.02 {
+                println!("It barely recorded anything, so it was never going to hear the sweep.");
+                println!("Check the right microphone is plugged in and not muted.");
+            } else {
+                println!(
+                    "The microphone works \u{2014} it recorded the room at {:.0}% \u{2014} but the sweep",
+                    loudest * 100.0
+                );
+                println!("was not in what it heard. It has to play through speakers this");
+                println!("microphone can hear: with headphones on there is nothing to measure.");
+            }
+        }
+    }
     Ok(())
 }
 
