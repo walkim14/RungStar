@@ -21,6 +21,7 @@ pollster = "0.4"
 wgpu = { version = "26.0.1", default-features = false, features = ["std", "dx12", "wgsl"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+sdl3 = { version = "0.18", features = ["unsafe_textures", "build-from-source"] }
 wgpu = { version = "26.0.1", default-features = false, features = ["std", "vulkan", "gles", "wgsl"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -45,3 +45,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # the portal is the only thing that opens a file dialog there. It is also one fewer native
 # dependency on the Linux build.
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sdl3 = { version = "0.18", features = ["unsafe_textures", "build-from-source"] }

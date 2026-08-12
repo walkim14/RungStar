@@ -73,7 +73,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libudev-dev libdbus-1-dev libavcodec-dev libavformat-dev \
             libavutil-dev libswscale-dev libswresample-dev pkg-config cmake \
-            libsdl3-dev fuse libfuse2 || true
+            fuse libfuse2 || true
 
       - name: appimagetool
         run: |
