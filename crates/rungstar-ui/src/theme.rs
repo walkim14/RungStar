@@ -308,12 +308,12 @@ impl Theme {
 
     /// The names of the skins, in a stable order for a settings screen.
     pub fn skin_names(&self) -> Vec<&str> {
-        self.skins.keys().map(String::as_str).collect()
+        preferred_first(self.skins.keys(), &self.meta.default_skin)
     }
 
     /// The names of the accents, in a stable order for a settings screen.
     pub fn accent_names(&self) -> Vec<&str> {
-        self.accents.keys().map(String::as_str).collect()
+        preferred_first(self.accents.keys(), &self.meta.default_accent)
     }
 
     /// Flatten into the style screens draw with.
@@ -389,6 +389,15 @@ impl Theme {
     pub fn resolve_default(&self) -> Style {
         self.resolve(&self.meta.default_skin, &self.meta.default_accent)
     }
+}
+
+fn preferred_first<'a>(names: impl Iterator<Item = &'a String>, preferred: &str) -> Vec<&'a str> {
+    let mut names: Vec<&str> = names.map(String::as_str).collect();
+    if let Some(position) = names.iter().position(|name| *name == preferred) {
+        let preferred = names.remove(position);
+        names.insert(0, preferred);
+    }
+    names
 }
 
 impl Skin {

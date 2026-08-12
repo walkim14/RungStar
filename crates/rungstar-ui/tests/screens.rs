@@ -386,6 +386,57 @@ fn the_options_screen_edits_the_settings_it_is_given() {
 }
 
 #[test]
+fn appearance_rows_only_report_changes_when_they_can_change() {
+    let theme = Theme::builtin();
+    let mut screen = OptionsScreen::new();
+    screen.use_theme(&theme);
+    let mut settings = Settings::default();
+
+    // Appearance is the fifth page. Theme names installed assets and is display-only until
+    // theme discovery exists, while Skin and Accent are choices supplied by that theme.
+    for _ in 0..4 {
+        screen.handle(Input::Down, &mut settings);
+    }
+    screen.handle(Input::Confirm, &mut settings);
+    assert_eq!(
+        screen.handle(Input::Confirm, &mut settings),
+        OptionsOutcome::None,
+        "the read-only Theme row claimed it changed"
+    );
+
+    screen.handle(Input::Down, &mut settings);
+    let skin = settings.appearance.skin.clone();
+    assert_eq!(
+        screen.handle(Input::Right, &mut settings),
+        OptionsOutcome::Changed
+    );
+    assert_ne!(settings.appearance.skin, skin);
+
+    screen.handle(Input::Down, &mut settings);
+    let accent = settings.appearance.accent.clone();
+    assert_eq!(
+        screen.handle(Input::Right, &mut settings),
+        OptionsOutcome::Changed
+    );
+    assert_ne!(settings.appearance.accent, accent);
+}
+
+#[test]
+fn an_options_group_keeps_a_visible_context_marker_while_its_items_have_focus() {
+    let mut screen = OptionsScreen::new();
+    let mut settings = Settings::default();
+    let style = Theme::builtin().resolve_default();
+    screen.handle(Input::Confirm, &mut settings);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style, &settings);
+    assert!(list.commands().iter().any(|command| matches!(
+        command,
+        Command::Outline { color, .. } if *color == style.accent_soft
+    )));
+}
+
+#[test]
 fn a_button_row_reports_the_action_rather_than_changing_a_setting() {
     let mut screen = OptionsScreen::new();
     let mut settings = Settings::default();
@@ -512,6 +563,8 @@ fn assert_on_screen(list: &DrawList, area: Rect, what: &str) {
             _ if depth > 0 => {}
             Command::Rect { rect, .. }
             | Command::Outline { rect, .. }
+            | Command::Bubble { rect, .. }
+            | Command::Glow { rect, .. }
             | Command::Image { rect, .. }
             | Command::Text { rect, .. } => {
                 assert!(

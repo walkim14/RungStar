@@ -84,6 +84,25 @@ try {
     Write-Warning "could not bundle yt-dlp ($_). The game will fetch it on first download."
 }
 
+# Deno runs yt-dlp's current YouTube challenge solver. A developer often has Node on PATH;
+# a clean Windows install does not. The game can fetch Deno on first use, but the packaged
+# build should work before it has repaired itself.
+$denoZip = Join-Path $root "target\package\deno.zip"
+try {
+    Write-Host "fetching Deno..." -ForegroundColor Cyan
+    $release = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
+    Invoke-WebRequest -Uri $release -OutFile $denoZip -UseBasicParsing
+    Expand-Archive -Path $denoZip -DestinationPath $out -Force
+    if ((Get-Item (Join-Path $out "deno.exe")).Length -lt 1MB) {
+        throw "the Deno archive contained no usable program"
+    }
+} catch {
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $out "deno.exe")
+    Write-Warning "could not bundle Deno ($_). The game will fetch it on first download."
+} finally {
+    Remove-Item -Force -ErrorAction SilentlyContinue $denoZip
+}
+
 # Fonts and sounds are committed, so a missing one is a broken checkout rather than a step
 # somebody forgot. Fail rather than quietly shipping a build that borrows a system face and
 # plays nothing - that difference is invisible until somebody runs the release.

@@ -5,6 +5,7 @@ pub mod assets;
 pub mod calibrate;
 pub mod capture;
 pub mod chiptune;
+mod effects;
 pub mod font;
 pub mod input;
 pub mod music;

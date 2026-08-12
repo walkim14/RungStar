@@ -15,3 +15,16 @@ fontdue = "0.9"
 sdl3 = { version = "0.18", features = ["unsafe_textures"] }
 thiserror.workspace = true
 tracing.workspace = true
+pollster = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { version = "26.0.1", default-features = false, features = ["std", "dx12", "wgsl"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "26.0.1", default-features = false, features = ["std", "vulkan", "gles", "wgsl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "26.0.1", default-features = false, features = ["std", "metal", "wgsl"] }
+
+[dev-dependencies]
+tempfile = "3"

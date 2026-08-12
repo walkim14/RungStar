@@ -38,6 +38,14 @@ The Linux asset is `yt-dlp_linux`, the standalone build, not the plain `yt-dlp` 
 zipapp needs a Python interpreter on the machine, and a Steam Deck in Game Mode may not have a
 usable one.
 
+## JavaScript runtime
+
+Current YouTube extraction requires a JavaScript engine for player challenges. Every delivery
+ships Deno beside yt-dlp, and the worker passes it explicitly with `--js-runtimes`. A system
+Deno, Node, Bun or QuickJS is reused when present; otherwise the game atomically fetches the
+official Deno archive into its data-directory `tools` folder. This is separate from the EJS
+component itself, which yt-dlp may update from its official GitHub release when YouTube changes.
+
 ## ffmpeg
 
 The Windows deliveries ship `ffmpeg.exe` beside the game, from the same FFmpeg 7.1 build the
@@ -52,10 +60,13 @@ That costs `avfilter` and `avdevice` in the vendor tree, which the game itself d
 The alternative was an 80 MB static build; the shared one is 39 MB and reuses the DLLs already
 there.
 
-On Linux nothing is bundled. The Flatpak declares the `ffmpeg-full` extension and otherwise
-takes whatever is on the PATH. When there is none, downloads still work — the format selection
-falls back to what needs no post-processing, which means full-quality audio and a lower-quality
-video — and the download screen says so rather than leaving it to be noticed.
+On Linux nothing is bundled. The Flatpak declares the optional `ffmpeg-full` extension and uses
+the runtime's `/usr/bin/ffmpeg`. The 24.08 runtime was tested inside the finished bundle with
+AV1, H.264, Vorbis and AAC support; a real yt-dlp run downloaded separate AV1 and Opus streams,
+merged them, and decoded the result without `ffmpeg-full` mounted. Flathub-origin installs can
+still auto-install the extension for its broader patented-codec set. Flatpak 1.14 does not pull
+an optional extension across origins when installing a local `.flatpak`, which is safe here
+because the required codecs and merger are already in the base runtime.
 
 ## Fonts and sounds
 

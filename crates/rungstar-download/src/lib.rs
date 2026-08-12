@@ -24,6 +24,7 @@ pub mod ffmpeg;
 pub mod meta;
 pub mod pipeline;
 pub mod plan;
+pub mod runtime;
 pub mod tool;
 pub mod ytdlp;
 

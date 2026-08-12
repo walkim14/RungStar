@@ -53,6 +53,18 @@ else
     rm -f "$appdir/usr/bin/yt-dlp"
 fi
 
+# Deno is the supported JS runtime for yt-dlp's YouTube challenge solver. Keep it beside the
+# extractor so Game Mode needs neither a system Node installation nor a first-run repair.
+deno_zip="$out/deno-linux.zip"
+if command -v unzip >/dev/null 2>&1 && curl -fsSL -o "$deno_zip"     https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip; then
+    unzip -p "$deno_zip" deno > "$appdir/usr/bin/deno"
+    chmod +x "$appdir/usr/bin/deno"
+else
+    echo "could not bundle Deno; the game will fetch it on first download" >&2
+    rm -f "$appdir/usr/bin/deno"
+fi
+rm -f "$deno_zip"
+
 cat > "$appdir/AppRun" <<'RUN'
 #!/usr/bin/env bash
 here="$(dirname "$(readlink -f "${0}")")"

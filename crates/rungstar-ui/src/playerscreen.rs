@@ -289,7 +289,7 @@ impl PlayerScreen {
         };
         let body = widgets.header(list, area, title, &status);
         let hints: &[(&str, &str)] = match (self.mode, self.gamepad) {
-            (Mode::Naming { .. }, true) => &[("A", "Press key"), ("B", "Done")],
+            (Mode::Naming { .. }, true) => &[("A", "Press key"), ("B", "Cancel")],
             (Mode::Naming { .. }, false) => &[("Enter", "Done"), ("Esc", "Cancel")],
             (Mode::Confirming, true) => &[("A", "Delete"), ("B", "Keep")],
             (Mode::Confirming, false) => &[("Enter", "Delete"), ("Esc", "Keep")],

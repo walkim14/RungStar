@@ -21,11 +21,6 @@ outline = 3.0
 # keeps the colour they are used to.
 players = ["#419dff", "#ff4d4d", "#4dd66b", "#ffd23f", "#c26bff", "#3fe0d8"]
 
-[fonts]
-regular = "fonts/Inter-Regular.ttf"
-bold = "fonts/Inter-Bold.ttf"
-lyrics = "fonts/Inter-Bold.ttf"
-
 [skins.dark]
 background = "#0b0b12"
 surface = "#171722"

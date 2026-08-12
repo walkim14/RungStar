@@ -171,3 +171,99 @@ fn the_picker_stays_inside_the_window() {
         }
     }
 }
+
+#[test]
+fn profiles_can_be_added_and_renamed_from_the_same_keyboard() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = PlayerScreen::new();
+
+    assert_eq!(screen.handle(Input::Confirm).1, PlayerOutcome::None);
+    assert!(screen.wants_text());
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style);
+    let text = strings(&list);
+    assert!(text.iter().any(|text| text == "Who is singing?"));
+    assert!(text.iter().any(|text| text == "A name\u{2026}"));
+
+    for character in "Ada".chars() {
+        screen.handle(Input::Type(character));
+    }
+    assert_eq!(
+        screen.handle(Input::Submit).1,
+        PlayerOutcome::Add("Ada".to_owned())
+    );
+    assert!(!screen.wants_text());
+
+    screen.players = vec![entry(1, "Ada")];
+    screen.handle(Input::Search);
+    assert!(screen.wants_text());
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style);
+    let text = strings(&list);
+    assert!(text.iter().any(|text| text == "Rename"));
+    assert!(text.iter().any(|text| text == "Ada\u{2502}"));
+    for character in " Lovelace".chars() {
+        screen.handle(Input::Type(character));
+    }
+    assert_eq!(
+        screen.handle(Input::Submit).1,
+        PlayerOutcome::Rename(1, "Ada Lovelace".to_owned())
+    );
+}
+
+#[test]
+fn an_empty_or_cancelled_name_never_creates_a_profile() {
+    let mut screen = PlayerScreen::new();
+    screen.handle(Input::Confirm);
+    assert_eq!(screen.handle(Input::Submit).1, PlayerOutcome::None);
+    assert!(!screen.wants_text());
+
+    screen.handle(Input::Confirm);
+    screen.handle(Input::Type('A'));
+    assert_eq!(screen.handle(Input::Back).1, PlayerOutcome::None);
+    assert!(!screen.wants_text());
+}
+
+#[test]
+fn deleting_a_profile_names_the_loss_and_can_be_cancelled() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = PlayerScreen::new();
+    screen.players = vec![entry(42, "Ada")];
+
+    screen.handle(Input::ContextMenu);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style);
+    assert!(strings(&list).iter().any(|text| text == "Delete Ada?"));
+    assert_eq!(screen.handle(Input::Back).1, PlayerOutcome::None);
+
+    screen.handle(Input::ContextMenu);
+    assert_eq!(screen.handle(Input::Confirm).1, PlayerOutcome::Remove(42));
+}
+
+#[test]
+fn profile_colours_wrap_in_both_directions() {
+    let mut screen = PlayerScreen::new();
+    let mut ada = entry(1, "Ada");
+    ada.colour = 5;
+    screen.players = vec![ada];
+
+    assert_eq!(screen.handle(Input::Right).1, PlayerOutcome::Recolour(1, 0));
+    assert_eq!(screen.players[0].colour, 0);
+    assert_eq!(screen.handle(Input::Left).1, PlayerOutcome::Recolour(1, 5));
+    assert_eq!(screen.players[0].colour, 5);
+}
+
+#[test]
+fn gamepad_naming_hints_say_that_back_cancels() {
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = PlayerScreen::new();
+    screen.gamepad = true;
+    screen.handle(Input::Confirm);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area(), &style);
+    assert!(strings(&list).iter().any(|text| text == "Cancel"));
+}

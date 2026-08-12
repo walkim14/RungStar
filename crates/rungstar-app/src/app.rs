@@ -104,6 +104,8 @@ enum Screen {
 struct App {
     settings: Settings,
     theme: Theme,
+    /// Directory of a custom theme, for resolving its relative font paths.
+    theme_dir: Option<PathBuf>,
     style: Style,
     library: Database,
     profiles: Profiles,
@@ -278,7 +280,7 @@ impl App {
             Settings::load(data_dir.join("settings.toml")).context("reading settings")?;
         settings.clamp();
 
-        let theme = load_theme(&data_dir, &settings);
+        let (theme, theme_dir) = load_theme(&data_dir, &settings);
         let style = theme.resolve(&settings.appearance.skin, &settings.appearance.accent);
 
         std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
@@ -290,6 +292,7 @@ impl App {
         Ok(Self {
             settings,
             theme,
+            theme_dir,
             style,
             library,
             profiles,
@@ -960,6 +963,13 @@ impl App {
         );
     }
 
+    fn load_fonts(&self) -> Result<FontSet, rungstar_platform::font::FontError> {
+        let regular = configured_font(self.theme_dir.as_deref(), self.theme.fonts.regular.as_str());
+        let bold = configured_font(self.theme_dir.as_deref(), self.theme.fonts.bold.as_str());
+        let lyrics = configured_font(self.theme_dir.as_deref(), self.theme.fonts.lyrics.as_str());
+        FontSet::load(regular.as_deref(), bold.as_deref(), lyrics.as_deref())
+    }
+
     /// Push whatever the settings now say into the window and the audio.
     ///
     /// A setting that needs a restart to take effect is a setting the player will conclude is
@@ -1306,9 +1316,11 @@ impl App {
                         self.start_scan(false);
                     }
                 }
-                Route::Options | Route::OptionsPage(_) => self
-                    .stack
-                    .push(Screen::Options(Box::new(OptionsScreen::new()))),
+                Route::Options | Route::OptionsPage(_) => {
+                    let mut screen = OptionsScreen::new();
+                    screen.use_theme(&self.theme);
+                    self.stack.push(Screen::Options(Box::new(screen)));
+                }
                 Route::Players => {
                     let mut screen = PlayerScreen::new();
                     screen.microphones = self.settings.game.players as usize;
@@ -2486,17 +2498,31 @@ fn resolve_beside(directory: &Path, name: &str) -> Option<PathBuf> {
         .map(|entry| entry.path())
 }
 
-/// Load the theme named in the settings, falling back to the built-in one.
-fn load_theme(data_dir: &std::path::Path, settings: &Settings) -> Theme {
+/// Load the theme named in the settings and the directory its relative assets live in.
+fn load_theme(data_dir: &std::path::Path, settings: &Settings) -> (Theme, Option<PathBuf>) {
     let path = data_dir
         .join("themes")
         .join(format!("{}.toml", settings.appearance.theme.to_lowercase()));
-    let mut theme = match Theme::load(&path) {
-        Ok(theme) if theme.validate().is_ok() => theme,
-        Ok(_) | Err(_) => Theme::builtin(),
+    let (mut theme, directory) = match Theme::load(&path) {
+        Ok(theme) if theme.validate().is_ok() => (theme, path.parent().map(Path::to_owned)),
+        Ok(_) | Err(_) => (Theme::builtin(), None),
     };
     theme.metrics.text_scale = settings.appearance.text_scale;
-    theme
+    (theme, directory)
+}
+
+/// Resolve a font named by a theme. Empty means to use the bundled/system fallback chain.
+fn configured_font(theme_dir: Option<&Path>, configured: &str) -> Option<PathBuf> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    let path = Path::new(configured);
+    if path.is_absolute() {
+        Some(path.to_owned())
+    } else {
+        theme_dir.map(|directory| directory.join(path))
+    }
 }
 
 fn draw_about(list: &mut DrawList, area: Rect, style: &Style) {
@@ -2648,7 +2674,7 @@ fn main() -> Result<()> {
     let window = builder.build().context("creating the window")?;
     let canvas = window.into_canvas();
 
-    let fonts = FontSet::load(None, None, None).context(
+    let fonts = app.load_fonts().context(
         "loading a font. The shipped faces live in assets/fonts beside the executable; if          they are missing the game borrows one from the system, and this fails only when          there is nothing to borrow either",
     )?;
     let mut renderer = Renderer::new(canvas, fonts).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -3016,7 +3042,7 @@ fn main() -> Result<()> {
             );
         }
         renderer
-            .render(&list, app.style.background)
+            .render(&list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Opened after the frame that led here has been drawn, so the screen appears
@@ -3330,6 +3356,11 @@ fn self_check(
         app.theme.meta.name, app.settings.appearance.skin
     );
     println!("fonts       {}", renderer.fonts().describe());
+    let (effects, elapsed) = renderer.effects();
+    println!(
+        "effects     {effects}, generated in {:.0} ms",
+        elapsed.as_secs_f32() * 1000.0
+    );
     // Not just "the files parsed": a sound that loads and never reaches the device is the
     // failure worth catching, and the two broke independently while this was being written.
     sfx.set_volume(1.0);
@@ -3383,7 +3414,7 @@ fn self_check(
             anyhow::bail!("{name} left a clip pushed");
         }
         renderer
-            .render(list, app.style.background)
+            .render(list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         println!("{name:<12}{} draw commands", list.len());
         app.stack.pop();
@@ -3414,7 +3445,7 @@ fn self_check(
         list.clear();
         screen.draw(list, area, &app.style);
         renderer
-            .render(list, app.style.background)
+            .render(list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("players: {e}"))?;
         println!("players     {} draw commands", list.len());
     }
@@ -3432,7 +3463,7 @@ fn self_check(
         list.clear();
         screen.draw(list, area, &app.style);
         renderer
-            .render(list, app.style.background)
+            .render(list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("stats: {e}"))?;
         println!("statistics  {} draw commands", list.len());
     }
@@ -3453,7 +3484,7 @@ fn self_check(
             anyhow::bail!("the microphone screen left a clip pushed");
         }
         renderer
-            .render(list, app.style.background)
+            .render(list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("microphones: {e}"))?;
         println!("microphones {} draw commands", list.len());
     }
@@ -3463,6 +3494,9 @@ fn self_check(
     {
         let mut screen = SingScreen::new("Artist", "Title", 6);
         screen.show_input_panel = true;
+        for (index, singer) in screen.singers.iter_mut().enumerate() {
+            singer.pitch = Some(60 + index as i32);
+        }
         let notes: Vec<rungstar_ui::singscreen::Note> = (0..9)
             .map(|i| rungstar_ui::singscreen::Note {
                 start: 8.0 + i as f64 * 4.0,
@@ -3522,10 +3556,29 @@ fn self_check(
                 anyhow::bail!("the sing screen left a clip pushed");
             }
             renderer
-                .render(list, app.style.background)
+                .render(list, app.style.background, app.style.accent)
                 .map_err(|e| anyhow::anyhow!("sing: {e}"))?;
         }
-        println!("sing        {} draw commands, 6 singers", list.len());
+        screen.overlay = Overlay::None;
+        list.clear();
+        let parts = [rungstar_ui::singscreen::PartView {
+            line: &line,
+            syllables: &syllables,
+            next_line: "next line",
+        }];
+        screen.draw(list, area, &app.style, &parts, 20.0);
+        let frames = 120;
+        let started = Instant::now();
+        for _ in 0..frames {
+            renderer
+                .render(list, app.style.background, app.style.accent)
+                .map_err(|e| anyhow::anyhow!("sing benchmark: {e}"))?;
+        }
+        let frame_ms = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        println!(
+            "sing        {} draw commands, 6 singers, {frame_ms:.2} ms/frame",
+            list.len()
+        );
     }
 
     // The party screen, at every stage it has.
@@ -3548,7 +3601,7 @@ fn self_check(
             list.clear();
             app.draw(list, area);
             renderer
-                .render(list, app.style.background)
+                .render(list, app.style.background, app.style.accent)
                 .map_err(|e| anyhow::anyhow!("party: {e}"))?;
         }
         println!("party       {} draw commands", list.len());
@@ -3590,7 +3643,7 @@ fn self_check(
             list.clear();
             app.draw(list, area);
             renderer
-                .render(list, app.style.background)
+                .render(list, app.style.background, app.style.accent)
                 .map_err(|e| anyhow::anyhow!("usdb: {e}"))?;
             if let Some(Screen::Usdb(screen)) = app.stack.last_mut() {
                 screen.handle(step);
@@ -3622,7 +3675,7 @@ E
             list.clear();
             app.draw(list, area);
             renderer
-                .render(list, app.style.background)
+                .render(list, app.style.background, app.style.accent)
                 .map_err(|e| anyhow::anyhow!("editor: {e}"))?;
             app.handle(step, area);
         }
@@ -3652,7 +3705,7 @@ E
         list.clear();
         app.draw(list, area);
         renderer
-            .render(list, app.style.background)
+            .render(list, app.style.background, app.style.accent)
             .map_err(|e| anyhow::anyhow!("overlay: {e}"))?;
     }
     println!("overlays    drawn");
@@ -3722,5 +3775,22 @@ mod tests {
         ] {
             assert!(!produces_text(key), "{key:?} is a command, not a character");
         }
+    }
+
+    #[test]
+    fn theme_fonts_resolve_relative_to_the_theme_file() {
+        let directory = std::env::temp_dir().join("rungstar-theme");
+        assert_eq!(configured_font(Some(&directory), ""), None);
+        assert_eq!(
+            configured_font(Some(&directory), "fonts/regular.ttf"),
+            Some(directory.join("fonts/regular.ttf"))
+        );
+
+        let absolute = std::env::temp_dir().join("absolute-font.ttf");
+        assert_eq!(
+            configured_font(Some(&directory), absolute.to_str().unwrap()),
+            Some(absolute)
+        );
+        assert_eq!(configured_font(None, "relative.ttf"), None);
     }
 }

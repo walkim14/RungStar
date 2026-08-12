@@ -1,8 +1,13 @@
 //! Geometry, and the claim the whole design rests on: the same layout code is correct on
 //! every display it will actually run on.
 
-use rungstar_ui::draw::{approx_text_width, Command, DrawList, TextStyle};
+use rungstar_ui::draw::{
+    approx_text_width, Align, Command, DrawList, Font, ImageId, Overflow, TextStyle, VAlign,
+    WHOLE_IMAGE,
+};
 use rungstar_ui::geom::{Anchor, Point, Projection, Rect, DESIGN_HEIGHT};
+use rungstar_ui::screen::{ControlState, Widgets};
+use rungstar_ui::theme::Theme;
 use rungstar_ui::Color;
 
 /// The displays this has to be right on: a Steam Deck, a 1080p and a 1440p monitor, a 4K
@@ -156,6 +161,15 @@ fn an_unbalanced_clip_is_detectable() {
     assert!(!list.is_balanced());
     list.push(Command::PopClip);
     assert!(list.is_balanced());
+
+    list.push(Command::PopClip);
+    assert!(
+        !list.is_balanced(),
+        "an unmatched pop must invalidate the frame"
+    );
+
+    list.clear();
+    assert!(list.is_balanced(), "a cleared list starts a fresh frame");
 }
 
 #[test]
@@ -167,4 +181,178 @@ fn estimated_text_width_errs_wide() {
     assert!(approx_text_width("iiii", size) > 0.0);
     assert!(approx_text_width("WWWW", size) < 4.0 * size * 1.1);
     assert!(approx_text_width("ab", size) < approx_text_width("abc", size));
+}
+
+#[test]
+fn a_slider_keeps_its_thumb_inside_the_control_at_every_value() {
+    let style = Theme::builtin().resolve_default();
+    let widgets = Widgets::new(&style);
+    let control = Rect::new(100.0, 200.0, 320.0, 60.0);
+
+    for fraction in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+        let mut list = DrawList::new();
+        widgets.slider(&mut list, control, fraction, false);
+        let panels: Vec<Rect> = list
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                Command::Rect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+
+        assert!(panels.len() <= 3, "slider emitted too many draw commands");
+        let thumb = panels.last().expect("slider has a thumb");
+        assert!((thumb.w - thumb.h).abs() < 0.01, "thumb is not round");
+        assert!(
+            thumb.x >= control.x - 0.01
+                && thumb.right() <= control.right() + 0.01
+                && thumb.y >= control.y - 0.01
+                && thumb.bottom() <= control.bottom() + 0.01,
+            "{fraction}: thumb {thumb:?} escaped {control:?}"
+        );
+    }
+}
+
+#[test]
+fn selectable_controls_distinguish_active_focus_from_parent_context() {
+    let style = Theme::builtin().resolve_default();
+    let widgets = Widgets::new(&style);
+    let control = Rect::new(100.0, 200.0, 320.0, 60.0);
+
+    for (state, expected_fill, expected_commands) in [
+        (ControlState::Idle, style.surface, 1),
+        (ControlState::Chosen, style.surface_raised, 1),
+        (ControlState::Active, style.accent, 2),
+        (ControlState::Context, style.surface_raised, 2),
+    ] {
+        let mut list = DrawList::new();
+        let palette = widgets.selectable(&mut list, control, state);
+        assert_eq!(list.len(), expected_commands, "{state:?} command budget");
+        assert!(matches!(
+            list.commands().first(),
+            Some(Command::Rect { rect, color, .. }) if *rect == control && *color == expected_fill
+        ));
+
+        match state {
+            ControlState::Idle | ControlState::Chosen => assert_eq!(palette.text, style.text),
+            ControlState::Active => assert_eq!(palette.text, style.on_accent),
+            ControlState::Context => {
+                assert_eq!(palette.text, style.text);
+                assert!(matches!(
+                    list.commands().last(),
+                    Some(Command::Outline { color, .. }) if *color == style.accent_soft
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn draw_commands_preserve_the_geometry_and_style_the_backend_needs() {
+    let area = Rect::new(10.0, 20.0, 200.0, 80.0);
+    let mut list = DrawList::new();
+    assert!(list.is_empty());
+
+    let style = TextStyle::new(32.0, Color::WHITE)
+        .font(Font::Lyrics)
+        .align(Align::End)
+        .valign(VAlign::Top)
+        .ellipsis()
+        .outlined(Color::BLACK, 2.0)
+        .color(Color::rgb(10, 20, 30));
+    list.outline(area, Color::WHITE, 2.0, 8.0)
+        .bubble(area, Color::rgb(10, 20, 30), Color::WHITE)
+        .glow(area, Color::rgba(20, 30, 40, 128))
+        .text(area, "hello", style.clone())
+        .image(area, ImageId(1))
+        .image_tinted(area, ImageId(2), Color::rgba(1, 2, 3, 4), 7.0)
+        .line(
+            Point::new(1.0, 2.0),
+            Point::new(3.0, 4.0),
+            Color::BLACK,
+            5.0,
+        )
+        .stage_pulse(2.0);
+
+    assert_eq!(style.font, Font::Lyrics);
+    assert_eq!(style.align, Align::End);
+    assert_eq!(style.valign, VAlign::Top);
+    assert_eq!(style.overflow, Overflow::Ellipsis);
+    assert_eq!(style.outline, Some((Color::BLACK, 2.0)));
+    assert_eq!(style.color, Color::rgb(10, 20, 30));
+    assert!(matches!(
+        list.commands()[1],
+        Command::Bubble { rect, fill: Color { r: 10, .. }, rim: Color::WHITE }
+            if rect == area
+    ));
+    assert!(matches!(
+        list.commands()[2],
+        Command::Glow { rect, color: Color { a: 128, .. } } if rect == area
+    ));
+    assert!(matches!(
+        &list.commands()[3],
+        Command::Text { text, style: drawn, .. } if text == "hello" && *drawn == style
+    ));
+    assert!(matches!(
+        list.commands()[4],
+        Command::Image { image: ImageId(1), tint: Color::WHITE, radius: 0.0, source, .. }
+            if source == WHOLE_IMAGE
+    ));
+    assert!(matches!(
+        list.commands()[5],
+        Command::Image {
+            image: ImageId(2),
+            tint: Color { a: 4, .. },
+            radius: 7.0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        list.commands()[6],
+        Command::Line { width: 5.0, .. }
+    ));
+    assert!(matches!(
+        list.commands()[7],
+        Command::StagePulse { strength: 1.0 }
+    ));
+}
+
+#[test]
+fn shared_presentational_widgets_keep_their_visual_roles_distinct() {
+    let style = Theme::builtin().resolve_default();
+    let widgets = Widgets::new(&style);
+    let area = Rect::new(100.0, 100.0, 600.0, 300.0);
+    let mut list = DrawList::new();
+
+    widgets.focus_ring(&mut list, area);
+    widgets.empty_state(&mut list, area, "Nothing here", "Try another filter");
+    widgets.scrim(&mut list, area);
+    widgets.card(&mut list, area.inset(20.0));
+    widgets.chip(
+        &mut list,
+        Rect::new(120.0, 340.0, 180.0, 40.0),
+        "Duet",
+        style.success,
+    );
+
+    assert!(list.commands().iter().any(|command| matches!(
+        command,
+        Command::Outline { color, .. } if *color == style.accent
+    )));
+    assert!(list.commands().iter().any(|command| matches!(
+        command,
+        Command::Rect { color, .. } if *color == style.scrim
+    )));
+    let text: Vec<&str> = list
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            Command::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains(&"Nothing here"));
+    assert!(text.contains(&"Try another filter"));
+    assert!(text.contains(&"Duet"));
 }

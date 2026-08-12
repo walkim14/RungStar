@@ -321,6 +321,17 @@ const MARK_MAX_LAG: f64 = 1.5;
 /// An interval longer than this is a seek or a pause, not a frame, and is snapped through.
 const MARK_MAX_STEP: f64 = 4.0;
 
+fn stage_pulse(beat: f64) -> f32 {
+    if !beat.is_finite() {
+        return 0.0;
+    }
+    // UltraStar's grid has four units per musical beat. A quick fifth-power decay reads as a
+    // light hit rather than a brightness wobble, and reaches its quiet level well before the
+    // next beat.
+    let phase = (beat.rem_euclid(4.0) / 4.0) as f32;
+    (1.0 - phase).powi(5)
+}
+
 impl SingScreen {
     pub fn new(artist: impl Into<String>, title: impl Into<String>, singers: usize) -> Self {
         Self {
@@ -578,6 +589,7 @@ impl SingScreen {
             list.image_tinted(area, image, Color::WHITE.alpha(0.35), 0.0);
             list.fill(area, style.background.alpha(0.55));
         }
+        list.stage_pulse(stage_pulse(beat));
 
         let (header, body) = area.cut_top(style.gap(4.0));
         self.draw_header(list, header, style);
@@ -1034,10 +1046,11 @@ impl SingScreen {
                     // Freestyle scores nothing, so it is drawn as an outline: a cue, not a
                     // target, and filling it would promise points that never arrive.
                     let colour = owner.unwrap_or(style.muted);
-                    list.outline(rect, colour.alpha(0.35), 2.0, note_h / 2.0);
+                    list.outline(rect, colour.alpha(0.55), 2.2, note_h / 2.0);
                     continue;
                 }
 
+                let active = note.start <= beat && beat < note.end();
                 match owner {
                     // A faint fill in the part's colour with a firm outline round it: legible
                     // as "yours, not yet sung" without competing with the bar that fills it in
@@ -1048,20 +1061,39 @@ impl SingScreen {
                         // whose it is, which is enough; a gold streak through a part-coloured
                         // bubble was trying to say both things in the same place.
                         let fill = if note.kind.is_golden() {
-                            style.warning
+                            style.warning.alpha(0.92)
                         } else {
-                            colour.alpha(0.22)
+                            colour.alpha(0.28)
                         };
-                        list.panel(rect, fill, note_h / 2.0);
-                        list.outline(rect, colour.alpha(0.85), 2.0, note_h / 2.0);
+                        if active {
+                            list.glow(
+                                rect,
+                                if note.kind.is_golden() {
+                                    style.warning.alpha(0.68)
+                                } else {
+                                    colour.alpha(0.60)
+                                },
+                            );
+                        }
+                        list.bubble(rect, fill, colour.alpha(0.92));
                     }
                     None => {
-                        let colour = if note.kind.is_golden() {
-                            style.warning
+                        let (fill, rim) = if note.kind.is_golden() {
+                            (style.warning.alpha(0.92), style.warning.lighten(0.28))
                         } else {
-                            style.muted.alpha(0.8)
+                            (style.surface_raised.alpha(0.96), style.muted.alpha(0.78))
                         };
-                        list.panel(rect, colour, note_h / 2.0);
+                        if active {
+                            list.glow(
+                                rect,
+                                if note.kind.is_golden() {
+                                    style.warning.alpha(0.68)
+                                } else {
+                                    style.accent.alpha(0.52)
+                                },
+                            );
+                        }
+                        list.bubble(rect, fill, rim);
                     }
                 }
             }
@@ -1163,19 +1195,22 @@ impl SingScreen {
                         style.player(singers.first().copied().unwrap_or(0))
                     };
                     let rect = Rect::new(x, y, w, note_h);
-                    list.panel(rect, colour, note_h / 2.0);
+                    if from <= beat && to >= beat - 0.8 {
+                        list.glow(rect, colour.alpha(0.62));
+                    }
+                    list.bubble(rect, colour, colour.lighten(0.42));
                     // A golden note is worth double, and covering it with the hit hid the one
                     // thing worth remembering about it afterwards.
                     if here.iter().any(|s| s.golden) {
-                        list.outline(rect, style.warning, 2.0, note_h / 2.0);
+                        list.outline(rect, style.warning, 2.2, note_h / 2.0);
                     }
                 } else {
                     // A miss stays a thin mark at the pitch actually sung: it belongs to no
                     // bubble, and drawing it as one would claim it did.
-                    list.panel(
+                    list.bubble(
                         Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
-                        style.danger,
-                        note_h * 0.24,
+                        style.danger.alpha(0.88),
+                        style.danger.lighten(0.30),
                     );
                 }
             }
@@ -1198,11 +1233,10 @@ impl SingScreen {
                     None => pitch,
                 };
                 let y = y_of(pitch) + row_h / 2.0;
-                list.panel(
-                    Rect::new(head - 16.0, y - note_h * 0.28, 32.0, note_h * 0.56),
-                    style.player(index),
-                    note_h * 0.28,
-                );
+                let marker = Rect::new(head - 16.0, y - note_h * 0.28, 32.0, note_h * 0.56);
+                let colour = style.player(index);
+                list.glow(marker, colour.alpha(0.72));
+                list.bubble(marker, colour, colour.lighten(0.42));
             }
         }
     }

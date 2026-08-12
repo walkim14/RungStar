@@ -101,6 +101,26 @@ fn one_singer_and_six_are_the_same_code() {
 }
 
 #[test]
+fn stage_lighting_hits_the_musical_beat_and_fades_between_beats() {
+    let mut screen = sing_screen(1);
+    let strength = |list: &DrawList| {
+        list.commands()
+            .iter()
+            .find_map(|command| match command {
+                Command::StagePulse { strength } => Some(*strength),
+                _ => None,
+            })
+            .expect("the sing screen emitted no stage pulse")
+    };
+    let on_beat = strength(&draw(&mut screen, 8.0));
+    let between = strength(&draw(&mut screen, 10.0));
+    let almost_next = strength(&draw(&mut screen, 11.8));
+    assert_eq!(on_beat, 1.0);
+    assert!(between < 0.05, "the pulse did not settle: {between}");
+    assert!(almost_next < between, "the pulse rose before the next beat");
+}
+
+#[test]
 fn every_singer_gets_a_panel_and_a_distinct_colour() {
     let theme = Theme::builtin();
     let style = theme.resolve_default();
@@ -158,6 +178,8 @@ fn the_screen_stays_inside_the_window_at_every_size_and_player_count() {
                         _ if depth > 0 => {}
                         Command::Rect { rect, .. }
                         | Command::Outline { rect, .. }
+                        | Command::Bubble { rect, .. }
+                        | Command::Glow { rect, .. }
                         | Command::Text { rect, .. }
                         | Command::Image { rect, .. } => assert!(
                             rect.x >= area.x - 1.0
@@ -459,6 +481,9 @@ fn widest(list: &DrawList, color: rungstar_ui::Color) -> Rect {
         .iter()
         .filter_map(|c| match c {
             Command::Rect { rect, color: c, .. } if *c == color => Some(*rect),
+            Command::Bubble { rect, fill, .. } if *fill == color || *fill == color.alpha(0.88) => {
+                Some(*rect)
+            }
             _ => None,
         })
         .max_by(|a, b| a.w.partial_cmp(&b.w).unwrap_or(std::cmp::Ordering::Equal))
@@ -470,8 +495,8 @@ fn widest(list: &DrawList, color: rungstar_ui::Color) -> Rect {
 /// Matching on shape alone also catches the score bars and the progress bar, which is how the
 /// first version of this helper measured a note as most of the screen.
 fn bars(list: &DrawList, style: &rungstar_ui::Style) -> Vec<Rect> {
-    let solo_fill = style.muted.alpha(0.8);
-    let solo_freestyle = style.muted.alpha(0.35);
+    let solo_fill = style.surface_raised.alpha(0.96);
+    let solo_freestyle = style.muted.alpha(0.55);
     // A duet outlines each note in its part's colour and fills it faintly; a solo fills it and
     // outlines only the freestyle ones. Either way this yields one rectangle per note.
     let owners: Vec<rungstar_ui::Color> = (0..6)
@@ -492,8 +517,13 @@ fn bars(list: &DrawList, style: &rungstar_ui::Style) -> Vec<Rect> {
                 color,
                 radius,
             } if *radius > 0.0 && (*color == solo_fill || *color == style.warning) => Some(*rect),
+            Command::Bubble { rect, fill, rim }
+                if *fill == solo_fill || *fill == style.warning.alpha(0.92) || owned(rim, 0.92) =>
+            {
+                Some(*rect)
+            }
             Command::Outline { rect, color, .. }
-                if *color == solo_freestyle || owned(color, 0.85) || owned(color, 0.35) =>
+                if *color == solo_freestyle || owned(color, 0.55) =>
             {
                 Some(*rect)
             }
@@ -1459,20 +1489,20 @@ fn a_duet_shares_one_staff_and_colours_the_notes_by_part() {
         .commands()
         .iter()
         .filter_map(|c| match c {
-            Command::Outline { color, .. } => Some(*color),
+            Command::Bubble { rim, .. } => Some(*rim),
             _ => None,
         })
         .collect();
     assert!(
-        colours.contains(&style.player(0).alpha(0.85)),
+        colours.contains(&style.player(0).alpha(0.92)),
         "part one's notes are not in its colour"
     );
     assert!(
-        colours.contains(&style.player(1).alpha(0.85)),
+        colours.contains(&style.player(1).alpha(0.92)),
         "part two's notes are not in its colour"
     );
     assert!(
-        colours.contains(&style.text.alpha(0.85)),
+        colours.contains(&style.text.alpha(0.92)),
         "the shared note is not drawn as shared"
     );
 }
@@ -1778,10 +1808,47 @@ fn mark_or_none(
     list.commands()
         .iter()
         .filter_map(|c| match c {
-            Command::Rect { rect, color, .. } if *color == style.player(0) => Some(*rect),
+            Command::Bubble { rect, fill, .. } if *fill == style.player(0) => Some(*rect),
             _ => None,
         })
         .max_by(|a, b| a.w.partial_cmp(&b.w).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+#[test]
+fn six_live_singers_get_distinct_bubbles_with_a_bounded_glow_budget() {
+    let style = Theme::builtin().resolve_default();
+    let mut screen = sing_screen(6);
+    for (index, singer) in screen.singers.iter_mut().enumerate() {
+        singer.pitch = Some(60 + index as i32);
+    }
+    let list = draw(&mut screen, 10.0);
+
+    let glows = list
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, Command::Glow { .. }))
+        .count();
+    assert_eq!(glows, 7, "one target plus six singers should glow");
+    assert!(
+        glows <= screen.singers.len() + 1,
+        "glow work grew with history"
+    );
+
+    for index in 0..6 {
+        assert!(
+            list.commands().iter().any(|command| matches!(
+                command,
+                Command::Bubble { fill, .. } if *fill == style.player(index)
+            )),
+            "player {} has no live bubble",
+            index + 1
+        );
+    }
+    assert!(
+        list.len() < 140,
+        "the six-player frame grew to {} commands",
+        list.len()
+    );
 }
 
 #[test]

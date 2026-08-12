@@ -62,7 +62,12 @@ impl Limiter {
         }
         let short_by = 1.0 - self.tokens;
         self.tokens = 0.0;
-        Duration::from_secs_f64(short_by / self.rate.per_second.max(f64::EPSILON))
+        let wait = Duration::from_secs_f64(short_by / self.rate.per_second.max(f64::EPSILON));
+        // The caller performs this request after sleeping, so reserve that future token now.
+        // Otherwise the next call at the wake-up instant sees a freshly refilled token and a
+        // paced crawl sends two requests together every interval.
+        self.last += wait;
+        wait
     }
 }
 

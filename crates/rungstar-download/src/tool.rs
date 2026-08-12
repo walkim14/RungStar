@@ -70,7 +70,7 @@ pub fn find(data_dir: &Path) -> Option<PathBuf> {
     // The fetched copy before the bundled one: the bundled one is as old as the release, and
     // a yt-dlp that is a few months old is a yt-dlp that has stopped working.
     let managed = managed_path(data_dir);
-    if managed.is_file() {
+    if managed.is_file() && runs(&managed) {
         return Some(managed);
     }
     beside_the_executable()
@@ -85,7 +85,7 @@ pub fn beside_the_executable() -> Option<PathBuf> {
         folder.join("tools").join(file_name()),
     ]
     .into_iter()
-    .find(|candidate| candidate.is_file())
+    .find(|candidate| candidate.is_file() && runs(candidate))
 }
 
 /// Whether a working yt-dlp is on the PATH.
@@ -94,7 +94,12 @@ pub fn beside_the_executable() -> Option<PathBuf> {
 /// interpreter is missing, is on the PATH and does not work, and finding that out at download
 /// time is finding it out too late.
 pub fn on_the_path() -> bool {
-    std::process::Command::new("yt-dlp")
+    runs(Path::new("yt-dlp"))
+}
+
+/// Whether this copy starts and identifies itself.
+pub fn runs(program: &Path) -> bool {
+    std::process::Command::new(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -126,6 +131,8 @@ pub enum ToolError {
     NotAProgram(usize),
     #[error("could not write yt-dlp to {0}: {1}")]
     Write(String, String),
+    #[error("the installed yt-dlp binary does not start")]
+    NotRunnable,
 }
 
 /// Install a fetched copy of yt-dlp into the data directory.
@@ -152,6 +159,10 @@ pub fn install(data_dir: &Path, bytes: &[u8]) -> Result<PathBuf, ToolError> {
     make_runnable(&temporary);
     std::fs::rename(&temporary, &path)
         .map_err(|e| ToolError::Write(path.display().to_string(), e.to_string()))?;
+    if !runs(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(ToolError::NotRunnable);
+    }
     Ok(path)
 }
 

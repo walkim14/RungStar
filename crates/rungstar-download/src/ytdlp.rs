@@ -72,6 +72,8 @@ pub struct YtDlp {
     /// "ffmpeg is not installed": the file was there, in the same folder as the executable,
     /// and yt-dlp had no reason to look.
     pub ffmpeg: Option<PathBuf>,
+    /// JavaScript engine used for current YouTube player challenges.
+    pub runtime: Option<crate::runtime::JsRuntime>,
 }
 
 impl Default for YtDlp {
@@ -79,6 +81,7 @@ impl Default for YtDlp {
         Self {
             program: PathBuf::from("yt-dlp"),
             ffmpeg: crate::ffmpeg::find(),
+            runtime: None,
         }
     }
 }
@@ -89,12 +92,18 @@ impl YtDlp {
         Self {
             program,
             ffmpeg: crate::ffmpeg::find(),
+            runtime: None,
         }
     }
 
     /// Use a particular ffmpeg, or none at all.
     pub fn with_ffmpeg(mut self, ffmpeg: Option<PathBuf>) -> Self {
         self.ffmpeg = ffmpeg;
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: Option<crate::runtime::JsRuntime>) -> Self {
+        self.runtime = runtime;
         self
     }
 }
@@ -110,8 +119,22 @@ pub fn arguments(
     stem: &str,
     ffmpeg: Option<&Path>,
 ) -> Vec<String> {
+    arguments_with_runtime(page, audio_only, into, stem, ffmpeg, None)
+}
+
+pub fn arguments_with_runtime(
+    page: &str,
+    audio_only: bool,
+    into: &Path,
+    stem: &str,
+    ffmpeg: Option<&Path>,
+    runtime: Option<&crate::runtime::JsRuntime>,
+) -> Vec<String> {
     let template = into.join(format!("{stem}.%(ext)s"));
     let mut args: Vec<String> = vec![
+        // A machine-wide yt-dlp.conf must not redirect files, enable playlists, or choose a
+        // format the game cannot decode. This invocation is a complete, tested contract.
+        "--ignore-config".into(),
         // Never touch anything but the one URL given. A playlist link would otherwise fetch
         // four hundred songs into one folder.
         "--no-playlist".into(),
@@ -121,6 +144,27 @@ pub fn arguments(
         // Progress on stdout, one line per update, so it can be parsed rather than scraped.
         "--newline".into(),
         "--no-colors".into(),
+        // yt-dlp's own conservative preset uses this extraction-request pace. It avoids a
+        // burst of player/API requests without throttling the media bytes themselves.
+        "--sleep-requests".into(),
+        "0.75".into(),
+        // Keep fragmented media sequential. One song at a time is already fast enough and
+        // avoids multiplying requests when YouTube is close to rate-limiting the client.
+        "--concurrent-fragments".into(),
+        "1".into(),
+        // Current YouTube extraction uses an external JS challenge component. The official
+        // standalone binary does not bundle every version, so permit yt-dlp to fetch its own
+        // signed release component when the site changes.
+        "--remote-components".into(),
+        "ejs:github".into(),
+        "--extractor-retries".into(),
+        "4".into(),
+        "--fragment-retries".into(),
+        "4".into(),
+        "--retry-sleep".into(),
+        "exp=1:20".into(),
+        "--retry-sleep".into(),
+        "extractor:exp=1:20".into(),
         "-o".into(),
         template.to_string_lossy().into_owned(),
     ];
@@ -130,6 +174,10 @@ pub fn arguments(
     if let Some(path) = ffmpeg {
         args.push("--ffmpeg-location".into());
         args.push(path.to_string_lossy().into_owned());
+    }
+    if let Some(runtime) = runtime {
+        args.push("--js-runtimes".into());
+        args.push(runtime.argument());
     }
 
     match (audio_only, ffmpeg.is_some()) {
@@ -229,7 +277,14 @@ impl Extractor for YtDlp {
         into: &Path,
         stem: &str,
     ) -> Result<Extraction, ExtractError> {
-        let args = arguments(page, audio_only, into, stem, self.ffmpeg.as_deref());
+        let args = arguments_with_runtime(
+            page,
+            audio_only,
+            into,
+            stem,
+            self.ffmpeg.as_deref(),
+            self.runtime.as_ref(),
+        );
         let output = Command::new(&self.program)
             .args(&args)
             .stdin(Stdio::null())

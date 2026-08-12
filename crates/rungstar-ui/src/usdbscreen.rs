@@ -13,7 +13,7 @@ use rungstar_usdb::{CatalogSong, SongId};
 use crate::draw::{Align, DrawList, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Point, Rect};
 use crate::keyboard::{Key, Keyboard};
-use crate::screen::{Transition, Widgets};
+use crate::screen::{ControlState, Transition, Widgets};
 use crate::songselect::Input;
 use crate::theme::Style;
 
@@ -926,7 +926,12 @@ impl UsdbScreen {
                 Facet::Kind => self.narrow.len(),
                 other => self.picked(*other).len(),
             };
-            widgets.row(
+            let state = match (selected, self.on_values) {
+                (true, false) => ControlState::Active,
+                (true, true) => ControlState::Context,
+                (false, _) => ControlState::Idle,
+            };
+            widgets.row_state(
                 list,
                 row,
                 facet.title(),
@@ -935,16 +940,8 @@ impl UsdbScreen {
                 } else {
                     chosen.to_string()
                 },
-                selected,
+                state,
             );
-            if selected && self.on_values {
-                list.outline(
-                    row,
-                    style.accent,
-                    style.metrics.outline,
-                    style.metrics.radius,
-                );
-            }
         }
 
         let rows = self.rows_for(self.facet());
@@ -972,27 +969,17 @@ impl UsdbScreen {
                     .inset_xy(0.0, style.gap(0.2));
                 placed.push((row, Region::Value(index)));
                 let selected = self.on_values && index == self.value_cursor;
-                list.panel(
+                let palette = widgets.selectable(
+                    list,
                     row,
                     if selected {
-                        style.accent
+                        ControlState::Active
                     } else if *chosen {
-                        style.surface_raised
+                        ControlState::Chosen
                     } else {
-                        style.surface
+                        ControlState::Idle
                     },
-                    style.metrics.radius,
                 );
-                let text = if selected {
-                    style.on_accent
-                } else {
-                    style.text
-                };
-                let muted = if selected {
-                    style.on_accent
-                } else {
-                    style.muted
-                };
                 let cell = row.inset_xy(style.gap(1.2), 0.0);
                 // The tick has its own column so the labels line up whether ticked or not,
                 // which is what makes a long list scannable.
@@ -1016,12 +1003,12 @@ impl UsdbScreen {
                 list.text(
                     Rect::new(name.x, name.y, (name.w - style.gap(1.0)).max(0.0), name.h),
                     label,
-                    TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
+                    TextStyle::new(style.text_size(), palette.text).overflow(Overflow::Ellipsis),
                 );
                 list.text(
                     number,
                     count,
-                    TextStyle::new(style.scaled_text(0.82), muted).align(Align::End),
+                    TextStyle::new(style.scaled_text(0.82), palette.muted).align(Align::End),
                 );
             }
         });
@@ -1130,32 +1117,22 @@ impl UsdbScreen {
                     .inset_xy(0.0, style.gap(0.25));
                 regions.push((rect, Region::Song(index)));
                 let selected = index == cursor;
-                list.panel(
+                let palette = Widgets::new(style).selectable(
+                    list,
                     rect,
                     if selected {
-                        style.accent
+                        ControlState::Active
                     } else {
-                        style.surface
+                        ControlState::Idle
                     },
-                    style.metrics.radius,
                 );
-                let text = if selected {
-                    style.on_accent
-                } else {
-                    style.text
-                };
-                let muted = if selected {
-                    style.on_accent
-                } else {
-                    style.muted
-                };
 
                 let inner = rect.inset_xy(style.gap(1.2), 0.0);
                 // The state column first, so the eye can run down it looking for what is not
                 // held yet — which is the only reason anybody is on this screen.
                 let (state, rest) = inner.cut_left(style.gap(7.0));
                 let (label, colour) = match row.local {
-                    Local::Absent => ("", muted),
+                    Local::Absent => ("", palette.muted),
                     Local::Held => ("in library", style.success),
                     Local::Stale => ("updated", style.warning),
                     Local::Fetching => ("fetching", style.accent),
@@ -1173,14 +1150,14 @@ impl UsdbScreen {
                 list.text(
                     lines[0],
                     &row.title,
-                    TextStyle::new(title_size, text)
+                    TextStyle::new(title_size, palette.text)
                         .valign(VAlign::Bottom)
                         .overflow(Overflow::Ellipsis),
                 );
                 list.text(
                     lines[1],
                     &row.artist,
-                    TextStyle::new(artist_size, muted)
+                    TextStyle::new(artist_size, palette.muted)
                         .valign(VAlign::Top)
                         .overflow(Overflow::Ellipsis),
                 );
@@ -1198,7 +1175,7 @@ impl UsdbScreen {
                 list.text(
                     side,
                     detail.join("  \u{b7}  "),
-                    TextStyle::new(style.scaled_text(0.78), muted)
+                    TextStyle::new(style.scaled_text(0.78), palette.muted)
                         .align(Align::End)
                         .valign(VAlign::Bottom)
                         .overflow(Overflow::Ellipsis),

@@ -342,6 +342,13 @@ fn a_burst_goes_straight_through_and_a_crawl_is_paced() {
     let wait = limiter.take(start);
     assert!(wait > Duration::ZERO, "the bucket never emptied");
     assert!(wait <= Duration::from_millis(600), "{wait:?} is too long");
+    // `take` reserves the request that will run after this sleep. The next request at exactly
+    // that instant must wait for its own token rather than leaving as a pair with the first.
+    assert_eq!(
+        limiter.take(start + wait),
+        Duration::from_millis(500),
+        "the paced request was not reserved"
+    );
 
     // And it refills.
     let later = start + Duration::from_secs(10);

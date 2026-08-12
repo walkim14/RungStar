@@ -40,7 +40,10 @@ fn check(name: &str, list: &DrawList) {
     assert!(list.is_balanced(), "{name} left a clip pushed");
     for command in list.commands() {
         match command {
-            Command::Rect { rect, .. } | Command::Outline { rect, .. } => {
+            Command::Rect { rect, .. }
+            | Command::Outline { rect, .. }
+            | Command::Bubble { rect, .. }
+            | Command::Glow { rect, .. } => {
                 assert!(
                     rect.x >= -1.0
                         && rect.y >= -1.0

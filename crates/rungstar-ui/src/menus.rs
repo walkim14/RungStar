@@ -8,7 +8,7 @@ use crate::draw::{Align, DrawList, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Rect};
 use crate::menu::Cursor;
 use crate::options::{Action, Page};
-use crate::screen::{Route, Transition, Widgets};
+use crate::screen::{ControlState, Route, Transition, Widgets};
 use crate::settings::Settings;
 use crate::songselect::Input;
 use crate::theme::Style;
@@ -189,26 +189,21 @@ impl MainMenu {
                 .inset_xy(0.0, style.gap(0.4));
             let selected = index == self.cursor.index();
             self.regions.push(row);
-            list.panel(
+            let palette = widgets.selectable(
+                list,
                 row,
                 if selected {
-                    style.accent
+                    ControlState::Active
                 } else {
-                    style.surface
+                    ControlState::Idle
                 },
-                style.metrics.radius,
             );
-            let (text, secondary) = if selected {
-                (style.on_accent, style.on_accent.alpha(0.8))
-            } else {
-                (style.text, style.muted)
-            };
             let inner = row.inset_xy(style.gap(1.5), style.gap(0.3));
             let lines = style.stack(inner, &[label_size, detail_size]);
             list.text(
                 lines[0],
                 entry.label,
-                TextStyle::new(label_size, text)
+                TextStyle::new(label_size, palette.text)
                     .bold()
                     .valign(VAlign::Bottom)
                     .overflow(Overflow::Ellipsis),
@@ -216,7 +211,7 @@ impl MainMenu {
             list.text(
                 lines[1],
                 entry.detail,
-                TextStyle::new(detail_size, secondary)
+                TextStyle::new(detail_size, palette.muted)
                     .valign(VAlign::Top)
                     .overflow(Overflow::Ellipsis),
             );
@@ -289,6 +284,27 @@ impl OptionsScreen {
         self.on_page_list
     }
 
+    /// Populate choices whose values are defined by the active theme.
+    pub fn use_theme(&mut self, theme: &crate::theme::Theme) {
+        let page = self
+            .pages
+            .iter_mut()
+            .find(|page| page.title == "Appearance")
+            .expect("the Appearance page is part of Options");
+        for item in &mut page.items {
+            let names = match item.label {
+                "Skin" => Some(theme.skin_names()),
+                "Accent colour" => Some(theme.accent_names()),
+                _ => None,
+            };
+            if let (Some(names), crate::options::Control::StringChoice { choices, .. }) =
+                (names, &mut item.control)
+            {
+                *choices = names.into_iter().map(str::to_owned).collect();
+            }
+        }
+    }
+
     fn page(&self) -> &Page {
         &self.pages[self.page_cursor.index()]
     }
@@ -358,7 +374,7 @@ impl OptionsScreen {
             Input::Left | Input::Right => {
                 let item = &self.pages[self.page_cursor.index()].items[self.item_cursor.index()];
                 // A row that shows a folder has nothing to step through; it is pressed.
-                if item.pressed().is_some() {
+                if !item.is_adjustable() {
                     return OptionsOutcome::None;
                 }
                 item.adjust(settings, if matches!(input, Input::Right) { 1 } else { -1 });
@@ -374,6 +390,9 @@ impl OptionsScreen {
                         return OptionsOutcome::None;
                     }
                     return OptionsOutcome::Run(action);
+                }
+                if !item.is_adjustable() {
+                    return OptionsOutcome::None;
                 }
                 // Confirm on a choice steps it forward, so the row can be used without
                 // learning that left and right are the ones that do anything.
@@ -564,17 +583,12 @@ impl OptionsScreen {
                 .inset_xy(0.0, style.gap(0.25));
             let selected = index == self.page_cursor.index();
             self.page_regions.push(row);
-            widgets.row(list, row, page.title, "", selected);
-            // The group keeps a marker while the items have focus, so it stays clear which
-            // page the values on the right belong to.
-            if selected && !self.on_page_list {
-                list.outline(
-                    row,
-                    style.accent,
-                    style.metrics.outline,
-                    style.metrics.radius,
-                );
-            }
+            let state = match (selected, self.on_page_list) {
+                (true, true) => ControlState::Active,
+                (true, false) => ControlState::Context,
+                (false, _) => ControlState::Idle,
+            };
+            widgets.row_state(list, row, page.title, "", state);
         }
     }
 
@@ -601,20 +615,15 @@ impl OptionsScreen {
                 regions.push((row, first + offset));
                 let value = item.value(settings);
 
-                list.panel(
+                let palette = Widgets::new(style).selectable(
+                    list,
                     row,
                     if selected {
-                        style.accent
+                        ControlState::Active
                     } else {
-                        style.surface
+                        ControlState::Idle
                     },
-                    style.metrics.radius,
                 );
-                let (text, secondary) = if selected {
-                    (style.on_accent, style.on_accent.alpha(0.85))
-                } else {
-                    (style.text, style.muted)
-                };
                 let inner = row.inset_xy(style.gap(1.2), 0.0);
                 // The label and the value get their own columns. They used to be drawn into
                 // the same full-width box, one from each end, and an ellipsis only clips at
@@ -635,7 +644,7 @@ impl OptionsScreen {
                         label_box.h,
                     ),
                     item.label,
-                    TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
+                    TextStyle::new(style.text_size(), palette.text).overflow(Overflow::Ellipsis),
                 );
 
                 match item.fraction(settings) {
@@ -646,7 +655,7 @@ impl OptionsScreen {
                         list.text(
                             value_box,
                             &value,
-                            TextStyle::new(style.text_size(), text).align(Align::End),
+                            TextStyle::new(style.text_size(), palette.text).align(Align::End),
                         );
                         let bar = bar_box.cut_right(bar_box.w * 0.5).0.anchored(
                             Anchor::Center,
@@ -660,14 +669,14 @@ impl OptionsScreen {
                         list.text(
                             inner.cut_left(inner.w * 0.44).1,
                             "\u{203a}",
-                            TextStyle::new(style.text_size(), secondary).align(Align::End),
+                            TextStyle::new(style.text_size(), palette.muted).align(Align::End),
                         );
                     }
                     None => {
                         list.text(
                             inner.cut_left(inner.w * 0.44).1,
                             &value,
-                            TextStyle::new(style.text_size(), text)
+                            TextStyle::new(style.text_size(), palette.text)
                                 .align(Align::End)
                                 // A path is cut from the front: every folder on the machine
                                 // starts the same way, and the last one is the answer.

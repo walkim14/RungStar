@@ -3,6 +3,8 @@
 
 use rungstar_ui::color::Color;
 use rungstar_ui::theme::Theme;
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[test]
 fn the_builtin_theme_parses_and_validates() {
@@ -150,4 +152,60 @@ fn text_scale_multiplies_every_size() {
     let style = theme.resolve_default();
     assert_eq!(style.text_size(), theme.metrics.text_size * 1.5);
     assert_eq!(style.scaled_text(2.0), theme.metrics.text_size * 3.0);
+}
+
+#[test]
+fn theme_choices_start_with_the_effective_defaults() {
+    let mut theme = Theme::builtin();
+    assert_eq!(theme.skin_names().first(), Some(&"dark"));
+    assert_eq!(theme.accent_names().first(), Some(&"magenta"));
+
+    theme.meta.default_skin = "light".to_owned();
+    assert_eq!(theme.skin_names(), ["light", "contrast", "dark"]);
+}
+
+#[test]
+fn colours_convert_for_the_gpu_and_serialize_without_losing_alpha() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Swatch {
+        color: Color,
+    }
+
+    let color = Color::from_str("#0080ff40").expect("valid colour");
+    assert_eq!(color.to_array(), [0, 128, 255, 64]);
+    let linear = color.to_linear();
+    assert_eq!(linear[0], 0.0);
+    assert!((linear[1] - 0.215_86).abs() < 0.0001);
+    assert_eq!(linear[2], 1.0);
+    assert!((linear[3] - 64.0 / 255.0).abs() < 0.0001);
+
+    let swatch = Swatch { color };
+    let encoded = toml::to_string(&swatch).expect("serialize colour");
+    assert_eq!(toml::from_str::<Swatch>(&encoded).unwrap(), swatch);
+    assert!(toml::from_str::<Swatch>("color = \"not-a-colour\"").is_err());
+    assert_eq!(
+        Color::parse("#abcd").unwrap(),
+        Color::rgba(170, 187, 204, 221)
+    );
+}
+
+#[test]
+fn loading_and_resolving_broken_themes_fails_softly() {
+    let temp = tempfile::tempdir().unwrap();
+    let valid = temp.path().join("valid.toml");
+    std::fs::write(&valid, toml::to_string(&Theme::builtin()).unwrap()).unwrap();
+    assert_eq!(Theme::load(&valid).unwrap().meta.name, "Rung");
+
+    let invalid = temp.path().join("invalid.toml");
+    std::fs::write(&invalid, "this is not [toml").unwrap();
+    assert!(Theme::load(&invalid).is_err());
+    assert!(Theme::load(temp.path().join("missing.toml")).is_err());
+
+    let mut broken = Theme::builtin();
+    broken.skins.clear();
+    broken.players.clear();
+    assert!(broken.validate().is_err());
+    let style = broken.resolve("missing", "missing");
+    assert_eq!(style.players.len(), 6);
+    assert!(style.text.luminance() > style.background.luminance());
 }

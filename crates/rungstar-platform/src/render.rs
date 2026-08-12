@@ -18,6 +18,7 @@ use rungstar_ui::color::Color;
 use rungstar_ui::draw::{Align, Command, DrawList, Font, ImageId, Overflow, TextStyle, VAlign};
 use rungstar_ui::geom::{Projection, Rect};
 
+use crate::effects;
 use crate::font::{AtlasCache, FontSet};
 
 /// Why the renderer could not start or draw.
@@ -53,6 +54,14 @@ pub struct Renderer {
     images: HashMap<ImageId, Image>,
     next_image: u32,
     projection: Projection,
+    /// Reused rounded-rectangle geometry; list rows must not allocate every frame.
+    geometry_scratch: Vec<FRect>,
+    ambient_texture: Option<Texture>,
+    glow_texture: Option<Texture>,
+    effects_backend: String,
+    effects_elapsed: std::time::Duration,
+    effects_started: std::time::Instant,
+    frame_accent: Color,
 }
 
 /// The ellipsis appended when a string is elided. A single character, so eliding never needs
@@ -62,10 +71,37 @@ const ELLIPSIS: char = '\u{2026}';
 /// How far `Overflow::Shrink` is allowed to go before it gives up and elides instead.
 const MIN_SHRINK: f32 = 0.6;
 
+/// Resolve a pushed clip against the clip already in force.
+fn nested_clip(parent: Option<Rect>, next: Rect) -> Rect {
+    match parent {
+        Some(parent) => parent
+            .intersect(&next)
+            .unwrap_or_else(|| Rect::new(parent.x.max(next.x), parent.y.max(next.y), 0.0, 0.0)),
+        None => next,
+    }
+}
+
 impl Renderer {
     pub fn new(canvas: Canvas<Window>, fonts: FontSet) -> Result<Self, RenderError> {
         let creator = canvas.texture_creator();
         let (width, height) = canvas.output_size()?;
+        let generated = effects::generate();
+        let ambient_texture = upload_effect_texture(
+            &creator,
+            effects::AMBIENT_WIDTH,
+            effects::AMBIENT_HEIGHT,
+            &generated.ambient,
+        )
+        .map_err(|error| tracing::warn!("ambient effect texture unavailable: {error}"))
+        .ok();
+        let glow_texture = upload_effect_texture(
+            &creator,
+            effects::GLOW_WIDTH,
+            effects::GLOW_HEIGHT,
+            &generated.glow,
+        )
+        .map_err(|error| tracing::warn!("bubble glow texture unavailable: {error}"))
+        .ok();
         Ok(Self {
             canvas,
             creator,
@@ -75,6 +111,13 @@ impl Renderer {
             images: HashMap::new(),
             next_image: 1,
             projection: Projection::new(width, height),
+            geometry_scratch: Vec::with_capacity(64),
+            ambient_texture,
+            glow_texture,
+            effects_backend: generated.backend,
+            effects_elapsed: generated.elapsed,
+            effects_started: std::time::Instant::now(),
+            frame_accent: Color::WHITE,
         })
     }
 
@@ -177,6 +220,11 @@ impl Renderer {
         self.images.len()
     }
 
+    /// What produced the effect textures, for `--check` and performance diagnosis.
+    pub fn effects(&self) -> (&str, std::time::Duration) {
+        (&self.effects_backend, self.effects_elapsed)
+    }
+
     /// Width of a string in design units, for the few places that need it before drawing.
     pub fn measure(&self, font: Font, text: &str, size_units: f32) -> f32 {
         let pixels = self.projection.px(size_units);
@@ -185,10 +233,23 @@ impl Renderer {
     }
 
     /// Draw a whole frame.
-    pub fn render(&mut self, list: &DrawList, clear: Color) -> Result<(), RenderError> {
+    pub fn render(
+        &mut self,
+        list: &DrawList,
+        clear: Color,
+        accent: Color,
+    ) -> Result<(), RenderError> {
         self.canvas.set_blend_mode(BlendMode::Blend);
         self.canvas.set_draw_color(sdl(clear));
         self.canvas.clear();
+        self.frame_accent = accent;
+        let pulsed = list
+            .commands()
+            .iter()
+            .any(|command| matches!(command, Command::StagePulse { .. }));
+        if !pulsed {
+            self.draw_ambient(accent, None)?;
+        }
 
         // Clips nest, and SDL has one. Keeping the stack here means a screen can clip inside
         // a clip without the inner one leaking out when it pops.
@@ -214,6 +275,11 @@ impl Renderer {
                 width,
                 radius,
             } => self.stroke_rounded(*rect, *color, *width, *radius),
+            Command::Bubble { rect, fill, rim } => self.draw_bubble(*rect, *fill, *rim),
+            Command::Glow { rect, color } => self.draw_glow(*rect, *color),
+            Command::StagePulse { strength } => {
+                self.draw_ambient(self.frame_accent, Some(*strength))
+            }
             Command::Line { a, b, color, width } => {
                 // SDL draws hairlines only, so a thick line is a quad. Axis-aligned lines are
                 // almost all of them, and this keeps those exact.
@@ -248,10 +314,7 @@ impl Renderer {
             Command::Text { rect, text, style } => self.draw_text(*rect, text, style),
             Command::PushClip(rect) => {
                 // The effective clip is the intersection with whatever is already in force.
-                let effective = clips
-                    .last()
-                    .and_then(|outer| outer.intersect(rect))
-                    .unwrap_or(*rect);
+                let effective = nested_clip(clips.last().copied(), *rect);
                 clips.push(effective);
                 self.apply_clip(Some(effective));
                 Ok(())
@@ -279,6 +342,87 @@ impl Renderer {
         }
     }
 
+    fn draw_ambient(&mut self, accent: Color, pulse: Option<f32>) -> Result<(), RenderError> {
+        let Some(texture) = self.ambient_texture.as_mut() else {
+            return Ok(());
+        };
+        let elapsed = self.effects_started.elapsed().as_secs_f32();
+        let travel_x = (effects::AMBIENT_WIDTH - effects::AMBIENT_VIEW_WIDTH) as f32;
+        let travel_y = (effects::AMBIENT_HEIGHT - effects::AMBIENT_VIEW_HEIGHT) as f32;
+        let source_x = (elapsed * 0.11).sin().mul_add(0.5, 0.5) * travel_x;
+        let source_y = (elapsed * 0.07).cos().mul_add(0.5, 0.5) * travel_y;
+        let (width, height) = self.canvas.output_size()?;
+        texture.set_color_mod(accent.r, accent.g, accent.b);
+        texture.set_alpha_mod(match pulse {
+            Some(strength) => (160.0 + strength.clamp(0.0, 1.0) * 95.0).round() as u8,
+            None => 255,
+        });
+        self.canvas.copy(
+            texture,
+            FRect::new(
+                source_x,
+                source_y,
+                effects::AMBIENT_VIEW_WIDTH as f32,
+                effects::AMBIENT_VIEW_HEIGHT as f32,
+            ),
+            FRect::new(0.0, 0.0, width as f32, height as f32),
+        )?;
+        Ok(())
+    }
+
+    fn draw_glow(&mut self, rect: Rect, color: Color) -> Result<(), RenderError> {
+        let Some(texture) = self.glow_texture.as_mut() else {
+            return Ok(());
+        };
+        let rect = self.projection.rect(rect);
+        let pad_x = (rect.h * 1.4).max(8.0);
+        let pad_y = (rect.h * 0.85).max(5.0);
+        texture.set_color_mod(color.r, color.g, color.b);
+        texture.set_alpha_mod(color.a);
+        self.canvas.copy(
+            texture,
+            FRect::new(
+                0.0,
+                0.0,
+                effects::GLOW_WIDTH as f32,
+                effects::GLOW_HEIGHT as f32,
+            ),
+            FRect::new(
+                rect.x - pad_x,
+                rect.y - pad_y,
+                rect.w + pad_x * 2.0,
+                rect.h + pad_y * 2.0,
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn draw_bubble(&mut self, rect: Rect, fill: Color, rim: Color) -> Result<(), RenderError> {
+        let radius = rect.h / 2.0;
+        let depth = (rect.h * 0.08).clamp(1.0, 2.5);
+        self.fill_rounded(rect.offset(0.0, depth), Color::BLACK.alpha(0.24), radius)?;
+        self.fill_rounded(rect, fill, radius)?;
+        if rim.a > 0 {
+            self.stroke_rounded(rect, rim, (rect.h * 0.055).clamp(1.2, 2.2), radius)?;
+        }
+        let inset = (rect.h * 0.28).min(rect.w * 0.22);
+        let shine = Rect::new(
+            rect.x + inset,
+            rect.y + rect.h * 0.15,
+            (rect.w - inset * 2.0).max(0.0),
+            (rect.h * 0.11).clamp(1.0, 2.4),
+        );
+        if shine.w > 0.0 {
+            let shine_color = if fill.luminance() > 0.68 {
+                Color::BLACK.alpha(0.13)
+            } else {
+                Color::WHITE.alpha(0.30)
+            };
+            self.fill_rounded(shine, shine_color, shine.h / 2.0)?;
+        }
+        Ok(())
+    }
+
     fn fill_rounded(&mut self, rect: Rect, color: Color, radius: f32) -> Result<(), RenderError> {
         let r = self.projection.rect(rect);
         self.canvas.set_draw_color(sdl(color));
@@ -289,8 +433,11 @@ impl Renderer {
         }
         // Rounded corners as a stack of horizontal spans. SDL has no rounded-rect primitive,
         // and spans keep it to one fill_rects call rather than a texture per corner size.
-        let mut spans = Vec::with_capacity(radius as usize * 2 + 1);
-        spans.push(FRect::new(r.x, r.y + radius, r.w, r.h - radius * 2.0));
+        self.geometry_scratch.clear();
+        self.geometry_scratch
+            .reserve(radius.ceil() as usize * 2 + 1);
+        self.geometry_scratch
+            .push(FRect::new(r.x, r.y + radius, r.w, r.h - radius * 2.0));
         for step in 0..radius.ceil() as i32 {
             let y = step as f32;
             // Horizontal half-width of the corner circle at this row.
@@ -300,10 +447,11 @@ impl Renderer {
                     .sqrt();
             let x = r.x + inset;
             let w = r.w - inset * 2.0;
-            spans.push(FRect::new(x, r.y + y, w, 1.0));
-            spans.push(FRect::new(x, r.y + r.h - y - 1.0, w, 1.0));
+            self.geometry_scratch.push(FRect::new(x, r.y + y, w, 1.0));
+            self.geometry_scratch
+                .push(FRect::new(x, r.y + r.h - y - 1.0, w, 1.0));
         }
-        self.canvas.fill_rects(&spans)?;
+        self.canvas.fill_rects(&self.geometry_scratch)?;
         Ok(())
     }
 
@@ -329,8 +477,9 @@ impl Renderer {
         ];
         self.canvas.fill_rects(&bars)?;
         if corner >= 1.0 {
-            let mut arcs = Vec::new();
             let steps = (corner * 2.0).ceil() as i32;
+            self.geometry_scratch.clear();
+            self.geometry_scratch.reserve((steps as usize + 1) * 4);
             for step in 0..=steps {
                 let angle = std::f32::consts::FRAC_PI_2 * step as f32 / steps as f32;
                 let (sin, cos) = angle.sin_cos();
@@ -342,10 +491,11 @@ impl Renderer {
                 ] {
                     let x = cx + sx * cos * (corner - t / 2.0);
                     let y = cy + sy * sin * (corner - t / 2.0);
-                    arcs.push(FRect::new(x - t / 2.0, y - t / 2.0, t, t));
+                    self.geometry_scratch
+                        .push(FRect::new(x - t / 2.0, y - t / 2.0, t, t));
                 }
             }
-            self.canvas.fill_rects(&arcs)?;
+            self.canvas.fill_rects(&self.geometry_scratch)?;
         }
         Ok(())
     }
@@ -623,4 +773,39 @@ fn align_fraction(align: Align) -> f32 {
 
 fn sdl(color: Color) -> SdlColor {
     SdlColor::RGBA(color.r, color.g, color.b, color.a)
+}
+
+fn upload_effect_texture(
+    creator: &TextureCreator<WindowContext>,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<Texture, RenderError> {
+    let mut texture = creator
+        .create_texture_streaming(PixelFormat::ABGR8888, width, height)
+        .map_err(|error| RenderError::Sdl(error.to_string()))?;
+    texture
+        .update(None, pixels, (width * 4) as usize)
+        .map_err(|error| RenderError::Sdl(error.to_string()))?;
+    texture.set_blend_mode(BlendMode::Blend);
+    Ok(texture)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nested_clip;
+    use rungstar_ui::geom::Rect;
+
+    #[test]
+    fn a_nested_clip_is_limited_to_its_parent() {
+        let parent = Rect::new(10.0, 20.0, 100.0, 80.0);
+        assert_eq!(nested_clip(None, parent), parent);
+        assert_eq!(
+            nested_clip(Some(parent), Rect::new(50.0, 0.0, 100.0, 60.0)),
+            Rect::new(50.0, 20.0, 60.0, 40.0)
+        );
+
+        let disjoint = nested_clip(Some(parent), Rect::new(200.0, 200.0, 10.0, 10.0));
+        assert_eq!((disjoint.w, disjoint.h), (0.0, 0.0));
+    }
 }

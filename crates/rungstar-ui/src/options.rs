@@ -77,6 +77,12 @@ pub enum Control {
     },
     /// Free text, edited with the on-screen keyboard.
     Text { get: fn(&Settings) -> String },
+    /// A string selected from values supplied by the active theme.
+    StringChoice {
+        get: fn(&Settings) -> String,
+        set: fn(&mut Settings, String),
+        choices: Vec<String>,
+    },
     /// A button.
     Button(Action),
     /// A value that is also a button: it shows something, and choosing it does something.
@@ -105,7 +111,9 @@ impl Item {
                 .unwrap_or("?")
                 .to_owned(),
             Control::Number { get, format, .. } => format(get(settings)),
-            Control::Text { get } | Control::Shown { get, .. } => get(settings),
+            Control::Text { get }
+            | Control::StringChoice { get, .. }
+            | Control::Shown { get, .. } => get(settings),
             Control::Button(_) => String::new(),
         }
     }
@@ -118,6 +126,15 @@ impl Item {
 
     pub fn is_button(&self) -> bool {
         matches!(self.control, Control::Button(_))
+    }
+
+    /// Whether left/right and Confirm can change this row.
+    pub fn is_adjustable(&self) -> bool {
+        match &self.control {
+            Control::Choice { .. } | Control::Number { .. } => true,
+            Control::StringChoice { choices, .. } => choices.len() > 1,
+            Control::Text { .. } | Control::Button(_) | Control::Shown { .. } => false,
+        }
     }
 
     /// The action pressing this row runs, if any.
@@ -148,7 +165,17 @@ impl Item {
                 // the stick was held a moment too long is a genuinely bad surprise.
                 set(settings, next.clamp(*min, *max));
             }
+            Control::StringChoice { get, set, choices } if !choices.is_empty() => {
+                let current = get(settings);
+                let position = choices
+                    .iter()
+                    .position(|choice| choice.eq_ignore_ascii_case(&current))
+                    .unwrap_or(0);
+                let next = (position as isize + direction).rem_euclid(choices.len() as isize);
+                set(settings, choices[next as usize].clone());
+            }
             Control::Text { .. } | Control::Shown { .. } | Control::Button(_) => {}
+            Control::StringChoice { .. } => {}
         }
     }
 
@@ -561,16 +588,28 @@ impl Page {
                     label: "Skin",
                     help:
                         "Dark, light, or high contrast. High contrast suits a screen in daylight.",
-                    control: Control::Text {
+                    control: Control::StringChoice {
                         get: |s: &Settings| s.appearance.skin.clone(),
+                        set: |s, value| s.appearance.skin = value,
+                        choices: crate::theme::Theme::builtin()
+                            .skin_names()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
                     },
                 },
                 Item {
                     label: "Accent colour",
                     help: "The highlight colour. Text drawn on it is chosen for contrast, so \
                            any accent stays readable.",
-                    control: Control::Text {
+                    control: Control::StringChoice {
                         get: |s: &Settings| s.appearance.accent.clone(),
+                        set: |s, value| s.appearance.accent = value,
+                        choices: crate::theme::Theme::builtin()
+                            .accent_names()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
                     },
                 },
                 choice_item!(

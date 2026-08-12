@@ -13,7 +13,7 @@ use crate::browse::{Browser, Layout};
 use crate::draw::{Align, DrawList, ImageId, Overflow, TextStyle, VAlign};
 use crate::geom::{Anchor, Point, Rect};
 use crate::keyboard::{Key, Keyboard};
-use crate::screen::{Transition, Widgets};
+use crate::screen::{ControlState, Transition, Widgets};
 use crate::theme::Style;
 
 /// What the screen is doing right now.
@@ -1530,7 +1530,12 @@ impl SongSelect {
                 Facet::Kind => usize::from(self.narrow != Narrow::Everything),
                 _ => self.picked[index].len(),
             };
-            widgets.row(
+            let state = match (selected, self.on_values) {
+                (true, false) => ControlState::Active,
+                (true, true) => ControlState::Context,
+                (false, _) => ControlState::Idle,
+            };
+            widgets.row_state(
                 list,
                 row,
                 facet.title(),
@@ -1539,16 +1544,8 @@ impl SongSelect {
                 } else {
                     chosen.to_string()
                 },
-                selected,
+                state,
             );
-            if selected && self.on_values {
-                list.outline(
-                    row,
-                    style.accent,
-                    style.metrics.outline,
-                    style.metrics.radius,
-                );
-            }
         }
 
         let rows = self.rows_for(self.facet());
@@ -1576,27 +1573,17 @@ impl SongSelect {
                     .inset_xy(0.0, style.gap(0.2));
                 regions.push((row, Region::Value(index)));
                 let selected = self.on_values && index == self.value_cursor;
-                list.panel(
+                let palette = widgets.selectable(
+                    list,
                     row,
                     if selected {
-                        style.accent
+                        ControlState::Active
                     } else if *chosen {
-                        style.surface_raised
+                        ControlState::Chosen
                     } else {
-                        style.surface
+                        ControlState::Idle
                     },
-                    style.metrics.radius,
                 );
-                let text = if selected {
-                    style.on_accent
-                } else {
-                    style.text
-                };
-                let muted = if selected {
-                    style.on_accent
-                } else {
-                    style.muted
-                };
 
                 let cell = row.inset_xy(style.gap(1.2), 0.0);
                 // The tick has its own column so the labels line up whether ticked or not,
@@ -1621,12 +1608,12 @@ impl SongSelect {
                 list.text(
                     Rect::new(name.x, name.y, (name.w - style.gap(1.0)).max(0.0), name.h),
                     label,
-                    TextStyle::new(style.text_size(), text).overflow(Overflow::Ellipsis),
+                    TextStyle::new(style.text_size(), palette.text).overflow(Overflow::Ellipsis),
                 );
                 list.text(
                     number,
                     count,
-                    TextStyle::new(style.scaled_text(0.82), muted).align(Align::End),
+                    TextStyle::new(style.scaled_text(0.82), palette.muted).align(Align::End),
                 );
             }
         });
@@ -1766,28 +1753,22 @@ fn row_min(style: &Style) -> f32 {
 
 fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, selected: bool) {
     let rect = rect.inset_xy(0.0, style.gap(0.25));
-    let radius = style.metrics.radius;
-    list.panel(
+    let palette = Widgets::new(style).selectable(
+        list,
         rect,
         if selected {
-            style.accent
+            ControlState::Active
         } else {
-            style.surface
+            ControlState::Idle
         },
-        radius,
     );
 
-    let (text, secondary) = if selected {
-        (style.on_accent, style.on_accent.alpha(0.75))
-    } else {
-        (style.text, style.muted)
-    };
     let inner = rect.inset_xy(style.gap(1.2), style.gap(0.3));
     let lines = style.stack(inner, &[style.text_size(), style.scaled_text(0.8)]);
     list.text(
         lines[0],
         &song.title,
-        TextStyle::new(style.text_size(), text)
+        TextStyle::new(style.text_size(), palette.text)
             .bold()
             .valign(VAlign::Bottom)
             .overflow(Overflow::Ellipsis),
@@ -1795,7 +1776,7 @@ fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, se
     list.text(
         lines[1],
         &song.artist,
-        TextStyle::new(style.scaled_text(0.8), secondary)
+        TextStyle::new(style.scaled_text(0.8), palette.muted)
             .valign(VAlign::Top)
             .overflow(Overflow::Ellipsis),
     );
@@ -1803,7 +1784,7 @@ fn draw_row(list: &mut DrawList, style: &Style, rect: Rect, song: &SongEntry, se
     list.text(
         inner,
         format_duration(song.duration_secs),
-        TextStyle::new(style.scaled_text(0.8), secondary).align(Align::End),
+        TextStyle::new(style.scaled_text(0.8), palette.muted).align(Align::End),
     );
 }
 

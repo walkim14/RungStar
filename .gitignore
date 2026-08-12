@@ -7,6 +7,7 @@
 target/package/
 packaging/linux/cargo-sources.json
 packaging/linux/ytdlp-source.json
+packaging/linux/deno-source.json
 
 # Written by packaging/linux/build-flatpak.sh into the copy it builds from, so a packaged
 # binary can say which commit it is. Never part of a checkout.

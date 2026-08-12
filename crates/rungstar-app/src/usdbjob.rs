@@ -206,6 +206,7 @@ fn run(
     // A copy on the PATH wins over one this program fetched: somebody who installed it with
     // their package manager is telling us which one to use.
     let mut tool = rungstar_download::tool::find(&data);
+    let mut runtime = rungstar_download::runtime::find(&data);
     // Looked for once. Unlike yt-dlp it is never fetched, so the answer cannot change while
     // the game is running, and running `ffmpeg -version` is a process launch.
     let ffmpeg = rungstar_download::ffmpeg::find();
@@ -329,18 +330,31 @@ fn run(
                 let _ = events.send(Event::Signed(None, keeping));
             }
             Order_::GetTool => {
-                let _ = events.send(Event::Doing("fetching yt-dlp".to_owned(), None));
-                match fetch_tool(&files, &data) {
-                    Ok(path) => {
-                        let version = rungstar_download::tool::version(&path);
-                        tool = Some(path);
-                        let _ = events.send(Event::Tool(version, ffmpeg_version.clone()));
-                    }
-                    Err(error) => {
-                        let _ = events.send(Event::Problem(error));
-                        let _ = events.send(Event::Tool(None, ffmpeg_version.clone()));
+                if tool.is_none() {
+                    let _ = events.send(Event::Doing("fetching yt-dlp".to_owned(), None));
+                    match fetch_tool(&files, &data) {
+                        Ok(path) => tool = Some(path),
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
                     }
                 }
+                if runtime.is_none() {
+                    let _ = events.send(Event::Doing(
+                        "fetching Deno for YouTube downloads".to_owned(),
+                        None,
+                    ));
+                    match fetch_runtime(&files, &data) {
+                        Ok(found) => runtime = Some(found),
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
+                    }
+                }
+                let _ = events.send(Event::Tool(
+                    tool.as_deref().and_then(rungstar_download::tool::version),
+                    ffmpeg_version.clone(),
+                ));
                 let _ = events.send(Event::Idle);
             }
             Order_::Sync => {
@@ -376,7 +390,26 @@ fn run(
                     let _ = events.send(Event::Idle);
                     continue;
                 };
-                let extractor = rungstar_download::YtDlp::at(program).with_ffmpeg(ffmpeg.clone());
+                if runtime.is_none() {
+                    let _ = events.send(Event::Doing(
+                        "fetching Deno for YouTube downloads".to_owned(),
+                        None,
+                    ));
+                    match fetch_runtime(&files, &data) {
+                        Ok(found) => runtime = Some(found),
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
+                    }
+                }
+                let Some(js) = runtime.clone() else {
+                    let _ = events.send(Event::Downloaded(id, PathBuf::new(), Outcome::Cancelled));
+                    let _ = events.send(Event::Idle);
+                    continue;
+                };
+                let extractor = rungstar_download::YtDlp::at(program)
+                    .with_ffmpeg(ffmpeg.clone())
+                    .with_runtime(Some(js));
                 match fetch_one(
                     &mut usdb, id, &songs, &scratch, &files, &extractor, &stop, &events, &catalog,
                 ) {
@@ -398,7 +431,38 @@ fn run(
                         "nothing in the library is missing a file".to_owned(),
                         None,
                     ));
+                    let _ = events.send(Event::Idle);
+                    continue;
                 }
+                if tool.is_none() {
+                    let _ = events.send(Event::Doing("fetching yt-dlp".to_owned(), None));
+                    match fetch_tool(&files, &data) {
+                        Ok(path) => tool = Some(path),
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
+                    }
+                }
+                if runtime.is_none() {
+                    let _ = events.send(Event::Doing(
+                        "fetching Deno for YouTube downloads".to_owned(),
+                        None,
+                    ));
+                    match fetch_runtime(&files, &data) {
+                        Ok(found) => runtime = Some(found),
+                        Err(error) => {
+                            let _ = events.send(Event::Problem(error));
+                        }
+                    }
+                }
+                let Some(program) = tool.clone() else {
+                    let _ = events.send(Event::Idle);
+                    continue;
+                };
+                let Some(js) = runtime.clone() else {
+                    let _ = events.send(Event::Idle);
+                    continue;
+                };
                 for (index, (_, id, missing)) in broken.iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) {
                         break;
@@ -408,11 +472,9 @@ fn run(
                         format!("repairing {id}: {}", names.join(", ")),
                         Some((index as f32 + 1.0) / broken.len() as f32),
                     ));
-                    let extractor = match tool.clone() {
-                        Some(program) => rungstar_download::YtDlp::at(program),
-                        None => rungstar_download::YtDlp::default(),
-                    }
-                    .with_ffmpeg(ffmpeg.clone());
+                    let extractor = rungstar_download::YtDlp::at(program.clone())
+                        .with_ffmpeg(ffmpeg.clone())
+                        .with_runtime(Some(js.clone()));
                     let _ = fetch_one(
                         &mut usdb, *id, &songs, &scratch, &files, &extractor, &stop, &events,
                         &catalog,
@@ -433,6 +495,16 @@ fn fetch_tool(files: &Files, data: &std::path::Path) -> Result<PathBuf, String> 
     let url = rungstar_download::tool::download_url();
     let bytes = files.get(&url).map_err(|e| format!("{url}: {e}"))?;
     rungstar_download::tool::install(data, &bytes).map_err(|e| e.to_string())
+}
+
+fn fetch_runtime(
+    files: &Files,
+    data: &std::path::Path,
+) -> Result<rungstar_download::runtime::JsRuntime, String> {
+    let url = rungstar_download::runtime::download_url()
+        .ok_or_else(|| "Deno has no download for this platform".to_owned())?;
+    let bytes = files.get(&url).map_err(|error| format!("{url}: {error}"))?;
+    rungstar_download::runtime::install(data, &bytes).map_err(|error| error.to_string())
 }
 
 fn sync(

@@ -17,16 +17,18 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.llvm18
 command: rungstar
 
-# The full codec set. The base runtime ships a cut-down FFmpeg, and a song library is 88.8%
-# AV1 video and 99.9% Ogg Vorbis audio — neither of which is in the cut-down build. This is
-# also where a `ffmpeg` binary comes from when the runtime has one, which is what lets yt-dlp
-# merge the separate streams YouTube serves above 360p. Downloads work without it, at worse
-# video quality, and the screen says so.
+# Extra patented codecs. The 24.08 base runtime was verified to carry the formats RungStar
+# actually needs — AV1, H.264, Vorbis, AAC and a working `/usr/bin/ffmpeg` that merges yt-dlp
+# streams — so a local bundle still downloads and plays songs if Flatpak does not fetch this
+# optional extension. A Flathub-origin install gets the broader codec set automatically.
 add-extensions:
   org.freedesktop.Platform.ffmpeg-full:
     directory: lib/ffmpeg
     add-ld-path: .
     version: '24.08'
+    # Extension points default to no-autodownload=true. Flathub installs should fetch it rather
+    # than merely naming it; Flatpak 1.14 does not cross origins for a local single-file bundle.
+    no-autodownload: false
     autodelete: false
 
 build-options:
@@ -131,6 +133,9 @@ modules:
       # away. /app is read-only, so this copy can never update itself — the game keeps a
       # newer one in ~/.var/app/de.rungstar.RungStar/data/tools and prefers that over this.
       - install -Dm755 yt-dlp /app/bin/yt-dlp
+      # YouTube's current player challenge needs JavaScript. Deno is the recommended runtime,
+      # and a Steam Deck in Game Mode cannot be expected to have Node on the host PATH.
+      - install -Dm755 deno-runtime/deno /app/bin/deno
       # Themes really are optional — the built-in one is compiled into the binary, so a build
       # with none on disk starts and looks right. Fonts and sounds below are not optional, and
       # are installed unconditionally so a broken checkout fails here rather than shipping.
@@ -157,3 +162,4 @@ modules:
       # so a bundled binary has to be a declared source with a checksum rather than something
       # a build command downloads.
       - ytdlp-source.json
+      - deno-source.json

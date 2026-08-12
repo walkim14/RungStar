@@ -1,5 +1,6 @@
 //! Settings and the options pages built from them.
 
+use rungstar_ui::glyphs::{Glyphs, Named};
 use rungstar_ui::options::{Action, Control, Page};
 use rungstar_ui::settings::{
     Choice, Difficulty, FrameLimit, MicBoost, Settings, MAX_PLAYERS, THRESHOLDS,
@@ -43,6 +44,21 @@ fn every_choice_has_a_label_and_they_are_all_different() {
     labelled::<MicBoost>();
     labelled::<FrameLimit>();
     labelled::<rungstar_ui::browse::Layout>();
+    labelled::<Glyphs>();
+}
+
+#[test]
+fn controller_button_names_match_the_selected_hardware() {
+    assert_eq!(Glyphs::Xbox.resolve(), Named::XBOX);
+    assert_eq!(Glyphs::Deck.resolve(), Named::DECK);
+    assert_eq!(Glyphs::PlayStation.resolve(), Named::PLAYSTATION);
+    assert!(matches!(
+        Glyphs::Automatic.resolve(),
+        Named::XBOX | Named::DECK
+    ));
+    assert_eq!(Named::DECK.confirm, "A");
+    assert_eq!(Named::DECK.left_shoulder, "L1");
+    assert_eq!(Named::PLAYSTATION.confirm, "Cross");
 }
 
 #[test]
@@ -202,7 +218,7 @@ fn stepping_every_option_changes_it_and_stepping_back_restores_it() {
         for item in &page.items {
             // A button and a row that shows a folder are both pressed rather than stepped;
             // free text is typed. None of them has a left and a right to come back from.
-            if item.pressed().is_some() || matches!(item.control, Control::Text { .. }) {
+            if !item.is_adjustable() {
                 continue;
             }
             let mut settings = Settings::default();
@@ -226,6 +242,26 @@ fn stepping_every_option_changes_it_and_stepping_back_restores_it() {
             );
         }
     }
+}
+
+#[test]
+fn a_string_choice_needs_two_values_to_be_adjustable() {
+    let mut page = Page::appearance();
+    let skin = page
+        .items
+        .iter_mut()
+        .find(|item| item.label == "Skin")
+        .unwrap();
+    match &mut skin.control {
+        Control::StringChoice { choices, .. } => choices.truncate(1),
+        _ => panic!("Skin is not a theme choice"),
+    }
+    assert!(!skin.is_adjustable());
+    match &mut skin.control {
+        Control::StringChoice { choices, .. } => choices.clear(),
+        _ => unreachable!(),
+    }
+    assert!(!skin.is_adjustable());
 }
 
 #[test]

@@ -197,6 +197,21 @@ pub enum Command {
         width: f32,
         radius: f32,
     },
+    /// A dimensional capsule: shadow, fill, rim, and a restrained top highlight.
+    Bubble {
+        rect: Rect,
+        fill: Color,
+        rim: Color,
+    },
+    /// A shader-generated halo behind an active control or live pitch marker.
+    Glow {
+        rect: Rect,
+        color: Color,
+    },
+    /// Draw the ambient stage wash here, modulated by the current musical beat.
+    StagePulse {
+        strength: f32,
+    },
     Text {
         rect: Rect,
         text: String,
@@ -228,6 +243,7 @@ pub enum Command {
 pub struct DrawList {
     commands: Vec<Command>,
     clip_depth: usize,
+    clip_underflowed: bool,
 }
 
 /// The full source rectangle — draw the whole image.
@@ -253,18 +269,20 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.commands.clear();
         self.clip_depth = 0;
+        self.clip_underflowed = false;
     }
 
     /// Every clip pushed must be popped, or the backend inherits a clip from the last frame.
     /// Checked in tests rather than trusted.
     pub fn is_balanced(&self) -> bool {
-        self.clip_depth == 0
+        self.clip_depth == 0 && !self.clip_underflowed
     }
 
     pub fn push(&mut self, command: Command) -> &mut Self {
         match command {
             Command::PushClip(_) => self.clip_depth += 1,
-            Command::PopClip => self.clip_depth = self.clip_depth.saturating_sub(1),
+            Command::PopClip if self.clip_depth > 0 => self.clip_depth -= 1,
+            Command::PopClip => self.clip_underflowed = true,
             _ => {}
         }
         self.commands.push(command);
@@ -295,6 +313,20 @@ impl DrawList {
             color,
             width,
             radius,
+        })
+    }
+
+    pub fn bubble(&mut self, rect: Rect, fill: Color, rim: Color) -> &mut Self {
+        self.push(Command::Bubble { rect, fill, rim })
+    }
+
+    pub fn glow(&mut self, rect: Rect, color: Color) -> &mut Self {
+        self.push(Command::Glow { rect, color })
+    }
+
+    pub fn stage_pulse(&mut self, strength: f32) -> &mut Self {
+        self.push(Command::StagePulse {
+            strength: strength.clamp(0.0, 1.0),
         })
     }
 

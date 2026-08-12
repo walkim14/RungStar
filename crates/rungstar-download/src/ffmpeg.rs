@@ -37,10 +37,7 @@ pub fn file_name() -> &'static str {
 /// 3. **`vendor/ffmpeg/bin`** in the source tree, so `cargo run` downloads a song without
 ///    anything being installed first.
 pub fn find() -> Option<PathBuf> {
-    if on_the_path() {
-        return Some(PathBuf::from("ffmpeg"));
-    }
-    beside_the_executable().or_else(vendored)
+    path_copy().or_else(beside_the_executable).or_else(vendored)
 }
 
 /// A copy shipped next to the game.
@@ -52,7 +49,7 @@ pub fn beside_the_executable() -> Option<PathBuf> {
         folder.join("tools").join(file_name()),
     ]
     .into_iter()
-    .find(|candidate| candidate.is_file())
+    .find(|candidate| candidate.is_file() && runs(candidate))
 }
 
 /// The copy in the source tree, for a build run out of `target/`.
@@ -67,7 +64,7 @@ fn vendored() -> Option<PathBuf> {
                 .join("bin")
                 .join(file_name())
         })
-        .filter(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file() && runs(candidate))
 }
 
 /// Whether a working ffmpeg is on the PATH.
@@ -76,7 +73,24 @@ fn vendored() -> Option<PathBuf> {
 /// whose interpreter is gone is on the PATH and does not work, and finding that out when a
 /// download fails is finding it out too late.
 pub fn on_the_path() -> bool {
-    runs(Path::new("ffmpeg"))
+    path_copy().is_some()
+}
+
+/// The working executable found through PATH, resolved for `--ffmpeg-location`.
+fn path_copy() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|folder| folder.join(file_name()))
+        .map(|candidate| {
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                std::env::current_dir()
+                    .map(|current| current.join(&candidate))
+                    .unwrap_or(candidate)
+            }
+        })
+        .find(|candidate| candidate.is_file() && runs(candidate))
 }
 
 /// Whether this path is an ffmpeg that starts.

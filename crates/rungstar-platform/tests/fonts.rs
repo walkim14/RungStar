@@ -151,6 +151,23 @@ fn a_font_set_loads_with_no_theme_and_no_bundled_faces() {
 }
 
 #[test]
+fn an_invalid_theme_font_falls_back_in_every_role() {
+    let temp = tempfile::tempdir().unwrap();
+    let invalid = temp.path().join("broken.ttf");
+    std::fs::write(&invalid, b"not a font").unwrap();
+
+    let fonts = FontSet::load(Some(&invalid), Some(&invalid), Some(&invalid))
+        .expect("an invalid theme face must not stop the game");
+    for role in [
+        rungstar_ui::draw::Font::Regular,
+        rungstar_ui::draw::Font::Bold,
+        rungstar_ui::draw::Font::Lyrics,
+    ] {
+        assert_ne!(fonts.face(role).source(), "broken.ttf");
+    }
+}
+
+#[test]
 fn the_shipped_chain_draws_every_script_a_library_uses() {
     // The set the loader itself probes for. Asserted end to end here — through the real
     // `FontSet::load`, on whatever this machine has — because the loader stopping early is

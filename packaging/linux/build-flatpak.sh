@@ -44,8 +44,10 @@ echo "==> building $build_id"
 echo "==> pinned sources"
 # flatpak-builder builds with **no network**, on purpose: a build that can reach the internet is
 # a build that cannot be reproduced. So every dependency has to be a declared source with a
-# checksum, which is what these two produce.
-if [ ! -f "$here/cargo-sources.json" ]; then
+# checksum, which is what these three produce. Cargo sources are regenerated whenever the lock
+# file changes; an ignored file left from yesterday otherwise looks valid until the offline
+# build fails on the first newly added crate.
+if [ ! -f "$here/cargo-sources.json" ] || [ "$root/Cargo.lock" -nt "$here/cargo-sources.json" ]; then
     generator=/tmp/flatpak-cargo-generator.py
     [ -f "$generator" ] || curl -fsSL -o "$generator" \
         https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
@@ -53,6 +55,7 @@ if [ ! -f "$here/cargo-sources.json" ]; then
     (cd "$root" && python3 "$generator" Cargo.lock -o "$here/cargo-sources.json")
 fi
 [ -f "$here/ytdlp-source.json" ] || bash "$here/fetch-ytdlp.sh"
+[ -f "$here/deno-source.json" ] || bash "$here/fetch-deno.sh"
 
 # Built in a Linux filesystem rather than wherever the checkout is. flatpak-builder does a great
 # deal of small-file work, and on a Windows drive mounted into WSL that is ten times slower —

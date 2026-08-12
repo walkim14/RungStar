@@ -299,12 +299,9 @@ impl FontSet {
             .or_else(|_| Self::load_or_system(bold, &system_font_candidates()))?;
         // Lyrics are the one thing read from across a room, so they get their own heavier
         // face rather than the heading weight.
-        let lyrics_face = match lyrics.filter(|p| p.exists()) {
-            Some(path) => Face::load(path)?,
-            None => Self::load_or_system(None, &bundled("RungStar-Lyrics.ttf"))
-                .or_else(|_| Self::load_or_system(None, &system_bold_candidates()))
-                .or_else(|_| Self::load_or_system(None, &system_font_candidates()))?,
-        };
+        let lyrics_face = Self::load_or_system(lyrics, &bundled("RungStar-Lyrics.ttf"))
+            .or_else(|_| Self::load_or_system(None, &system_bold_candidates()))
+            .or_else(|_| Self::load_or_system(None, &system_font_candidates()))?;
         // Every face gets the same chain behind it, so a Cyrillic title is drawn the same way
         // wherever it appears and a face is chosen for how it looks rather than for what it
         // happens to contain.
@@ -319,8 +316,16 @@ impl FontSet {
         preferred: Option<&std::path::Path>,
         candidates: &[std::path::PathBuf],
     ) -> Result<Face, FontError> {
-        if let Some(path) = preferred.filter(|p| p.exists()) {
-            return Face::load(path);
+        if let Some(path) = preferred {
+            match Face::load(path) {
+                Ok(face) => return Ok(face),
+                Err(error) => {
+                    tracing::warn!(
+                        "could not load theme font {}: {error}; using a fallback",
+                        path.display()
+                    );
+                }
+            }
         }
         for candidate in candidates {
             if candidate.exists() {

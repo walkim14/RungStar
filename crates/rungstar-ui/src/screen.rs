@@ -51,6 +51,26 @@ pub enum Route {
     About,
 }
 
+/// How a selectable control relates to the input focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlState {
+    /// Not selected.
+    Idle,
+    /// Chosen or toggled, but not receiving input.
+    Chosen,
+    /// Selected and receiving input.
+    Active,
+    /// The selected parent of the control receiving input.
+    Context,
+}
+
+/// Text colours resolved alongside a selectable control's surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlPalette {
+    pub text: Color,
+    pub muted: Color,
+}
+
 /// Draws the pieces every screen is made of, so they look the same on all of them.
 ///
 /// UltraStar has each screen draw its own button, which is why its screens disagree about what
@@ -77,6 +97,69 @@ impl<'a> Widgets<'a> {
     /// A heading, sized relative to body text so the theme's text scale reaches it.
     pub fn heading(&self, factor: f32) -> TextStyle {
         TextStyle::new(self.style.scaled_text(factor), self.style.text).font(Font::Bold)
+    }
+
+    /// A selectable surface and the text colours that remain readable on it.
+    pub fn selectable(
+        &self,
+        list: &mut DrawList,
+        rect: Rect,
+        state: ControlState,
+    ) -> ControlPalette {
+        let (fill, palette) = match state {
+            ControlState::Idle => (
+                self.style.surface,
+                ControlPalette {
+                    text: self.style.text,
+                    muted: self.style.muted,
+                },
+            ),
+            ControlState::Chosen => (
+                self.style.surface_raised,
+                ControlPalette {
+                    text: self.style.text,
+                    muted: self.style.muted,
+                },
+            ),
+            ControlState::Active => (
+                self.style.accent,
+                ControlPalette {
+                    text: self.style.on_accent,
+                    muted: self.style.on_accent.alpha(0.8),
+                },
+            ),
+            ControlState::Context => (
+                self.style.surface_raised,
+                ControlPalette {
+                    text: self.style.text,
+                    muted: self.style.muted,
+                },
+            ),
+        };
+        let radius = self.style.metrics.radius;
+        list.panel(rect, fill, radius);
+        match state {
+            ControlState::Active => {
+                // A single translucent hairline gives the flat accent surface a crisp top
+                // edge. It is cheaper than a shadow or gradient and only the active control
+                // pays for it.
+                let line_h = (self.style.metrics.outline * 0.5).max(1.0);
+                let line = rect.inset_each(radius, line_h, radius, rect.h - line_h * 2.0);
+                if line.w > 0.0 && line.h > 0.0 {
+                    list.fill(line, self.style.on_accent.alpha(0.2));
+                }
+            }
+            ControlState::Context => {
+                list.outline(
+                    rect,
+                    self.style.accent_soft,
+                    self.style.metrics.outline,
+                    radius,
+                );
+            }
+            ControlState::Idle | ControlState::Chosen => {}
+        }
+        palette
     }
 
     /// The bar across the top of a screen: title on the left, status on the right.
@@ -154,17 +237,29 @@ impl<'a> Widgets<'a> {
 
     /// A list row: background, label, and an optional value on the right.
     pub fn row(&self, list: &mut DrawList, rect: Rect, label: &str, value: &str, selected: bool) {
-        let radius = self.style.metrics.radius;
-        if selected {
-            list.panel(rect, self.style.accent, radius);
-        } else {
-            list.panel(rect, self.style.surface, radius);
-        }
-        let text_color = if selected {
-            self.style.on_accent
-        } else {
-            self.style.text
-        };
+        self.row_state(
+            list,
+            rect,
+            label,
+            value,
+            if selected {
+                ControlState::Active
+            } else {
+                ControlState::Idle
+            },
+        );
+    }
+
+    /// A list row with an explicit focus/selection relationship.
+    pub fn row_state(
+        &self,
+        list: &mut DrawList,
+        rect: Rect,
+        label: &str,
+        value: &str,
+        state: ControlState,
+    ) {
+        let palette = self.selectable(list, rect, state);
         let inner = rect.inset_xy(self.style.gap(1.2), 0.0);
         // Two columns rather than two strings in one box. An ellipsis is applied at the edge
         // of the rectangle it is given, so a label and a value sharing one rectangle overlap
@@ -186,18 +281,13 @@ impl<'a> Widgets<'a> {
         list.text(
             label_box,
             label,
-            TextStyle::new(self.style.text_size(), text_color).overflow(Overflow::Ellipsis),
+            TextStyle::new(self.style.text_size(), palette.text).overflow(Overflow::Ellipsis),
         );
         if !value.is_empty() {
-            let value_color = if selected {
-                self.style.on_accent
-            } else {
-                self.style.muted
-            };
             list.text(
                 value_box,
                 value,
-                TextStyle::new(self.style.text_size(), value_color)
+                TextStyle::new(self.style.text_size(), palette.muted)
                     .align(Align::End)
                     .overflow(Overflow::Ellipsis),
             );
@@ -207,22 +297,33 @@ impl<'a> Widgets<'a> {
     /// A horizontal bar filled to `fraction`, for volumes and delays.
     pub fn slider(&self, list: &mut DrawList, rect: Rect, fraction: f32, on_accent: bool) {
         let height = self.style.gap(0.5);
-        let track = rect.anchored(Anchor::Center, rect.w, height, 0.0);
+        let thumb = height * 1.75;
+        // Leave half a thumb at either end, so 0% and 100% remain inside the control rather
+        // than being clipped by the row or the edge of the screen.
+        let track_box = rect.inset_xy((thumb / 2.0).min(rect.w / 2.0), 0.0);
+        let track = track_box.anchored(Anchor::Center, track_box.w, height, 0.0);
         let (track_color, fill_color) = if on_accent {
             (self.style.on_accent.alpha(0.3), self.style.on_accent)
         } else {
             (self.style.surface_sunken, self.style.accent)
         };
         list.panel(track, track_color, height / 2.0);
-        let filled = Rect::new(
-            track.x,
-            track.y,
-            track.w * fraction.clamp(0.0, 1.0),
-            track.h,
-        );
+        let fraction = fraction.clamp(0.0, 1.0);
+        let filled = Rect::new(track.x, track.y, track.w * fraction, track.h);
         if filled.w > 0.0 {
             list.panel(filled, fill_color, height / 2.0);
         }
+        let centre_x = track.x + track.w * fraction;
+        list.panel(
+            Rect::new(
+                centre_x - thumb / 2.0,
+                rect.center().y - thumb / 2.0,
+                thumb,
+                thumb,
+            ),
+            fill_color,
+            thumb / 2.0,
+        );
     }
 
     /// A ring around the focused element.

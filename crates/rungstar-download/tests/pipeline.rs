@@ -12,7 +12,7 @@ use rungstar_download::meta::hash;
 use rungstar_download::pipeline::{download, Fetcher, Progress, RunToEnd, Stop};
 use rungstar_download::plan::{plan, safe_name, watchable, Source};
 use rungstar_download::ytdlp::{
-    arguments, is_permanent, written, ExtractError, Extraction, Extractor,
+    arguments, arguments_with_runtime, is_permanent, written, ExtractError, Extraction, Extractor,
 };
 use rungstar_download::{Kind, Outcome, Resource, SyncMeta};
 use rungstar_usdb::{SongDetails, SongId};
@@ -569,6 +569,24 @@ fn the_extraction_command_asks_for_what_the_game_can_play() {
         Some(ffmpeg),
     );
     assert!(audio.contains(&"--no-playlist".to_owned()), "{audio:?}");
+    assert!(audio.contains(&"--ignore-config".to_owned()));
+    assert_eq!(
+        audio
+            .iter()
+            .position(|arg| arg == "--sleep-requests")
+            .map(|at| audio[at + 1].as_str()),
+        Some("0.75")
+    );
+    assert_eq!(
+        audio
+            .iter()
+            .position(|arg| arg == "--concurrent-fragments")
+            .map(|at| audio[at + 1].as_str()),
+        Some("1")
+    );
+    assert!(audio
+        .windows(2)
+        .any(|args| { args == ["--remote-components".to_owned(), "ejs:github".to_owned()] }));
     assert!(audio.contains(&"-x".to_owned()), "audio only");
     assert!(audio.iter().any(|a| a.contains("bestaudio")));
     // Whatever route it takes, what lands has to be something the game can open. YouTube's
@@ -618,6 +636,27 @@ fn ffmpeg_is_pointed_at_rather_than_hoped_for() {
         .position(|a| a == "--ffmpeg-location")
         .expect("no --ffmpeg-location");
     assert_eq!(args[at + 1], "/games/rungstar/ffmpeg.exe");
+}
+
+#[test]
+fn the_javascript_runtime_is_given_to_ytdlp_explicitly() {
+    let runtime = rungstar_download::runtime::JsRuntime {
+        name: "deno",
+        program: PathBuf::from("/games/rungstar/tools/deno"),
+    };
+    let args = arguments_with_runtime(
+        "https://youtu.be/abc",
+        true,
+        Path::new("/songs/x"),
+        "song",
+        Some(Path::new("/games/rungstar/ffmpeg")),
+        Some(&runtime),
+    );
+    let at = args
+        .iter()
+        .position(|argument| argument == "--js-runtimes")
+        .expect("no JavaScript runtime argument");
+    assert_eq!(args[at + 1], "deno:/games/rungstar/tools/deno");
 }
 
 #[test]
@@ -677,6 +716,25 @@ fn the_written_file_is_found_by_its_stem_and_partials_are_ignored() {
 
 // ---------------------------------------------------------------- yt-dlp itself
 
+fn runnable_tool_bytes() -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        let windows = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let curl = Path::new(&windows).join("System32").join("curl.exe");
+        let bytes = std::fs::read(&curl).unwrap_or_else(|error| {
+            panic!("{} is needed as a test fixture: {error}", curl.display())
+        });
+        assert!(bytes.len() >= 500_000, "the fixture is unexpectedly small");
+        bytes
+    }
+    #[cfg(unix)]
+    {
+        let mut script = b"#!/bin/sh\nprintf 'test-tool 1.0\\n'\n".to_vec();
+        script.resize(500_000, b'\n');
+        script
+    }
+}
+
 #[test]
 fn a_copy_on_the_path_is_preferred_over_one_we_fetched() {
     // Somebody who installed it with their package manager is telling us which one to use,
@@ -691,11 +749,24 @@ fn a_copy_on_the_path_is_preferred_over_one_we_fetched() {
         assert_eq!(found, None, "it found a yt-dlp that is not there");
 
         // A fetched one is then used.
-        let pretend = vec![0u8; 600_000];
-        let path = tool::install(data, &pretend).unwrap();
+        let path = tool::install(data, &runnable_tool_bytes()).unwrap();
         assert!(path.is_file());
         assert_eq!(tool::find(data), Some(path));
     }
+}
+
+#[test]
+fn a_stale_managed_copy_is_ignored_so_it_can_be_fetched_again() {
+    use rungstar_download::tool;
+    if tool::on_the_path() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = tool::managed_path(directory.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, vec![0u8; 600_000]).unwrap();
+    assert!(path.is_file());
+    assert_eq!(tool::find(directory.path()), None);
 }
 
 #[test]
@@ -713,11 +784,20 @@ fn an_error_page_is_not_installed_as_a_program() {
 }
 
 #[test]
+fn a_large_but_broken_ytdlp_is_not_kept() {
+    use rungstar_download::tool;
+    let directory = tempfile::tempdir().unwrap();
+    let error = tool::install(directory.path(), &vec![0u8; 600_000]).unwrap_err();
+    assert!(matches!(error, rungstar_download::ToolError::NotRunnable));
+    assert!(!tool::managed_path(directory.path()).exists());
+}
+
+#[test]
 fn installing_leaves_nothing_half_written() {
     use rungstar_download::tool;
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path();
-    tool::install(data, &vec![7u8; 600_000]).unwrap();
+    tool::install(data, &runnable_tool_bytes()).unwrap();
 
     let left: Vec<String> = std::fs::read_dir(data.join("tools"))
         .unwrap()
@@ -731,9 +811,8 @@ fn installing_leaves_nothing_half_written() {
     );
 
     // And installing again replaces it rather than failing.
-    tool::install(data, &vec![9u8; 600_000]).unwrap();
-    let bytes = std::fs::read(tool::managed_path(data)).unwrap();
-    assert_eq!(bytes[0], 9);
+    tool::install(data, &runnable_tool_bytes()).unwrap();
+    assert!(tool::runs(&tool::managed_path(data)));
 }
 
 #[test]
@@ -752,6 +831,36 @@ fn the_download_url_names_this_platform() {
 }
 
 #[test]
+fn deno_has_an_official_download_for_this_platform() {
+    let url = rungstar_download::runtime::download_url().expect("a supported Deno platform");
+    assert!(url.starts_with("https://github.com/denoland/deno/releases/latest/download/deno-"));
+    assert!(url.ends_with(".zip"));
+}
+
+#[test]
+fn a_deno_archive_is_installed_atomically_and_runs() {
+    use std::io::{Cursor, Write};
+
+    let mut bytes = runnable_tool_bytes();
+    bytes.resize(1_000_001, 0);
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file(
+        rungstar_download::runtime::file_name(),
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    zip.write_all(&bytes).unwrap();
+    let archive = zip.finish().unwrap().into_inner();
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = rungstar_download::runtime::install(directory.path(), &archive).unwrap();
+    assert_eq!(runtime.name, "deno");
+    assert!(runtime.program.is_file());
+    assert!(rungstar_download::runtime::runs(&runtime.program));
+    assert!(!runtime.program.with_extension("part").exists());
+}
+
+#[test]
 fn a_copy_beside_the_executable_is_found() {
     // A packaged release ships one so downloading works out of the box. The test runs from
     // the test binary's folder, which is where a bundled copy would sit next to the game.
@@ -766,7 +875,12 @@ fn a_copy_beside_the_executable_is_found() {
     if bundled.exists() {
         return; // something real is there; do not tread on it
     }
-    std::fs::write(&bundled, vec![1u8; 16]).unwrap();
+    std::fs::write(&bundled, runnable_tool_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     assert_eq!(tool::beside_the_executable(), Some(bundled.clone()));
     let _ = std::fs::remove_file(&bundled);
     assert_eq!(tool::beside_the_executable(), None);
@@ -782,7 +896,7 @@ fn a_fetched_copy_is_preferred_over_a_bundled_one() {
     }
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path();
-    let fetched = tool::install(data, &vec![3u8; 600_000]).unwrap();
+    let fetched = tool::install(data, &runnable_tool_bytes()).unwrap();
     assert_eq!(tool::find(data), Some(fetched));
 }
 
@@ -803,8 +917,16 @@ fn every_delivery_ships_yt_dlp() {
         "the Windows zip does not bundle yt-dlp"
     );
     assert!(
+        read("packaging/windows/portable.ps1").contains("deno.exe"),
+        "the Windows zip does not bundle Deno"
+    );
+    assert!(
         read("packaging/linux/appimage.sh").contains("yt-dlp_linux"),
         "the AppImage does not bundle yt-dlp"
+    );
+    assert!(
+        read("packaging/linux/appimage.sh").contains("deno-x86_64-unknown-linux-gnu.zip"),
+        "the AppImage does not bundle Deno"
     );
 
     // The Flatpak needs both halves: the generated source and the install command. Either one
@@ -820,13 +942,36 @@ fn every_delivery_ships_yt_dlp() {
         "the Flatpak fetches yt-dlp and never installs it"
     );
     assert!(
+        manifest.contains("deno-source.json")
+            && manifest.contains("install -Dm755 deno-runtime/deno /app/bin/deno"),
+        "the Flatpak does not declare and install Deno"
+    );
+    assert!(
+        manifest.contains("org.freedesktop.Platform.ffmpeg-full:")
+            && manifest.contains("no-autodownload: false"),
+        "the Flatpak names ffmpeg-full but will not install it automatically"
+    );
+    assert!(
         read("packaging/linux/fetch-ytdlp.sh").contains("sha256"),
         "the Flatpak source is not pinned by checksum, which an offline build needs"
+    );
+    assert!(
+        read("packaging/linux/fetch-deno.sh").contains("sha256"),
+        "the Deno Flatpak source is not pinned by checksum"
+    );
+    let builder = read("packaging/linux/build-flatpak.sh");
+    assert!(
+        builder.contains("Cargo.lock") && builder.contains("-nt \"$here/cargo-sources.json\""),
+        "the ignored Flatpak Cargo sources are not regenerated after Cargo.lock changes"
     );
 
     // And the file the generator writes is not committed, because it names one release.
     assert!(
         read(".gitignore").contains("ytdlp-source.json"),
         "a pinned yt-dlp release is committed and will go stale"
+    );
+    assert!(
+        read(".gitignore").contains("deno-source.json"),
+        "a pinned Deno release is committed and will go stale"
     );
 }
