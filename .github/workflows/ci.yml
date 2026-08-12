@@ -24,14 +24,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      # SDL3 / FFmpeg / ALSA development headers. Only needed once the media crates land;
-      # harmless before then.
+      # FFmpeg / ALSA / udev development headers, plus D-Bus for the Linux keyring backend.
+      # SDL3 itself is provided by the Rust crate, so no system SDL3 package is required here.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libavcodec-dev libavformat-dev \
+            libasound2-dev libudev-dev libdbus-1-dev libavcodec-dev libavformat-dev \
             libavutil-dev libswscale-dev libswresample-dev pkg-config cmake
 
       - name: Format
