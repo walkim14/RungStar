@@ -535,6 +535,14 @@ impl Session {
         self.clock.beats().visual > self.last_note_beat
     }
 
+    /// How many note-grid beats pass in a second: `#BPM * 4 / 60`.
+    ///
+    /// The screen needs it to judge a wait in seconds rather than in beats, which is not the
+    /// same question at two tempos three times apart.
+    pub fn beats_per_second(&self) -> f64 {
+        self.clock.timing().grid_rate / 60.0
+    }
+
     /// The drawing beat, which runs ahead of the scoring beat by the microphone delay.
     pub fn visual_beat(&self) -> f64 {
         self.clock.beats().visual

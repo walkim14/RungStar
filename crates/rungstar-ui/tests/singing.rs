@@ -5,8 +5,8 @@ use rungstar_ui::geom::Rect;
 use rungstar_ui::screen::Transition;
 use rungstar_ui::settings::LyricEffect;
 use rungstar_ui::singscreen::{
-    fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PartView, PauseChoice,
-    SingScreen, Singer, Sung, Syllable,
+    countdown, fold_to_octave, rating_title, Note, NoteKind, NoteLine, Overlay, PartView,
+    PauseChoice, SingScreen, Singer, Sung, Syllable,
 };
 use rungstar_ui::songselect::Input;
 use rungstar_ui::theme::Theme;
@@ -1982,4 +1982,172 @@ fn draw_with(
     );
     assert!(list.is_balanced());
     list
+}
+
+/// A song whose first words are a long way off, for the count-in.
+///
+/// `#BPM` 120, so eight beats to the second: the first syllable at beat 200 is twenty-five
+/// seconds in, and the bar sets off at beat 184 — a twenty-three second wait from beat zero.
+fn distant_line() -> (NoteLine, Vec<Syllable>) {
+    let notes: Vec<Note> = (0..4)
+        .map(|i| Note {
+            start: 200.0 + i as f64 * 4.0,
+            duration: 3.0,
+            pitch: 60 + i,
+            kind: NoteKind::Normal,
+            part: 0,
+        })
+        .collect();
+    let words = ["Here ", "it ", "comes ", "now"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Syllable {
+            text: (*text).to_owned(),
+            start: 200.0 + i as f64 * 4.0,
+            duration: 3.0,
+            golden: false,
+        })
+        .collect();
+    let line = NoteLine {
+        start: notes.first().map(|n| n.start).unwrap_or(0.0),
+        end: notes.last().map(Note::end).unwrap_or(0.0),
+        notes,
+    };
+    (line, words)
+}
+
+fn draw_distant(screen: &mut SingScreen, beat: f64) -> DrawList {
+    let theme = Theme::builtin();
+    let mut list = DrawList::new();
+    let (line, words) = distant_line();
+    screen.draw(
+        &mut list,
+        area(),
+        &theme.resolve_default(),
+        &[PartView {
+            line: &line,
+            syllables: &words,
+            next_line: "the next line",
+        }],
+        beat,
+    );
+    list
+}
+
+/// Marks drawn for the count-in: the only square panels down in the lyric strip.
+fn count_marks(list: &DrawList) -> usize {
+    list.commands()
+        .iter()
+        .filter(|c| match c {
+            Command::Rect { rect, .. } => {
+                rect.y > area().h * 0.85 && (rect.w - rect.h).abs() < 0.01 && rect.w > 1.0
+            }
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn only_a_wait_worth_sitting_through_is_counted_in() {
+    // Every line is parked for a moment while the previous one finishes. Counting those in
+    // would put a count on the screen for half a second on every line of the song, which is
+    // noise rather than warning.
+    assert_eq!(countdown(0.4, 0.3), None);
+    assert_eq!(countdown(1.0, 0.9), None);
+    assert!(countdown(1.6, 1.0).is_some());
+    assert!(countdown(30.0, 2.0).is_some());
+}
+
+#[test]
+fn the_count_runs_only_over_the_last_seconds_of_the_wait() {
+    // A thirty-second break is not thirty seconds of counting: nothing is said until the bar
+    // is nearly ready to move, because that is the only part that is news.
+    assert_eq!(countdown(30.0, 20.0), None);
+    let far = countdown(30.0, 3.5);
+    assert_eq!(far, None);
+    let start = countdown(30.0, 3.0).expect("no count three seconds out");
+    assert_eq!((start.marks, start.left), (3, 3));
+    let middle = countdown(30.0, 1.6).expect("no count mid-wait");
+    assert_eq!((middle.marks, middle.left), (3, 2));
+    let last = countdown(30.0, 0.25).expect("no count at the last moment");
+    assert_eq!((last.marks, last.left), (3, 1));
+    // And it is over the instant the bar sets off, rather than lingering over the run-in.
+    assert_eq!(countdown(30.0, 0.0), None);
+    assert_eq!(countdown(30.0, -1.0), None);
+}
+
+#[test]
+fn a_short_wait_is_counted_as_far_as_it_goes() {
+    // Two seconds of silence still wants telling; it just cannot be told in three.
+    let short = countdown(2.0, 1.9).expect("a two-second wait went uncounted");
+    assert_eq!(short.marks, 2);
+    assert_eq!(short.left, 2);
+}
+
+#[test]
+fn the_counted_mark_shrinks_across_its_own_second() {
+    // What makes the row read as time passing rather than as three lights that go out.
+    let fresh = countdown(30.0, 2.95).expect("no count");
+    let stale = countdown(30.0, 2.05).expect("no count");
+    assert!(fresh.tick > 0.9, "{}", fresh.tick);
+    assert!(stale.tick < 0.1, "{}", stale.tick);
+    assert_eq!(fresh.left, stale.left);
+}
+
+#[test]
+fn a_long_instrumental_break_counts_the_words_back_in() {
+    let mut screen = sing_screen(1);
+    screen.beat_rate = 8.0;
+    // The line arrives at beat zero and the bar sets off at 184: twenty-three seconds parked.
+    let arrives = draw_distant(&mut screen, 0.0);
+    assert_eq!(
+        count_marks(&arrives),
+        0,
+        "counted a wait that had just begun"
+    );
+    let waiting = draw_distant(&mut screen, 100.0);
+    assert_eq!(count_marks(&waiting), 0, "counted ten seconds out");
+    // Two seconds before the bar sets off.
+    let nearly = draw_distant(&mut screen, 168.0);
+    assert_eq!(
+        count_marks(&nearly),
+        3,
+        "no count-in before a long break ended"
+    );
+    // The next line's preview gives up the strip while the count is in it.
+    assert!(strings(&waiting).iter().any(|s| s == "the next line"));
+    assert!(!strings(&nearly).iter().any(|s| s == "the next line"));
+    // And once the bar is moving there is nothing left to count.
+    let moving = draw_distant(&mut screen, 190.0);
+    assert_eq!(count_marks(&moving), 0, "the count outlived the wait");
+    assert!(moving.is_balanced());
+}
+
+#[test]
+fn an_ordinary_line_change_is_not_counted_in() {
+    // The fixture line's words start at beat 8, so its bar is already running by the time the
+    // line is on screen at all. Nothing to count, and nothing drawn.
+    let mut screen = sing_screen(1);
+    screen.beat_rate = 8.0;
+    let list = draw(&mut screen, 4.0);
+    assert_eq!(count_marks(&list), 0);
+    assert!(strings(&list).iter().any(|s| s == "the next line"));
+}
+
+#[test]
+fn a_restart_counts_the_same_wait_in_again() {
+    // The clock going backwards is a restart or a seek, not a wait anybody sat through. Left
+    // alone, the screen would think the line had been on for the whole of the previous run
+    // and count in a two-second wait where the song has a twenty-three second one.
+    let mut screen = sing_screen(1);
+    screen.beat_rate = 8.0;
+    draw_distant(&mut screen, 0.0);
+    let first_time = count_marks(&draw_distant(&mut screen, 168.0));
+    assert_eq!(first_time, 3);
+    draw_distant(&mut screen, 0.0);
+    let again = count_marks(&draw_distant(&mut screen, 168.0));
+    assert_eq!(
+        again, first_time,
+        "the count after a restart was not the same count"
+    );
 }

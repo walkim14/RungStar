@@ -2485,6 +2485,7 @@ impl App {
         screen.challenge = (!effects.is_plain()).then(|| self.challenge.name.to_owned());
         screen.effect = self.settings.lyrics.effect;
         screen.duration = session.duration();
+        screen.beat_rate = session.beats_per_second();
         let (low, high) = session.pitch_range();
         screen.pitch_low = low;
         screen.pitch_high = high;

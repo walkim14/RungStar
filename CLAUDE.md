@@ -482,6 +482,18 @@ singing.
   note rather than the pitch for the same reason — a held note wobbles across the band and
   every beat of it counts.
 
+  **A wait long enough to doubt gets counted in.** The lyric bar parks at the left edge from
+  the moment a line appears until sixteen beats before its first word, and across an intro or
+  an instrumental break that is a still screen for twenty seconds — indistinguishable from a
+  song that has stopped. A row of marks now empties over the last three seconds before the bar
+  sets off. Three decisions in it: the count is in *seconds*, not beats, because sixteen beats
+  is two seconds at `#BPM` 120 and under one at 300 and the question is about the singer rather
+  than the tempo; a park under 1.5 s gets nothing, because every line is parked for a moment
+  while the previous one finishes and a count that flashes up on all of them is noise; and it
+  counts to the bar *setting off* rather than to the first word, because the run-in is already
+  the last two seconds of warning. Marks rather than digits — read out of the corner of the eye
+  while the words are being read properly, and no glyph a font can fail to have.
+
   `rungstar-sing` survives as a standalone tool for one song without the browser.
 
   Known simplification: `rungstar-sing` scores one singer from one capture device. The routing

@@ -239,6 +239,13 @@ pub struct SingScreen {
     /// Seconds into the song, for the progress bar.
     pub position: f32,
     pub duration: f32,
+    /// How many note-grid beats pass in a second, i.e. `#BPM * 4 / 60`.
+    ///
+    /// The screen works in beats everywhere else, but "long enough to be worth counting in"
+    /// is a wall-clock judgement: the lead-in is two seconds at `#BPM` 120 and well under one
+    /// at 300, so the same rule written in beats would count a pause in one song and let the
+    /// singer sit through it in the other.
+    pub beat_rate: f64,
     pub gamepad: bool,
     pub show_input_panel: bool,
     /// Whether the singer panels are shown. The jukebox has nobody singing.
@@ -269,6 +276,12 @@ pub struct SingScreen {
     /// The beat the marks were last advanced at, so the ease is in song time rather than in
     /// frames. A frame rate is not a clock.
     grown_at: f64,
+    /// Per part: which line is on screen, and the beat it arrived at.
+    ///
+    /// A line arrives the moment the previous one ends, which is also the moment its sweeping
+    /// bar parks at the left edge — so this is how long the bar has been sitting still, which
+    /// is the one thing needed to tell an instrumental break from an ordinary breath.
+    parked: Vec<(f64, f64)>,
     /// The two parts of a duet, named as the song names them.
     ///
     /// Empty for an ordinary song, which is the difference the layout keys off: a duet gets a
@@ -314,12 +327,107 @@ const RATING_LIFETIME: f32 = 1.4;
 /// nothing you could not already see.
 const LEAD_IN_BEATS: f64 = 16.0;
 
+/// Beats per second assumed until the song says otherwise: `#BPM` 120, the middle of what a
+/// real library holds.
+const DEFAULT_BEAT_RATE: f64 = 8.0;
+
+/// A park shorter than this gets no count-in, in seconds.
+///
+/// Every line is parked for a moment while the previous one finishes, and a count that flashes
+/// up for half a second is a distraction rather than a warning — it is over before it has been
+/// read, and it happens on every line of the song.
+const COUNTDOWN_MIN_SECONDS: f64 = 1.5;
+
+/// The most of a park the count-in covers, in seconds.
+///
+/// Three, because that is what a person counts you in with, and because a longer count spends
+/// most of an instrumental break telling you about a bar that has not moved for twenty
+/// seconds and is not about to.
+const COUNTDOWN_SECONDS: f64 = 3.0;
+
 /// How quickly a mark's drawn end catches up with its scored end, in beats.
 const MARK_EASE_BEATS: f64 = 0.6;
 /// The furthest a drawn end may fall behind before it stops easing and jumps.
 const MARK_MAX_LAG: f64 = 1.5;
 /// An interval longer than this is a seek or a pause, not a frame, and is snapped through.
 const MARK_MAX_STEP: f64 = 4.0;
+
+/// Where a lyric count-in stands: how many marks it has, how many are still to come, and how
+/// far through the one being counted it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Countdown {
+    /// Marks in the row, which is how many seconds the count covers.
+    pub marks: usize,
+    /// Marks still to be spent, including the one running now. Never zero.
+    pub left: usize,
+    /// `1.0` at the start of the mark being counted, falling to `0.0` as it runs out.
+    pub tick: f32,
+}
+
+/// Whether a parked lyric bar is worth counting in, and where that count stands.
+///
+/// `park` is how long the bar sits still altogether before it sets off; `remaining` how much of
+/// that is left. Seconds rather than beats, because whether a wait is long enough to need
+/// telling about is a question about the singer and not about the tempo.
+pub fn countdown(park: f64, remaining: f64) -> Option<Countdown> {
+    if !park.is_finite() || !remaining.is_finite() || park < COUNTDOWN_MIN_SECONDS {
+        return None;
+    }
+    // A park shorter than the full count is covered as far as it goes rather than not at all:
+    // the alternative is a two-second silence with nothing to say it is nearly over, which is
+    // the case this exists for.
+    let window = park.min(COUNTDOWN_SECONDS);
+    if remaining <= 0.0 || remaining > window {
+        return None;
+    }
+    let marks = window.ceil() as usize;
+    let left = (remaining.ceil() as usize).clamp(1, marks);
+    Some(Countdown {
+        marks,
+        left,
+        tick: (remaining - (left as f64 - 1.0)).clamp(0.0, 1.0) as f32,
+    })
+}
+
+/// A row of marks that empties from the right as the count runs down.
+///
+/// Marks rather than digits: a count-in is read out of the corner of the eye while the words
+/// are being read properly, and a shortening row says "nearly" without being looked at. It also
+/// cannot be drawn as an empty box by a font that has no digit for it, which is the failure the
+/// star ratings once had.
+fn draw_countdown(list: &mut DrawList, area: Rect, style: &Style, colour: Color, count: Countdown) {
+    if count.marks == 0 {
+        return;
+    }
+    let radius = (area.h * 0.26).max(2.0);
+    let step = radius * 3.4;
+    let width = step * (count.marks as f32 - 1.0) + radius * 2.0;
+    let centre = area.center();
+    let mut x = centre.x - width / 2.0;
+    for slot in 0..count.marks {
+        let spent = slot >= count.left;
+        // The mark being counted shrinks away over its own second, so the row empties
+        // smoothly rather than a whole mark at a time. It never quite vanishes before its
+        // turn is over, or the row reads as one shorter than it is.
+        let scale = if !spent && slot + 1 == count.left {
+            count.tick.max(0.2)
+        } else {
+            1.0
+        };
+        let r = radius * scale;
+        let ink = if spent {
+            style.muted.alpha(0.3)
+        } else {
+            colour
+        };
+        list.panel(
+            Rect::new(x + radius - r, centre.y - r, r * 2.0, r * 2.0),
+            ink,
+            r,
+        );
+        x += step;
+    }
+}
 
 fn stage_pulse(beat: f64) -> f32 {
     if !beat.is_finite() {
@@ -347,6 +455,7 @@ impl SingScreen {
             video_size: VideoSize::default(),
             position: 0.0,
             duration: 0.0,
+            beat_rate: DEFAULT_BEAT_RATE,
             gamepad: false,
             show_input_panel: false,
             show_panels: true,
@@ -359,6 +468,7 @@ impl SingScreen {
             effect: LyricEffect::default(),
             grown: Vec::new(),
             grown_at: f64::NEG_INFINITY,
+            parked: Vec::new(),
             parts: Vec::new(),
             singer_part: Vec::new(),
             pitch_low: 0,
@@ -615,6 +725,7 @@ impl SingScreen {
 
         let merged = self.merge_parts(parts, beat);
         self.advance_marks(beat);
+        self.observe_lines(parts, beat);
         if self.show_notes {
             self.draw_staff(list, staff_area.inset(style.gap(1.5)), style, &merged, beat);
         } else {
@@ -640,7 +751,8 @@ impl SingScreen {
                 continue;
             }
             let tint = (parts.len() > 1).then(|| self.part_colour(index, style));
-            self.draw_lyrics(list, row, style, part, beat, tint);
+            let parked = self.parked.get(index).map_or(beat, |(_, at)| *at);
+            self.draw_lyrics(list, row, style, part, beat, tint, parked);
         }
         let _ = (line, syllables, next_line);
 
@@ -973,6 +1085,24 @@ impl SingScreen {
         }
     }
 
+    /// Note when each part's line arrived, which is when its sweeping bar parked.
+    ///
+    /// Kept here rather than handed in because it is a property of the display and not of the
+    /// song: the line changes when the screen starts showing it, and nothing upstream knows or
+    /// should have to know when that was.
+    fn observe_lines(&mut self, parts: &[PartView<'_>], beat: f64) {
+        self.parked.resize(parts.len(), (f64::NAN, beat));
+        for (part, parked) in parts.iter().zip(&mut self.parked) {
+            let line = part.syllables.first().map_or(f64::NAN, |s| s.start);
+            // A line that is not the one we saw last frame has only just arrived. So has one
+            // we have apparently been showing since after now, which is a restart or a seek
+            // rather than a wait anybody has sat through.
+            if parked.0 != line || beat < parked.1 {
+                *parked = (line, beat);
+            }
+        }
+    }
+
     fn draw_staff(
         &self,
         list: &mut DrawList,
@@ -1244,6 +1374,8 @@ impl SingScreen {
     /// Draw one part's words.
     ///
     /// `tint` is the part's colour when this is a duet; `None` uses the theme's accent.
+    /// `parked` is the beat this line arrived at, which is how long its bar has sat still.
+    #[allow(clippy::too_many_arguments)]
     fn draw_lyrics(
         &self,
         list: &mut DrawList,
@@ -1252,6 +1384,7 @@ impl SingScreen {
         part: &PartView<'_>,
         beat: f64,
         tint: Option<Color>,
+        parked: f64,
     ) {
         let syllables = part.syllables;
         let next_line = part.next_line;
@@ -1435,7 +1568,25 @@ impl SingScreen {
             }
         }
 
-        if !next_line.is_empty() {
+        // A count-in for a wait long enough that "has this stopped?" becomes a fair question.
+        //
+        // It counts to the bar setting off rather than to the first word, because the run-in
+        // is itself the last couple of seconds of warning and counting through it would say
+        // the same thing twice. It takes the strip the next line sits in: during a break there
+        // is nothing to sing, so the line after the one you are waiting for is the least
+        // useful thing on the screen, and a count squeezed in beside it is neither.
+        let count = (self.beat_rate > 0.0)
+            .then(|| {
+                let sets_off = first.start - LEAD_IN_BEATS;
+                countdown(
+                    (sets_off - parked) / self.beat_rate,
+                    (sets_off - beat) / self.beat_rate,
+                )
+            })
+            .flatten();
+        if let Some(count) = count {
+            draw_countdown(list, upcoming, style, highlight, count);
+        } else if !next_line.is_empty() {
             list.text(
                 upcoming,
                 next_line,
