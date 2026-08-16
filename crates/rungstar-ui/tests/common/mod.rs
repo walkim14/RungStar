@@ -104,6 +104,14 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
             list.clear();
             browser.draw(&mut list, area, style, &|_| None);
             record("song browser", &list, &mut out);
+
+            // And again with the backing tracks on, which adds a hint to the footer and a
+            // word to the header -- the two places a Deck-width screen runs out of room.
+            browser.instrumental_available = true;
+            browser.instrumental = true;
+            list.clear();
+            browser.draw(&mut list, area, style, &|_| None);
+            record("song browser, no vocals", &list, &mut out);
         }
         browser.handle(Input::CycleLayout, area);
     }

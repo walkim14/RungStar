@@ -135,6 +135,15 @@ choice! {
 }
 
 choice! {
+    /// Which recording a song is sung to.
+    ///
+    /// Instrumental plays a vocal-removed version of the same song, from a separate folder of
+    /// backing tracks. Everything else — the notes, the lyrics, the video, the scores — comes
+    /// from the song itself, so this is a property of the sound and of nothing else.
+    Vocals { Original = "Original", Instrumental = "Instrumental" } default Original
+}
+
+choice! {
     /// Window mode.
     ScreenMode {
         Windowed = "Windowed",
@@ -267,8 +276,13 @@ pub struct GameSettings {
     pub tabs: Tabs,
     pub on_song_click: OnSongClick,
     pub line_bonus: LineBonus,
+    /// Whether songs play with their vocals or from a backing track.
+    pub vocals: Vocals,
     /// Song directories. Empty means "the default one under the user's data directory".
     pub song_roots: Vec<String>,
+    /// Where the vocal-removed versions live, one folder per song, named as the song's own
+    /// folder is. `None` means there are none, which is what turns the mode off.
+    pub instrumental_root: Option<String>,
 }
 
 impl Default for GameSettings {
@@ -280,7 +294,9 @@ impl Default for GameSettings {
             tabs: Tabs::default(),
             on_song_click: OnSongClick::default(),
             line_bonus: LineBonus::default(),
+            vocals: Vocals::default(),
             song_roots: Vec::new(),
+            instrumental_root: None,
         }
     }
 }

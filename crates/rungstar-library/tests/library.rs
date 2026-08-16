@@ -353,3 +353,22 @@ fn an_edited_song_is_re_read() {
         "One Renamed"
     );
 }
+
+#[test]
+fn a_duet_in_the_library_is_recognised_through_usdb_s_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    // As the note file spells it. USDB's list page spells the same song with the marker.
+    write_song(root, "Pop", "Aqua", "Barbie Girl", "");
+    write_song(root, "Pop", "Princess Chelsea", "The Cigarette Duet", "");
+
+    let held = library(root).held().unwrap();
+
+    assert!(held.has(None, "Aqua", "Barbie Girl [DUET]"));
+    assert!(held.has(None, "Aqua", "Barbie Girl"));
+    // Not always last, and the rest of the title still has to match.
+    assert!(!held.has(None, "Aqua", "Barbie Girl [DUET] (Live)"));
+    // The bare word is part of a title, not a marker, so it is not a way to match anything.
+    assert!(held.has(None, "Princess Chelsea", "The Cigarette Duet"));
+    assert!(!held.has(None, "Princess Chelsea", "The Cigarette"));
+}

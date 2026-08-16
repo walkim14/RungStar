@@ -13,7 +13,7 @@ use crate::browse::Layout;
 use crate::settings::{
     AppearanceSettings, Choice, ClickAssist, Detector, Difficulty, FrameLimit, LineBonus,
     LyricEffect, LyricStyle, MicBoost, NoteLines, OnSongClick, Preview, ScreenMode, Settings,
-    Switch, Tabs, VideoSize, MAX_PLAYERS, THRESHOLDS,
+    Switch, Tabs, VideoSize, Vocals, MAX_PLAYERS, THRESHOLDS,
 };
 
 /// Something on a page that is not a setting: a button the screen has to interpret.
@@ -28,6 +28,10 @@ pub enum Action {
     MeasureMicDelay,
     /// Stop searching the folder added most recently.
     ForgetSongFolder,
+    /// Point at a folder of vocal-removed versions of the songs.
+    SetInstrumentalFolder,
+    /// Stop offering the instrumental mode.
+    ForgetInstrumentalFolder,
     ManageMicrophones,
     RebindControls,
     /// Read an existing UltraStar Deluxe database, so a returning player keeps their history.
@@ -346,6 +350,34 @@ impl Page {
                     label: "Forget the last song folder",
                     help: "Stop searching the folder added most recently. Nothing on disk is                            deleted.",
                     control: Control::Button(Action::ForgetSongFolder),
+                },
+                choice_item!(
+                    Vocals,
+                    game.vocals,
+                    "Sing to",
+                    "Original plays the song as it is. Instrumental plays a vocal-removed \
+                     version from the backing-track folder below, and the song list then \
+                     shows only the songs that have one."
+                ),
+                Item {
+                    label: "Backing tracks",
+                    help: "A folder of vocal-removed songs, one folder per song named exactly \
+                           as the song's own folder is, with the instrumental audio inside. \
+                           Everything else still comes from the song itself.",
+                    control: Control::Shown {
+                        get: |s| {
+                            s.game
+                                .instrumental_root
+                                .clone()
+                                .unwrap_or_else(|| "None".to_owned())
+                        },
+                        press: Action::SetInstrumentalFolder,
+                    },
+                },
+                Item {
+                    label: "Forget the backing tracks",
+                    help: "Stop offering to sing without vocals. Nothing on disk is deleted.",
+                    control: Control::Button(Action::ForgetInstrumentalFolder),
                 },
                 Item {
                     label: "Rescan songs",

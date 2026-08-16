@@ -32,7 +32,7 @@ use rungstar_ui::options::Action;
 use rungstar_ui::partyscreen::{Kind, PartyOutcome, PartyScreen, Stage};
 use rungstar_ui::playerscreen::{Entry, PlayerOutcome, PlayerScreen};
 use rungstar_ui::screen::{Route, Transition, Widgets};
-use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch};
+use rungstar_ui::settings::{OnSongClick, ScreenMode, Settings, Switch, Vocals};
 use rungstar_ui::singscreen::{Overlay, PauseChoice, SingScreen};
 use rungstar_ui::songselect::{Facet, FacetValues, Input, SongAction, SongSelect};
 use rungstar_ui::statsscreen::{Row as StatRow, StatsScreen};
@@ -44,6 +44,7 @@ use rungstar_ui::usdbscreen::{
 use rungstar_ui::Color;
 
 mod folder;
+mod instrumental;
 mod loudness;
 mod session;
 mod usdbjob;
@@ -145,6 +146,8 @@ struct App {
     held: rungstar_library::Held,
     /// How loud each song turned out to be, so they all play at the same level.
     loudness: loudness::Loudness,
+    /// The backing tracks, when a folder of them has been pointed at.
+    instrumentals: instrumental::Instrumentals,
     /// A microphone delay measurement has been asked for. Carried out by the frame loop,
     /// which is what holds the audio subsystem.
     pending_calibration: bool,
@@ -289,6 +292,11 @@ impl App {
         let profiles =
             Profiles::open(data_dir.join("profiles.db")).context("opening the profiles")?;
 
+        // One directory listing, before the first frame: the browser asks whether every row has
+        // a backing track and cannot wait on a disk for the answer.
+        let instrumentals =
+            instrumental::Instrumentals::load(settings.game.instrumental_root.as_deref());
+
         Ok(Self {
             settings,
             theme,
@@ -312,6 +320,7 @@ impl App {
             pending_editor_audio: false,
             held: rungstar_library::Held::default(),
             loudness: loudness::Loudness::new(),
+            instrumentals,
             pending_calibration: false,
             calibrating: false,
             calibrator: None,
@@ -497,11 +506,18 @@ impl App {
         // Measured from the preview's own decode, which is the first time this song's audio
         // has been read at all. It finishes about a second in, so the correction usually
         // arrives during the same preview that paid for it.
+        //
+        // Not while the backing tracks are playing. An instrumental is a few decibels quieter
+        // than the record it came from, and this measurement is kept in the song's own row --
+        // so measuring one would leave the song permanently too loud once the mode is off.
+        // The song's own figure still applies, and it is close: taking the vocal out lowers
+        // every song by roughly the same amount, so they stay level with each other.
         if let Some(clip) = self
             .preview
             .as_ref()
             .and_then(|p| p.playback.as_ref())
             .map(|playback| playback.clip().clone())
+            .filter(|_| !self.instrumental_mode())
         {
             self.loudness.measure(song, &clip);
         }
@@ -580,13 +596,7 @@ impl App {
             .song(id)
             .map_err(|e| e.to_string())?
             .ok_or("the song is no longer in the library")?;
-        let directory = entry.directory().ok_or("the song has no folder")?;
-        let name = entry
-            .audio_file
-            .as_ref()
-            .ok_or("the song names no audio file")?;
-        let path = resolve_beside(directory, name)
-            .ok_or_else(|| format!("{name} is not beside the song"))?;
+        let path = self.audio_for(&entry)?;
 
         let clip = AudioClip::open(&path).map_err(|e| e.to_string())?;
         clip.wait_for(0.4, std::time::Duration::from_millis(500));
@@ -1035,6 +1045,10 @@ impl App {
 
     /// Run whatever query the song screen is asking for.
     fn refresh_songs(&mut self) {
+        // The screen owns the toggle, so a change there is what writes the setting. Read
+        // before the query, because turning the mode on is one of the things that stales it.
+        self.sync_instrumental();
+        let instrumental = self.instrumental_mode();
         let Some(Screen::Songs(songs)) = self.stack.last_mut() else {
             return;
         };
@@ -1049,12 +1063,63 @@ impl App {
         // No limit: the browser is the whole library, and a cap silently truncates it. Eight
         // thousand rows is a few megabytes, and the scroll is O(1) in the list length.
         match self.library.search(&query) {
-            Ok(results) => songs.set_results(results),
+            Ok(mut results) => {
+                // A song with no backing track cannot be sung without vocals, so while the
+                // mode is on it is not in the list. Filtered here rather than in SQL because
+                // what exists on disk is not in the index — and it must not be, or a folder
+                // of backing tracks appearing would mean a rescan of the whole library.
+                if instrumental {
+                    results.retain(|song| self.instrumentals.has(&song.path));
+                }
+                songs.set_results(results);
+            }
             Err(error) => {
                 tracing::warn!("search failed: {error}");
                 songs.set_results(Vec::new());
             }
         }
+    }
+
+    /// Keep the browser's toggle and the saved setting agreeing.
+    ///
+    /// Both directions: the screen is where the mode is switched, and the options page is
+    /// where the folder is chosen — so a folder that has just been forgotten has to be able to
+    /// turn the mode off underneath a browser that is already open.
+    fn sync_instrumental(&mut self) {
+        let available = !self.instrumentals.is_empty();
+        // The folder is what decides, not the setting alone: an external drive that is not
+        // plugged in turns the mode off for now and leaves the preference where it was.
+        let mut on = self.instrumental_mode();
+        let asked = match self.stack.last_mut() {
+            Some(Screen::Songs(songs)) => {
+                songs.instrumental_available = available;
+                std::mem::take(&mut songs.instrumental_toggled)
+            }
+            _ => return,
+        };
+        if asked {
+            on = !on && available;
+            self.settings.game.vocals = if on {
+                Vocals::Instrumental
+            } else {
+                Vocals::Original
+            };
+            self.settings_dirty = true;
+            self.save_settings();
+        }
+        if let Some(Screen::Songs(songs)) = self.stack.last_mut() {
+            songs.instrumental = on;
+        }
+    }
+
+    /// Whether songs should play from their backing track rather than as recorded.
+    fn instrumental_mode(&self) -> bool {
+        self.settings.game.vocals == Vocals::Instrumental && !self.instrumentals.is_empty()
+    }
+
+    /// The audio to play for a song: its own, or its backing track when the mode is on.
+    fn audio_for(&self, entry: &SongEntry) -> Result<PathBuf, String> {
+        audio_to_play(entry, &self.instrumentals, self.instrumental_mode())
     }
 
     /// Load covers for what is about to be drawn, a few per frame.
@@ -1524,6 +1589,59 @@ impl App {
             }
             Err(why) => self.refuse(why),
         }
+    }
+
+    /// Point at a folder of backing tracks.
+    ///
+    /// Scanned for folder names on the spot rather than at the next launch, and the count is
+    /// reported: "0 songs have one" and "the folder is not where you think it is" are the same
+    /// silence otherwise, and this is a folder somebody assembled by running a separation tool
+    /// for several hours.
+    fn set_instrumental_folder(&mut self) {
+        let start = self
+            .settings
+            .game
+            .instrumental_root
+            .clone()
+            .map(PathBuf::from)
+            .or_else(|| self.song_roots().first().cloned());
+        let Some(chosen) = folder::choose("Where are the backing tracks?", start.as_deref()) else {
+            return;
+        };
+        if !chosen.is_dir() {
+            self.refuse(format!("{} is not a folder", chosen.display()));
+            return;
+        }
+        self.settings.game.instrumental_root = Some(chosen.to_string_lossy().into_owned());
+        self.save_settings();
+        self.settings_dirty = true;
+        self.reload_instrumentals();
+        self.status = match self.instrumentals.len() {
+            0 => format!("no backing tracks found in {}", chosen.display()),
+            1 => "1 backing track found".to_owned(),
+            found => format!("{found} backing tracks found"),
+        };
+    }
+
+    /// Stop offering to sing without vocals.
+    fn forget_instrumental_folder(&mut self) {
+        if self.settings.game.instrumental_root.is_none() {
+            self.refuse("there is no backing-track folder to forget");
+            return;
+        }
+        self.settings.game.instrumental_root = None;
+        // Off as well as forgotten: a mode with nothing behind it would refuse every song.
+        self.settings.game.vocals = Vocals::Original;
+        self.save_settings();
+        self.settings_dirty = true;
+        self.reload_instrumentals();
+        self.status = "backing tracks forgotten".to_owned();
+    }
+
+    /// Re-read the backing-track folder.
+    fn reload_instrumentals(&mut self) {
+        self.instrumentals =
+            instrumental::Instrumentals::load(self.settings.game.instrumental_root.as_deref());
     }
 
     /// Stop searching the most recently added folder.
@@ -2185,9 +2303,14 @@ impl App {
             self.refuse("that song has no folder");
             return;
         };
-        let Some(audio_name) = entry.audio_file.clone() else {
-            self.refuse(format!("{} has no audio file", entry.display_name()));
-            return;
+        // The backing track when the mode is on, and a refusal rather than the record when
+        // there is not one -- the whole point of the mode is that nothing plays with vocals.
+        let audio_path = match self.audio_for(&entry) {
+            Ok(path) => path,
+            Err(why) => {
+                self.refuse(why);
+                return;
+            }
         };
 
         let bytes = match std::fs::read(&entry.path) {
@@ -2210,8 +2333,6 @@ impl App {
         // What the index remembers about how loud this song is, so the correction is applied
         // from the first bar rather than from whenever the measurement lands.
         self.loudness.remember(entry.id, entry.loudness, entry.peak);
-        let audio_path =
-            resolve_beside(&directory, &audio_name).unwrap_or_else(|| directory.join(&audio_name));
         // The video is optional in every sense: the song may not name one, the file may not be
         // beside it, and the player may have turned videos off.
         let video = entry
@@ -2306,6 +2427,8 @@ impl App {
             // Needs the audio subsystem, which the frame loop owns.
             Action::MeasureMicDelay => self.pending_calibration = true,
             Action::ForgetSongFolder => self.forget_song_folder(),
+            Action::SetInstrumentalFolder => self.set_instrumental_folder(),
+            Action::ForgetInstrumentalFolder => self.forget_instrumental_folder(),
             // Needs the audio subsystem, which the frame loop owns.
             Action::ManageMicrophones => self.pending_mics = true,
             Action::RebindControls => {
@@ -2481,6 +2604,32 @@ fn duet_parts(path: &Path) -> (String, String) {
     )
 }
 
+/// Which file a song should actually play.
+///
+/// `Err` when the backing tracks are on and this song has none. Deliberately not a fall back
+/// to the record: the one promise the mode makes is that nothing sung along to has somebody
+/// already singing on it, and a fall back breaks that quietly, one song in a hundred, at a
+/// party. The browser hides those songs while the mode is on, so this is the second line
+/// rather than the first -- a folder emptied since the list was drawn, or a song reached from
+/// somewhere that is not the list.
+fn audio_to_play(
+    entry: &SongEntry,
+    instrumentals: &instrumental::Instrumentals,
+    instrumental_mode: bool,
+) -> Result<PathBuf, String> {
+    let directory = entry.directory().ok_or("the song has no folder")?;
+    let name = entry
+        .audio_file
+        .as_deref()
+        .ok_or("the song names no audio file")?;
+    if instrumental_mode {
+        return instrumentals
+            .audio_for(&entry.path, Some(name))
+            .ok_or_else(|| format!("{} has no backing track", entry.display_name()));
+    }
+    resolve_beside(directory, name).ok_or_else(|| format!("{name} is not beside the song"))
+}
+
 /// Find a file beside the song, tolerating a case mismatch in the header.
 ///
 /// Real libraries are full of `#MP3:Song.MP3` next to `Song.mp3`, and on Linux that is a
@@ -2610,6 +2759,7 @@ fn action_for(keycode: Keycode) -> Option<Input> {
         Keycode::M => Input::ContextMenu,
         Keycode::R => Input::Random,
         Keycode::D => Input::CycleFilter,
+        Keycode::V => Input::ToggleInstrumental,
         Keycode::PageUp => Input::PageUp,
         Keycode::PageDown => Input::PageDown,
         Keycode::Backspace => Input::Backspace,
@@ -2787,6 +2937,7 @@ fn main() -> Result<()> {
                         Button::Back => Some(Input::ContextMenu),
                         Button::LeftShoulder => Some(Input::CycleLayout),
                         Button::LeftStick => Some(Input::CycleFilter),
+                        Button::RightStick => Some(Input::ToggleInstrumental),
                         Button::RightShoulder => Some(Input::CycleLayout),
                         _ => None,
                     };
@@ -2914,8 +3065,11 @@ fn main() -> Result<()> {
         };
         if let Some((id, clip)) = singing_clip {
             // A song played but never previewed reaches here without a measurement. Its own
-            // decode is the only one it gets.
-            app.loudness.measure(id, &clip);
+            // decode is the only one it gets -- unless what decoded was a backing track, which
+            // is not the song and must not be written to its row.
+            if !app.instrumental_mode() {
+                app.loudness.measure(id, &clip);
+            }
         }
         match app.stack.last_mut() {
             Some(Screen::Songs(songs)) => {
@@ -3395,6 +3549,25 @@ fn self_check(
         app.library.count().unwrap_or(0),
         app.status
     );
+    // Both halves, because they fail differently: a folder with nothing in it is a wrong path,
+    // and a full folder matching no songs is a naming convention that does not agree with the
+    // library's. Either way the mode looks like "there are no songs" from the browser.
+    match app.instrumentals.root() {
+        Some(root) => {
+            let songs = app.library.search(&SearchQuery::all()).unwrap_or_default();
+            let matched = songs
+                .iter()
+                .filter(|song| app.instrumentals.has(&song.path))
+                .count();
+            println!(
+                "backing     {} tracks in {}, matching {matched} of {} songs",
+                app.instrumentals.len(),
+                root.display(),
+                songs.len()
+            );
+        }
+        None => println!("backing     no folder set"),
+    }
 
     let screens: Vec<(&str, Screen)> = vec![
         ("main", Screen::Main(MainMenu::new())),
@@ -3709,6 +3882,19 @@ E
             .map_err(|e| anyhow::anyhow!("overlay: {e}"))?;
     }
     println!("overlays    drawn");
+
+    // The backing-track mode, whether or not this machine has a folder of them: it puts a word
+    // in the header and a hint in the footer, and both are laid out rather than placed.
+    if let Some(Screen::Songs(songs)) = app.stack.last_mut() {
+        songs.instrumental_available = true;
+    }
+    app.handle(Input::ToggleInstrumental, area);
+    list.clear();
+    app.draw(list, area);
+    renderer
+        .render(list, app.style.background, app.style.accent)
+        .map_err(|e| anyhow::anyhow!("no vocals: {e}"))?;
+    println!("no vocals   drawn");
     println!("ok");
     Ok(())
 }
@@ -3720,6 +3906,91 @@ const _: Option<Color> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A song folder with an audio file in it, and the entry the index would have made.
+    fn a_song(root: &std::path::Path, folder: &str, audio: &str) -> SongEntry {
+        let directory = root.join(folder);
+        std::fs::create_dir_all(&directory).expect("song folder");
+        std::fs::write(directory.join(audio), b"audio").expect("audio");
+        std::fs::write(directory.join("song.txt"), b"#TITLE:x").expect("notes");
+        SongEntry {
+            id: 1,
+            path: directory.join("song.txt"),
+            folder: folder.to_owned(),
+            artist: folder.split(" - ").next().unwrap_or(folder).to_owned(),
+            title: folder.split(" - ").nth(1).unwrap_or("").to_owned(),
+            edition: None,
+            genre: None,
+            language: None,
+            creator: None,
+            tags: None,
+            year: None,
+            bpm: 300.0,
+            gap_ms: 0,
+            duration_secs: 180.0,
+            is_duet: false,
+            audio_file: Some(audio.to_owned()),
+            video_file: None,
+            cover_file: None,
+            background_file: None,
+            note_count: 100,
+            golden_count: 0,
+            difficulty: 0.5,
+            medley_start: None,
+            medley_end: None,
+            preview_start: None,
+            usdb_id: None,
+            times_played: 0,
+            last_played: None,
+            loudness: None,
+            peak: None,
+        }
+    }
+
+    #[test]
+    fn the_backing_track_is_played_instead_of_the_recording() {
+        let songs = tempfile::tempdir().unwrap();
+        let backing = tempfile::tempdir().unwrap();
+        let entry = a_song(songs.path(), "Aqua - Barbie Girl", "Aqua - Barbie Girl.ogg");
+        std::fs::create_dir_all(backing.path().join("Aqua - Barbie Girl")).unwrap();
+        std::fs::write(
+            backing
+                .path()
+                .join("Aqua - Barbie Girl")
+                .join("no_vocals.ogg"),
+            b"audio",
+        )
+        .unwrap();
+        let instrumentals = instrumental::Instrumentals::load(backing.path().to_str());
+
+        // Off: the song's own file, exactly as before this mode existed.
+        let played = audio_to_play(&entry, &instrumentals, false).expect("the song's own audio");
+        assert!(played.starts_with(songs.path()));
+        assert_eq!(played.file_name().unwrap(), "Aqua - Barbie Girl.ogg");
+
+        // On: the same song, a different file, and everything else still from the song folder.
+        let played = audio_to_play(&entry, &instrumentals, true).expect("the backing track");
+        assert!(played.starts_with(backing.path()));
+        assert_eq!(played.file_name().unwrap(), "no_vocals.ogg");
+    }
+
+    #[test]
+    fn a_song_with_no_backing_track_is_refused_rather_than_sung_with_vocals() {
+        // The one promise the mode makes. A fall back to the recording would break it quietly,
+        // one song in a hundred, in front of a room.
+        let songs = tempfile::tempdir().unwrap();
+        let backing = tempfile::tempdir().unwrap();
+        let entry = a_song(songs.path(), "Blur - Song 2", "Blur - Song 2.ogg");
+        std::fs::create_dir_all(backing.path().join("Somebody Else - A Song")).unwrap();
+        let instrumentals = instrumental::Instrumentals::load(backing.path().to_str());
+
+        assert!(audio_to_play(&entry, &instrumentals, false).is_ok());
+        let refused = audio_to_play(&entry, &instrumentals, true).expect_err("no backing track");
+        assert!(
+            refused.contains("Blur - Song 2"),
+            "the message has to name the song: {refused}"
+        );
+    }
 
     #[test]
     fn the_number_singing_follows_who_was_chosen() {

@@ -1885,6 +1885,7 @@ dependencies = [
  "rungstar-usdb",
  "rungstar-video",
  "sdl3",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "ureq",

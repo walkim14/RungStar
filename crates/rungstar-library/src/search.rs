@@ -132,7 +132,36 @@ fn name_key(artist: &str, title: &str) -> String {
             .filter(|c| c.is_alphanumeric())
             .collect::<String>()
     };
-    format!("{}\u{1}{}", fold(artist), fold(title))
+    format!("{}\u{1}{}", fold(artist), fold(&without_duet_marker(title)))
+}
+
+/// A title without USDB's duet marker.
+///
+/// USDB's list page appends `[DUET]` to the title of a duet, and the note file it hands out
+/// does not carry it — so the two spellings of the same song differ by exactly that marker,
+/// and every duet in the catalog reads as missing from a library that holds it. Nine hundred
+/// of the catalog's twenty-eight thousand songs are marked this way.
+///
+/// Only the bracketed marker goes, wherever in the title it sits — it is not always last. The
+/// bare word stays, because "The Cigarette Duet" is a song.
+fn without_duet_marker(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut rest = title;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']').map(|at| open + at) else {
+            break;
+        };
+        let inside = rest[open + 1..close].trim();
+        let keep = if inside.eq_ignore_ascii_case("duet") || inside.eq_ignore_ascii_case("duett") {
+            &rest[..open]
+        } else {
+            &rest[..close + 1]
+        };
+        out.push_str(keep);
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Turn a typed phrase into an FTS5 expression.

@@ -50,6 +50,8 @@ pub enum Input {
     CycleLayout,
     /// Cycle what the list is narrowed to.
     CycleFilter,
+    /// Switch between the song as recorded and its backing track.
+    ToggleInstrumental,
     /// Open the sort picker.
     Sort,
     /// Open the menu for the song under the cursor.
@@ -357,6 +359,21 @@ pub struct SongSelect {
     /// What a scan is doing, when one is running. Shown instead of "no songs", because a
     /// first run reaches this screen before the library exists.
     pub scanning: Option<String>,
+    /// Whether songs are sung to their backing track rather than to the record.
+    ///
+    /// Set by the application from the saved setting, never by the screen. The same mode is
+    /// also on the options page, and two places holding their own copy of one answer is how
+    /// they end up disagreeing -- so this screen asks for a change and is told the result.
+    pub instrumental: bool,
+    /// Set when the player asked to switch. Consumed by the application, which owns the
+    /// setting and the folder behind it.
+    pub instrumental_toggled: bool,
+    /// Whether there are any backing tracks to switch to.
+    ///
+    /// Supplied by the application, which is what has looked at the folder. When there are
+    /// none the control is not offered at all -- a button that says the mode exists and then
+    /// refuses to enter it is worse than no button.
+    pub instrumental_available: bool,
 }
 
 impl Default for SongSelect {
@@ -392,6 +409,9 @@ impl SongSelect {
             gamepad: false,
             highscores: Vec::new(),
             scanning: None,
+            instrumental: false,
+            instrumental_toggled: false,
+            instrumental_available: false,
         }
     }
 
@@ -546,6 +566,20 @@ impl SongSelect {
     pub fn active_filters(&self) -> usize {
         let kinds = usize::from(self.narrow != Narrow::Everything);
         kinds + self.picked.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// Ask to switch between the record and the backing track.
+    ///
+    /// Silently ignored when there are no backing tracks, which is also when the control is
+    /// not drawn. The results go stale because the list itself changes: a song with no backing
+    /// track cannot be sung to one, so it is not in the list while the mode is on.
+    pub fn toggle_instrumental(&mut self) {
+        if !self.instrumental_available {
+            return;
+        }
+        self.instrumental_toggled = true;
+        self.stale = true;
+        crate::chime::emit(crate::chime::Chime::Select);
     }
 
     /// Put every filter back to showing everything.
@@ -712,6 +746,7 @@ impl SongSelect {
                 self.mode = Mode::Filtering;
                 self.on_values = false;
             }
+            Input::ToggleInstrumental => self.toggle_instrumental(),
             Input::Random => {
                 // Deliberately not a random number: with no source of entropy in this crate,
                 // the application supplies one by jumping the cursor. Here it steps by a
@@ -892,6 +927,7 @@ impl SongSelect {
             // search box is a change you cannot see and did not ask for.
             Input::CycleLayout
             | Input::CycleFilter
+            | Input::ToggleInstrumental
             | Input::Random
             | Input::PageUp
             | Input::PageDown
@@ -1050,6 +1086,13 @@ impl SongSelect {
             (None, 0) => counted,
             (None, _) => format!("{}  ·  {counted}", self.challenge().name),
         };
+        // In front of everything else, because it changes what will be heard rather than what
+        // is listed, and a list quietly playing backing tracks is the surprise worth avoiding.
+        let status = if self.instrumental {
+            format!("No vocals  ·  {status}")
+        } else {
+            status
+        };
         let body = widgets.header(list, area, "Songs", &status);
         let body = widgets.footer(list, body, &self.hints());
 
@@ -1088,14 +1131,29 @@ impl SongSelect {
         let sort = if pad { "Y" } else { "F3" };
         let layout = if pad { "LB/RB" } else { "Tab" };
         match self.mode {
-            Mode::Browsing => vec![
-                (confirm, "Sing"),
-                (back, "Back"),
-                (search, "Search"),
-                (sort, "Sort"),
-                (layout, "Layout"),
-                (if pad { "LT" } else { "D" }, "Filter"),
-            ],
+            Mode::Browsing => {
+                let mut hints = vec![
+                    (confirm, "Sing"),
+                    (back, "Back"),
+                    (search, "Search"),
+                    (sort, "Sort"),
+                    (layout, "Layout"),
+                    (if pad { "LT" } else { "D" }, "Filter"),
+                ];
+                // Only when there is something to switch to, and it says which way it goes
+                // rather than what the mode is called: the header says which mode is on.
+                if self.instrumental_available {
+                    hints.push((
+                        if pad { "RS" } else { "V" },
+                        if self.instrumental {
+                            "Vocals on"
+                        } else {
+                            "No vocals"
+                        },
+                    ));
+                }
+                hints
+            }
             Mode::Searching => vec![(confirm, "Press key"), (back, "Done"), (sort, "Search in")],
             Mode::Sorting => vec![
                 (confirm, "Choose"),

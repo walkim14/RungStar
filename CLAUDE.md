@@ -310,6 +310,44 @@ preview, on its own thread. Decode runs a thousand times faster than playback, s
 usually lands during the same preview that paid for it. It is then kept in the song's row and,
 like the play count, is never written by a scan.
 
+## Backing tracks
+
+Vocal removal — Demucs and friends — turns a library into a second library: the same songs, the
+same folder names, one audio file in each and nothing else. Options -> Game -> **Backing tracks**
+points at it, and **V** in the song list (right stick on a pad) switches between the record and
+the backing track. Measured against the real library: 7,865 of 8,159 songs have one.
+
+`rungstar-app/instrumental.rs` is the whole of it, and it is **one substitution at the moment the
+audio file is opened**. The notes, the lyrics, the video, the cover, the play count and the
+highscores all still come from the song's own folder — only the sound is different. Indexing the
+instrumentals as songs of their own would double the library, split every song's history across
+two rows, and make "the same song" something the browser has to work out; repointing one path
+does none of that.
+
+Four things had to be decided:
+
+- **Matched by the song's own folder name**, which is what a tool writing one folder per song
+  produces. Not by artist and title — those live in a header the backing-track folder does not
+  have — and not by the audio file's name, because the tool renames what it writes. Inside the
+  folder the song's own name wins when it is there, and otherwise the first audio file, because
+  one track per folder is what these tools write.
+- **One directory listing, at the root.** The browser asks whether every row has a backing track,
+  so the answer has to be a hash lookup; a `stat` per song would be eight thousand of them, on
+  Windows through the filter driver stack, on every scroll.
+- **A song with no backing track is not in the list**, and if one is reached anyway it is refused
+  rather than played. The mode makes exactly one promise, and a fall back to the recording breaks
+  it quietly, one song in a hundred, in front of a room.
+- **Nothing is measured for loudness while the mode is on.** An instrumental is a few decibels
+  quieter than the record it came from, and the measurement is kept in the song's own row — so
+  measuring one would leave the song permanently too loud once the mode was off. The song's own
+  figure still applies and is close enough: taking the vocal out lowers every song by roughly the
+  same amount, so they stay level with each other.
+
+The setting is the truth and the browser mirrors it, because the same mode is on the options page
+and two places each holding their own copy of one answer is how they come to disagree — the
+screen asks to switch and is told the result. A folder that is not currently there (an external
+drive, say) turns the mode off for now without forgetting the preference.
+
 ## The user interface
 
 `rungstar-ui` has **no graphics API in it**. Screens turn state into a `DrawList` of rectangles
@@ -583,6 +621,12 @@ singing.
   from the machine was considered and rejected: the key is in the binary, so it is obfuscation
   dressed as security, and the only thing it reliably defeats is the reader understanding what
   they are looking at.
+
+  **A duet is the same song without USDB's marker.** The list page appends `[DUET]` to the
+  title; the note file it hands out does not, so a library holding nine hundred of them showed
+  every one as new. The marker is stripped from both sides of the name key — bracketed only,
+  and wherever in the title it sits, because "The Cigarette Duet" is a title and the marker is
+  not always last. Against the real library: 366 duets recognised where none were.
 
   Deliberate divergence 12: **a missing optional resource does not fail the song.** The
   reference refuses to deliver a singable song whose background art 404ed.

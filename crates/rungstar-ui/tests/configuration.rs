@@ -3,7 +3,7 @@
 use rungstar_ui::glyphs::{Glyphs, Named};
 use rungstar_ui::options::{Action, Control, Page};
 use rungstar_ui::settings::{
-    Choice, Difficulty, FrameLimit, MicBoost, Settings, MAX_PLAYERS, THRESHOLDS,
+    Choice, Difficulty, FrameLimit, MicBoost, Settings, Vocals, MAX_PLAYERS, THRESHOLDS,
 };
 
 #[test]
@@ -323,6 +323,7 @@ fn the_buttons_a_page_offers_are_the_ones_a_screen_handles() {
         Action::RescanLibrary,
         Action::RebuildIndex,
         Action::AddSongFolder,
+        Action::ForgetInstrumentalFolder,
         Action::ManageMicrophones,
         Action::RebindControls,
         Action::ImportUltrastar,
@@ -331,6 +332,43 @@ fn the_buttons_a_page_offers_are_the_ones_a_screen_handles() {
     ] {
         assert!(buttons.contains(&action), "{action:?} is on no page");
     }
+}
+
+#[test]
+fn the_backing_track_folder_is_a_row_that_says_which_folder_and_changes_it() {
+    // Both halves in one row, the way the song folder row works: a caption that cannot be
+    // pressed is the bug that row was written to fix.
+    let page = Page::game();
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.label == "Backing tracks")
+        .expect("the game page offers a backing-track folder");
+    assert_eq!(item.pressed(), Some(Action::SetInstrumentalFolder));
+
+    let mut settings = Settings::default();
+    assert_eq!(item.value(&settings), "None");
+    settings.game.instrumental_root = Some("D:/Instrumentals".to_owned());
+    assert_eq!(item.value(&settings), "D:/Instrumentals");
+
+    // And it is not a thing left and right can edit -- a path is chosen in a file dialog.
+    assert!(!item.is_adjustable());
+}
+
+#[test]
+fn the_vocals_setting_survives_being_written_and_read_back() {
+    let mut settings = Settings::default();
+    assert_eq!(settings.game.vocals, Vocals::Original);
+    settings.game.vocals = Vocals::Instrumental;
+    settings.game.instrumental_root = Some("D:/Instrumentals".to_owned());
+
+    let text = toml::to_string_pretty(&settings).expect("write");
+    let read: Settings = toml::from_str(&text).expect("read");
+    assert_eq!(read.game.vocals, Vocals::Instrumental);
+    assert_eq!(
+        read.game.instrumental_root.as_deref(),
+        Some("D:/Instrumentals")
+    );
 }
 
 #[test]

@@ -1646,3 +1646,75 @@ mod many_microphones {
         );
     }
 }
+
+#[test]
+fn the_backing_track_mode_is_not_offered_without_any_backing_tracks() {
+    // The folder is what the mode needs, and nothing else on this screen can produce one. A
+    // control that says a mode exists and then refuses to enter it is worse than no control.
+    let mut screen = loaded(20);
+    screen.set_results(library(20));
+    screen.handle(Input::ToggleInstrumental, area());
+    assert!(!screen.instrumental_toggled, "nothing was asked for");
+    assert!(
+        !screen.needs_query(),
+        "nothing changed, so nothing to re-query"
+    );
+
+    let drawn = strings(&draw(&mut screen));
+    assert!(!drawn.iter().any(|t| t == "No vocals"));
+    assert!(!drawn.iter().any(|t| t == "Vocals on"));
+}
+
+#[test]
+fn the_backing_track_mode_says_so_and_re_queries() {
+    let mut screen = loaded(20);
+    screen.instrumental_available = true;
+    screen.set_results(library(20));
+
+    // The hint offers the way in before the mode is on, and the header says nothing yet.
+    let drawn = strings(&draw(&mut screen));
+    assert!(drawn.iter().any(|t| t == "No vocals"), "the footer hint");
+    assert!(
+        !drawn.iter().any(|t| t.starts_with("No vocals  ")),
+        "and not the header, which is a different string"
+    );
+
+    screen.handle(Input::ToggleInstrumental, area());
+    assert!(
+        screen.instrumental_toggled,
+        "the screen asks; the application owns the setting"
+    );
+    // The list itself changes -- songs with no backing track leave it -- so the results the
+    // screen is holding are no longer the answer to the question being asked.
+    assert!(screen.needs_query());
+    // What the application does with that: flips the setting and hands the answer back.
+    screen.instrumental_toggled = false;
+    screen.instrumental = true;
+    screen.set_results(library(12));
+
+    let drawn = strings(&draw(&mut screen));
+    assert!(
+        drawn.iter().any(|t| t.starts_with("No vocals  ")),
+        "the header has to say the mode is on: {drawn:?}"
+    );
+    assert!(
+        drawn.iter().any(|t| t == "Vocals on"),
+        "and the hint has to say what pressing it again does"
+    );
+
+    screen.handle(Input::ToggleInstrumental, area());
+    assert!(screen.instrumental_toggled);
+    assert!(screen.needs_query());
+}
+
+#[test]
+fn the_backing_track_toggle_does_not_reach_past_the_search_box() {
+    // "v" is a letter first. Every single-key shortcut on this screen has to lose to a text
+    // field that has focus, or it fires underneath the thing being typed into.
+    let mut screen = loaded(20);
+    screen.instrumental_available = true;
+    screen.handle(Input::Search, area());
+    screen.handle(Input::ToggleInstrumental, area());
+    assert!(!screen.instrumental_toggled);
+    assert_eq!(screen.mode(), Mode::Searching);
+}
