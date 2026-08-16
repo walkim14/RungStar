@@ -80,6 +80,33 @@ impl Loudness {
         }
     }
 
+    /// Whether how loud this song is has already been established.
+    ///
+    /// What "play it at the right level from the first sample" needs to know. With correction
+    /// off, everything is known: nothing is waiting to be found out.
+    pub fn knows(&self, id: i64) -> bool {
+        !self.enabled || self.known.contains_key(&id)
+    }
+
+    /// What to play a song at while its own measurement is still being taken.
+    ///
+    /// The middle of what this library has turned out to be, from the songs measured so far
+    /// this session -- which is a far better guess than no correction at all, because "no
+    /// correction" is not a neutral choice. A library averages several decibels above the
+    /// target, so playing an unknown song untouched starts it at the top of the range and
+    /// every correction that lands afterwards is a drop.
+    ///
+    /// Never a boost, whatever the median says. A boost is only safe against a known peak,
+    /// and the peak of a song nobody has measured is exactly what is not known yet.
+    pub fn prior(&self) -> f32 {
+        if !self.enabled || self.known.is_empty() {
+            return 1.0;
+        }
+        let mut levels: Vec<f32> = self.known.values().map(|m| m.lufs).collect();
+        levels.sort_by(f32::total_cmp);
+        loudness::gain_for(levels[levels.len() / 2]).min(1.0)
+    }
+
     /// The multiplier to play this song at.
     ///
     /// `1.0` when correction is off, or when nothing is known yet — which is what makes the
@@ -194,6 +221,63 @@ mod tests {
         held.remember(7, None, None);
         assert!(!held.started.contains(&7));
         assert!(!held.known.contains_key(&7));
+    }
+
+    #[test]
+    fn a_song_that_has_not_been_measured_is_not_known() {
+        // What decides whether a preview can start at the right level or has to wait to find
+        // out. It was the missing half of this: the gain of an unmeasured song and the gain of
+        // a song measured at the target are both 1.0, so asking for the gain cannot tell them
+        // apart -- and playing an unknown song as if it were already right is what made every
+        // first preview start loud.
+        let mut held = Loudness::new();
+        assert!(!held.knows(1));
+        held.remember(1, Some(-14.0), Some(0.9));
+        assert!(held.knows(1));
+        assert!(!held.knows(2));
+    }
+
+    #[test]
+    fn with_correction_off_every_song_is_known_already() {
+        // Nothing is waiting to be found out, so nothing should wait.
+        let mut held = Loudness::new();
+        held.enabled = false;
+        assert!(held.knows(1));
+        assert_eq!(held.prior(), 1.0);
+    }
+
+    #[test]
+    fn the_prior_is_the_middle_of_the_library_and_never_a_boost() {
+        let mut held = Loudness::new();
+        // Nothing measured yet: there is nothing to be the middle of.
+        assert_eq!(held.prior(), 1.0);
+
+        // A library like the real one -- a mean several decibels above the target, so the
+        // middle of it is a song that needs turning down.
+        for (id, lufs) in [(1, -6.8), (2, -9.3), (3, -11.2), (4, -13.1), (5, -15.8)] {
+            held.remember(id, Some(lufs), Some(0.99));
+        }
+        let prior = held.prior();
+        assert!(
+            prior < 1.0,
+            "the middle of a loud library is a reduction, not 1.0"
+        );
+        assert!(
+            (prior - loudness::gain_for(-11.2)).abs() < 1e-6,
+            "the median, not the mean: one outlier must not drag it"
+        );
+
+        // And a quiet library still does not get boosted on a guess, because a boost is only
+        // safe against a peak and the peak of an unmeasured song is what is not known.
+        let mut quiet = Loudness::new();
+        for (id, lufs) in [(1, -28.0), (2, -26.0), (3, -24.0)] {
+            quiet.remember(id, Some(lufs), Some(0.2));
+        }
+        assert_eq!(quiet.prior(), 1.0);
+        assert!(
+            quiet.gain(Some(1)) > 1.0,
+            "a song that has actually been measured still gets its boost"
+        );
     }
 
     #[test]

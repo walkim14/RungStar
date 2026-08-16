@@ -310,6 +310,35 @@ preview, on its own thread. Decode runs a thousand times faster than playback, s
 usually lands during the same preview that paid for it. It is then kept in the song's row and,
 like the play count, is never written by a scan.
 
+**Nothing is played before its level is known.** "Usually lands during the same preview" was the
+whole bug: the answer arrives 230-470 ms after the clip is opened, so every preview of a song
+nobody had previewed before started uncorrected and then dropped — up to 7 dB, about a second in,
+on 8,040 of 8,159 songs. Playing uncorrected is not the neutral choice it looks like: a library
+averages several decibels *above* the target, so "no correction yet" is the loud end of the
+range and every correction that lands is a drop.
+
+So a preview is opened, held silent, and started when the measurement lands — which for a song
+the index already knew is the next frame. Three things fall out of that:
+
+- **A deadline of 800 ms**, because a song that cannot be measured at all — silence, a file too
+  short to gate — must still preview. Measured across the library: 230-470 ms typical, and only
+  a ten-minute track missed it.
+- **A prior for when the deadline is hit**, which is the median of what this library has turned
+  out to be rather than 1.0. Never a boost, whatever the median says: a boost is only safe
+  against a known peak, and the peak of an unmeasured song is exactly what is not yet known.
+- **Gain slides, never steps** — a quarter of a second, frame-rate independent. A measurement
+  landing after the deadline then arrives as a settle rather than as a lurch.
+
+Two further defects were behind the same symptom, both from one missing line. **The song being
+sung was never recorded** (`App::singing` was declared, read in three places and assigned in
+none), so a song was never corrected for loudness, was never measured from its own decode, and
+Restart in the pause menu silently did nothing. And **the song's volume was applied only when a
+setting changed**, which cannot happen during a song — so a song played at whatever the session
+opened at from start to finish, ignoring the master volume as well as the correction. It is now
+applied every frame, through the same slide. The Deaf challenge still mutes from inside the
+session: what is set here is what the song *should* be at, and the session decides whether it is
+audible at all.
+
 ## Backing tracks
 
 Vocal removal — Demucs and friends — turns a library into a second library: the same songs, the

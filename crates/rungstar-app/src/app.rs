@@ -168,6 +168,8 @@ struct App {
     pending_mics: bool,
     /// The song being sung, so Restart knows what to start again.
     singing: Option<i64>,
+    /// The gain the song is playing at, slid towards what it should be.
+    song_gain: f32,
     /// A video texture whose song has ended, waiting for the frame loop to release it.
     dropped_video: Option<rungstar_ui::draw::ImageId>,
     /// Set when something changed that the window or the audio has to be told about.
@@ -196,6 +198,13 @@ struct Preview {
     from: f64,
     /// Set when opening failed, so it is not attempted again every frame.
     failed: bool,
+    /// Set until the preview has actually been started, which is not the moment it was opened.
+    ///
+    /// Told apart from "paused" because the fade at the end pauses it too, and a preview that
+    /// cannot tell the two apart starts itself again the frame after it finishes.
+    waiting: bool,
+    /// The gain being applied right now, which slides towards the one that is wanted.
+    gain: f32,
 }
 
 /// How long the cursor must rest on a song before its preview starts.
@@ -203,6 +212,22 @@ const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(450)
 
 /// How long a preview plays before it fades out, in seconds.
 const PREVIEW_LENGTH: f32 = 30.0;
+
+/// How long a preview waits to find out how loud its song is before playing anyway.
+///
+/// Decoding a song and measuring it takes 300 to 800 ms between them, and the answer is worth
+/// waiting for: a preview started without it is up to seven decibels too loud and then drops
+/// when the measurement lands, which is the one thing about a browser people notice. Paid once
+/// per song ever, because the answer is kept in the index -- so a library previews instantly
+/// once it has been browsed.
+const LOUDNESS_WAIT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// How long a change in gain takes to arrive, in seconds.
+///
+/// Nothing about loudness should ever step. A measurement that lands late, a challenge muting
+/// the song, the volume being turned down -- all of them are the same event to an ear, and a
+/// quarter of a second is slow enough not to click and fast enough not to be a swell.
+const GAIN_GLIDE: f32 = 0.25;
 
 /// A scan running off the main thread.
 ///
@@ -329,6 +354,7 @@ impl App {
             usdb: None,
             pending_mics: false,
             singing: None,
+            song_gain: 0.0,
             dropped_video: None,
             settings_dirty: true,
             scan: None,
@@ -453,7 +479,7 @@ impl App {
     /// Started only after the cursor has rested, so scrolling past a hundred songs plays none
     /// of them. Stopped the moment the browser is not on top, so a preview never talks over
     /// the song being sung.
-    fn update_preview(&mut self, audio: &sdl3::AudioSubsystem) {
+    fn update_preview(&mut self, audio: &sdl3::AudioSubsystem, dt: f32) {
         let wanted = match self.stack.last() {
             Some(Screen::Songs(songs)) if self.settings.preview_enabled() => {
                 songs.selected().map(|s| s.id)
@@ -470,6 +496,8 @@ impl App {
                 started: Instant::now(),
                 from: 0.0,
                 failed: false,
+                waiting: true,
+                gain: 0.0,
             });
             return;
         }
@@ -521,24 +549,54 @@ impl App {
         {
             self.loudness.measure(song, &clip);
         }
-        let gain = self.loudness.gain(Some(song));
-        if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
-            let _ = playback.pump();
-            // Fade out at the end rather than cutting, and never restart: a preview that
-            // loops under a cursor left resting is maddening. Measured from where the clip
-            // was seeked to, not from the start of the song.
-            let played = (playback.position() - from) as f32;
-            let fade = if played > PREVIEW_LENGTH {
-                (1.0 - (played - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0)
+        // How loud to play it: its own measurement when there is one, and the middle of the
+        // library while there is not.
+        let known = self.loudness.knows(song);
+        let target = volume
+            * if known {
+                self.loudness.gain(Some(song))
             } else {
-                1.0
+                self.loudness.prior()
             };
-            // Set every frame rather than only while fading, so a measurement that lands
-            // mid-preview is applied rather than waiting for the next song.
-            playback.set_volume(volume * gain * fade);
-            if fade <= 0.0 {
-                let _ = playback.pause();
+        // Measured from the cursor landing, which is when the clock that matters started: the
+        // decode began one preview delay after that.
+        let may_start = self.preview.as_ref().is_some_and(|p| {
+            preview_may_start(known, !self.instrumental_mode(), p.started.elapsed())
+        });
+
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        let Some(playback) = preview.playback.as_mut() else {
+            return;
+        };
+        if preview.waiting {
+            // Silent until the level is settled, rather than loud and then corrected.
+            if !may_start {
+                return;
             }
+            preview.waiting = false;
+            preview.gain = target;
+            playback.set_volume(target);
+            let _ = playback.start();
+            return;
+        }
+        let _ = playback.pump();
+        // Fade out at the end rather than cutting, and never restart: a preview that
+        // loops under a cursor left resting is maddening. Measured from where the clip
+        // was seeked to, not from the start of the song.
+        let played = (playback.position() - from) as f32;
+        let fade = if played > PREVIEW_LENGTH {
+            (1.0 - (played - PREVIEW_LENGTH) / 1.5).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        // Slid rather than set, so a measurement that lands after the deadline arrives as a
+        // settle rather than as a lurch.
+        preview.gain = glide(preview.gain, target, dt);
+        playback.set_volume(preview.gain * fade);
+        if fade <= 0.0 {
+            let _ = playback.pause();
         }
     }
 
@@ -619,11 +677,12 @@ impl App {
             .clip()
             .wait_for(start + 1.0, std::time::Duration::from_secs(2));
         playback.seek(start).map_err(|e| e.to_string())?;
-        // Whatever the index remembered from the last time this song was played, applied
-        // before the first sample rather than a frame later.
+        // Whatever the index remembered from the last time this song was played, so a song
+        // already measured plays at the right level from its first sample.
         self.loudness.remember(entry.id, entry.loudness, entry.peak);
-        playback.set_volume(self.preview_volume() * self.loudness.gain(Some(entry.id)));
-        playback.start().map_err(|e| e.to_string())?;
+        // Silent, and not started: `update_preview` starts it once it knows how loud it is,
+        // which for a song the index already knew is the very next frame.
+        playback.set_volume(0.0);
         Ok((playback, start))
     }
 
@@ -1004,15 +1063,42 @@ impl App {
                 let _ = window.set_size(graphics.width, graphics.height);
             }
         }
+    }
 
-        let volume =
-            self.settings.sound.master_volume as f32 / 100.0 * self.loudness.gain(self.singing);
+    /// How loud the song being sung should be playing.
+    fn song_volume(&self) -> f32 {
+        let known = self.singing.is_some_and(|id| self.loudness.knows(id));
+        self.settings.sound.master_volume as f32 / 100.0
+            * if known {
+                self.loudness.gain(self.singing)
+            } else {
+                self.loudness.prior()
+            }
+    }
+
+    /// How loud the song being sung should play, applied every frame.
+    ///
+    /// Every frame, because the loudness correction is not known when the song starts: a song
+    /// nobody has previewed is measured from its own decode, and that answer lands part way
+    /// through the first play of it.
+    ///
+    /// This used to run only when a setting changed, and a setting cannot change during a
+    /// song -- so a song played at whatever the session opened at, from start to finish,
+    /// ignoring the master volume and the correction both. The song being sung was never even
+    /// recorded, so there was nothing to look the correction up by.
+    ///
+    /// The Deaf challenge mutes the track from inside the session and is not fought by this:
+    /// what is set here is what the song should be at, and the session decides whether it is
+    /// audible at all.
+    fn apply_song_volume(&mut self, dt: f32) {
+        let target = self.song_volume();
+        // The same slide the preview uses, for the same reason: a correction landing mid-song
+        // must not be a step. A song cannot wait for its measurement the way a preview can --
+        // it is the thing somebody is standing up to sing.
+        self.song_gain = glide(self.song_gain, target, dt);
+        let gain = self.song_gain;
         if let Some(Screen::Sing(_, session)) = self.stack.last_mut() {
-            session.set_volume(volume);
-        }
-        let preview_volume = self.preview_volume();
-        if let Some(playback) = self.preview.as_mut().and_then(|p| p.playback.as_mut()) {
-            playback.set_volume(preview_volume);
+            session.set_volume(gain);
         }
     }
 
@@ -1333,6 +1419,9 @@ impl App {
                     // The video texture is this song's; leaving it behind would leak one per
                     // song sung.
                     self.dropped_video = screen.video;
+                    // Nothing is being sung once this screen goes, and a stale id here is a
+                    // Restart that starts the song before last.
+                    self.singing = None;
                     // A party song's result is read off the same panels the singers watched,
                     // so there is one score per microphone and it is already in slot order.
                     let under = self.stack.len().saturating_sub(2);
@@ -2407,6 +2496,12 @@ impl App {
         screen.parts = session.part_names().to_vec();
         screen.singer_part = session.singer_parts().to_vec();
         let _ = self.library.record_play(id);
+        // Which song is playing, which three separate things need and none of them had: the
+        // loudness correction, the measurement taken from the song's own decode, and Restart.
+        self.singing = Some(id);
+        // At the right level from the first bar rather than sliding up to it over a quarter
+        // of a second: the answer is already in hand here, so there is nothing to slide from.
+        self.song_gain = self.song_volume();
         self.stack
             .push(Screen::Sing(Box::new(screen), Box::new(session)));
     }
@@ -2602,6 +2697,26 @@ fn duet_parts(path: &Path) -> (String, String) {
         headers.p1.clone().unwrap_or_else(|| "Part 1".to_owned()),
         headers.p2.clone().unwrap_or_else(|| "Part 2".to_owned()),
     )
+}
+
+/// Whether a preview that has been opened should start playing yet.
+///
+/// The whole of the rule. `known` is whether how loud this song is has been established;
+/// `measuring` is whether anything is being found out, which is false for a backing track and
+/// when the correction is switched off. The deadline is what stops a song that cannot be
+/// measured at all -- silence, a file too short to gate -- from never previewing.
+fn preview_may_start(known: bool, measuring: bool, since_cursor: std::time::Duration) -> bool {
+    known || !measuring || since_cursor >= PREVIEW_DELAY + LOUDNESS_WAIT
+}
+
+/// Move a gain towards the one that is wanted, at the rate a change in level should arrive.
+///
+/// Frame-rate independent by construction: the step is a fraction of the distance left, taken
+/// per second rather than per frame, so a slow frame moves further rather than slower. A long
+/// frame -- a song loading, a window resizing -- lands exactly on the target rather than
+/// overshooting it, which is what the clamp is for.
+fn glide(current: f32, target: f32, dt: f32) -> f32 {
+    current + (target - current) * (dt / GAIN_GLIDE).clamp(0.0, 1.0)
 }
 
 /// Which file a song should actually play.
@@ -3051,7 +3166,8 @@ fn main() -> Result<()> {
         app.refresh_highscores();
         app.collect_loudness();
         app.step_calibration();
-        app.update_preview(&audio_subsystem);
+        app.update_preview(&audio_subsystem, dt);
+        app.apply_song_volume(dt);
         app.load_visible_covers(&mut renderer);
         let mut finished_song = false;
         let mut next_jukebox_song = false;
@@ -3990,6 +4106,64 @@ mod tests {
             refused.contains("Blur - Song 2"),
             "the message has to name the song: {refused}"
         );
+    }
+
+    #[test]
+    fn a_preview_waits_to_find_out_how_loud_it_is_but_not_for_ever() {
+        use std::time::Duration;
+        let rested = |ms| PREVIEW_DELAY + Duration::from_millis(ms);
+
+        // The song has been measured before -- the index remembered it -- so there is nothing
+        // to wait for and the preview starts at the right level immediately.
+        assert!(preview_may_start(true, true, rested(0)));
+
+        // Never measured: silent until the measurement lands. This is the bug -- playing here
+        // is playing at up to seven decibels too loud and then dropping when it does.
+        assert!(!preview_may_start(false, true, rested(0)));
+        assert!(!preview_may_start(false, true, rested(400)));
+
+        // But not for ever. A song that cannot be measured at all must still preview.
+        assert!(preview_may_start(false, true, rested(1200)));
+
+        // And when nothing is being measured -- a backing track, or the correction switched
+        // off -- there is nothing to wait for, so waiting would only delay every preview.
+        assert!(preview_may_start(false, false, rested(0)));
+    }
+
+    #[test]
+    fn a_change_in_gain_slides_to_it_and_stops_there() {
+        // Half a second at a quarter-second glide: most of the way, not past it.
+        let quarter = glide(1.0, 0.5, GAIN_GLIDE);
+        assert!(
+            (quarter - 0.5).abs() < 1e-6,
+            "one time constant lands on it"
+        );
+
+        // Frame by frame at 60 Hz, it converges from either direction and does not overshoot.
+        for target in [0.25_f32, 2.0] {
+            let mut gain = 1.0_f32;
+            let mut previous = gain;
+            for _ in 0..60 {
+                gain = glide(gain, target, 1.0 / 60.0);
+                assert!(
+                    (gain - target).abs() <= (previous - target).abs(),
+                    "moving away from {target}"
+                );
+                assert!(
+                    gain >= target.min(1.0) - 1e-6 && gain <= target.max(1.0) + 1e-6,
+                    "{gain} overshot {target}"
+                );
+                previous = gain;
+            }
+            // A second is four time constants, which leaves under two per cent of the way
+            // to go -- inaudible, and the point at which it stops mattering.
+            assert!((gain - target).abs() < 0.02, "did not arrive at {target}");
+        }
+
+        // A frame long enough to matter lands exactly on the target rather than past it, and
+        // a frame of no time changes nothing.
+        assert!((glide(1.0, 0.4, 10.0) - 0.4).abs() < 1e-6);
+        assert_eq!(glide(1.0, 0.4, 0.0), 1.0);
     }
 
     #[test]
