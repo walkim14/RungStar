@@ -69,7 +69,10 @@ struct Candidate {
 }
 
 /// A song that has been read and is ready to be written to the index.
-#[derive(Debug, Clone)]
+///
+/// `Default` is derived so a test can name only the fields it is about; the scanner always
+/// fills every one of them.
+#[derive(Debug, Clone, Default)]
 pub struct ParsedSong {
     pub path: String,
     pub root: String,

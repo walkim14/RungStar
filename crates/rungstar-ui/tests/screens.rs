@@ -18,6 +18,9 @@ fn area() -> Rect {
     Rect::new(0.0, 0.0, 1600.0, 1000.0)
 }
 
+/// What every fixture song scores. Named because two tests need to agree about it.
+const FIXTURE_DIFFICULTY: f64 = 0.5;
+
 fn song(id: i64, artist: &str, title: &str) -> SongEntry {
     SongEntry {
         id,
@@ -41,7 +44,7 @@ fn song(id: i64, artist: &str, title: &str) -> SongEntry {
         background_file: None,
         note_count: 200,
         golden_count: 10,
-        difficulty: 0.5,
+        difficulty: FIXTURE_DIFFICULTY,
         medley_start: None,
         medley_end: None,
         preview_start: None,
@@ -286,7 +289,14 @@ fn the_detail_panel_shows_the_song_under_the_cursor() {
     assert!(text.iter().any(|t| t == "Artist 011"), "artist missing");
     // Facts a player would want before choosing, not a dump of every header.
     assert!(text.iter().any(|t| t == "3:34"), "length missing: {text:?}");
-    assert!(text.iter().any(|t| t == "Moderate"), "difficulty missing");
+    // Asked of the band rather than spelled out, because where the bands are cut is a
+    // calibration decision pinned by its own test in the library. What this one is about is
+    // that the panel says the difficulty at all.
+    let difficulty = rungstar_library::DifficultyBand::of(FIXTURE_DIFFICULTY).label();
+    assert!(
+        text.iter().any(|t| t == difficulty),
+        "difficulty missing: {text:?}"
+    );
 }
 
 #[test]
@@ -1717,4 +1727,97 @@ fn the_backing_track_toggle_does_not_reach_past_the_search_box() {
     screen.handle(Input::ToggleInstrumental, area());
     assert!(!screen.instrumental_toggled);
     assert_eq!(screen.mode(), Mode::Searching);
+}
+
+#[test]
+fn the_word_on_the_song_and_the_band_in_the_filter_are_the_same_word() {
+    // The detail panel has always named a difficulty in words, and the filter now offers
+    // bands. If those are two scales, the panel calls a song Moderate while the filter files
+    // it under Hard — one number with two names, which is not a wording problem but a wrong
+    // answer. They are the same scale or the filter is lying.
+    use rungstar_library::DifficultyBand;
+    use rungstar_ui::songselect::difficulty_label;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut step = 0.0;
+    while step <= 1.0 {
+        assert_eq!(
+            difficulty_label(step),
+            DifficultyBand::of(step).label(),
+            "the panel and the filter disagree at {step}"
+        );
+        seen.insert(DifficultyBand::of(step).label());
+        step += 0.01;
+    }
+    // And every band the filter can offer is a word the panel can print, or there is a row
+    // in the tree naming something no song will ever be described as.
+    assert_eq!(seen.len(), DifficultyBand::ALL.len());
+}
+
+/// Difficulty bands as the library reports them: stable keys, with counts.
+fn difficulty_values() -> FacetValues {
+    let mut values = facets();
+    values.set(
+        Facet::Difficulty,
+        vec![
+            ("gentle".to_owned(), 1043),
+            ("easy".to_owned(), 1947),
+            ("brutal".to_owned(), 670),
+        ],
+    );
+    values
+}
+
+#[test]
+fn the_list_can_be_narrowed_to_a_difficulty_band() {
+    // "Nothing too hard" is one of the few things anybody asks a song list at a party, and
+    // until now the only answer was to sort by difficulty and scroll.
+    use rungstar_library::DifficultyBand;
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(difficulty_values());
+    assert!(screen.filters().difficulty.is_empty());
+
+    open_filters(&mut screen, area, "Difficulty");
+    screen.handle(Input::Right, area);
+    screen.handle(Input::Confirm, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Down, area);
+    screen.handle(Input::Confirm, area);
+
+    // Either of them will do, the way every other category in the tree works.
+    assert_eq!(
+        screen.filters().difficulty,
+        vec![DifficultyBand::Gentle, DifficultyBand::Brutal]
+    );
+    assert!(
+        screen.needs_query(),
+        "narrowing did not ask for a new query"
+    );
+}
+
+#[test]
+fn a_difficulty_band_is_named_the_way_the_song_panel_names_it() {
+    // The panel calls a song Gentle. A filter row calling the same thing "gentle" is the
+    // stored key leaking onto the screen, and it reads as two different scales.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = Rect::new(0.0, 0.0, 1600.0, 1000.0);
+    let mut screen = loaded(20);
+    screen.set_facets(difficulty_values());
+    open_filters(&mut screen, area, "Difficulty");
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let text = strings(&list);
+    for expected in ["Gentle", "Easy", "Brutal", "1043"] {
+        assert!(
+            text.iter().any(|t| t == expected),
+            "the panel did not show {expected:?}: {text:?}"
+        );
+    }
+    assert!(
+        !text.iter().any(|t| t == "gentle"),
+        "the stored key reached the screen: {text:?}"
+    );
 }

@@ -157,6 +157,8 @@ impl Narrow {
 pub enum Facet {
     /// Duets, solos, has a video, is playable. One at a time, unlike the others.
     Kind,
+    /// How hard the songs are to sing, in the same words the song panel uses.
+    Difficulty,
     Genre,
     Language,
     Decade,
@@ -166,8 +168,9 @@ pub enum Facet {
 }
 
 impl Facet {
-    pub const ALL: [Facet; 7] = [
+    pub const ALL: [Facet; 8] = [
         Facet::Kind,
+        Facet::Difficulty,
         Facet::Genre,
         Facet::Language,
         Facet::Decade,
@@ -179,6 +182,7 @@ impl Facet {
     pub fn title(self) -> &'static str {
         match self {
             Self::Kind => "Kind",
+            Self::Difficulty => "Difficulty",
             Self::Genre => "Genre",
             Self::Language => "Language",
             Self::Decade => "Decade",
@@ -192,6 +196,7 @@ impl Facet {
     pub fn column(self) -> Option<&'static str> {
         match self {
             Self::Kind => None,
+            Self::Difficulty => Some("difficulty"),
             Self::Genre => Some("genre"),
             Self::Language => Some("language"),
             Self::Decade => Some("decade"),
@@ -201,10 +206,13 @@ impl Facet {
         }
     }
 
-    /// How a stored value is shown. A decade is stored as its first year.
+    /// How a stored value is shown. A decade is stored as its first year, and a difficulty
+    /// band as a key that does not change with how it is displayed.
     pub fn label(self, value: &str) -> String {
         match self {
             Self::Decade => format!("{value}s"),
+            Self::Difficulty => rungstar_library::DifficultyBand::from_key(value)
+                .map_or_else(|| value.to_owned(), |band| band.label().to_owned()),
             _ => value.to_owned(),
         }
     }
@@ -524,6 +532,12 @@ impl SongSelect {
             }
             match facet {
                 Facet::Kind => {}
+                Facet::Difficulty => {
+                    filters.difficulty = chosen
+                        .iter()
+                        .filter_map(|key| rungstar_library::DifficultyBand::from_key(key))
+                        .collect();
+                }
                 Facet::Genre => filters.genres.clone_from(chosen),
                 Facet::Language => filters.languages.clone_from(chosen),
                 Facet::Edition => filters.editions.clone_from(chosen),
@@ -1931,12 +1945,10 @@ pub fn format_duration(seconds: f64) -> String {
 }
 
 /// The computed difficulty as words rather than a number nobody can calibrate.
+///
+/// Deferred to the library's own bands rather than repeated here, because the filter tree
+/// offers those bands by name: two copies of one scale is how the panel comes to call a song
+/// Moderate while the filter has it under Hard.
 pub fn difficulty_label(difficulty: f64) -> &'static str {
-    match difficulty {
-        d if d < 0.2 => "Gentle",
-        d if d < 0.4 => "Easy",
-        d if d < 0.6 => "Moderate",
-        d if d < 0.8 => "Hard",
-        _ => "Brutal",
-    }
+    rungstar_library::DifficultyBand::of(difficulty).label()
 }

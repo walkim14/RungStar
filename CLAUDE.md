@@ -548,11 +548,29 @@ singing.
   with no scorer behind it sits at zero for the whole song.
 
   **The browser filters on what the index already held.** Genre, language, decade, edition,
-  folder and creator, values within a category OR and the categories AND. Values come from the
-  library, and counts are of the whole library rather than of the current results - a filter
-  list that empties itself as you use it cannot widen a search again. Decade is computed
-  rather than stored and is the one facet ordered newest first, because a decade list is a
-  timeline.
+  folder, creator and difficulty, values within a category OR and the categories AND. Values
+  come from the library, and counts are of the whole library rather than of the current results
+  - a filter list that empties itself as you use it cannot widen a search again. Decade is
+  computed rather than stored and is the one facet ordered newest first, because a decade list
+  is a timeline.
+
+  **Difficulty is a filter, and its bands were recut to fit a library.** The number itself is
+  not in the `.txt` - no such header exists - it is `scan.rs`'s heuristic from syllable rate,
+  pitch range and jumpiness, stored per song. What was wrong was the words: the song panel cut
+  that number at fifths of the scale, 0.2/0.4/0.6/0.8. A weighted blend of three clamped scores
+  does not reach its extremes, and measured across the 8,134-song library it runs **0.00 to
+  0.82, mean 0.31** - so at fifths, 68% of every library reads "Easy", "Hard" is half a per cent
+  of it and "Brutal" is one song in 8,159. Cut at **0.20/0.28/0.36/0.46** the same five words
+  come out 13 / 24 / 32 / 23 / 8 per cent. Equal fifths of the *library* was the other
+  candidate and is worse: it makes "Brutal" one song in five, and a superlative that common is
+  not a superlative. Only the cut points are calibrated - moving the score would mean rescanning
+  the library, moving these means nothing, because a band is worked out when it is asked for.
+
+  The bands live in `rungstar-library` and the song panel's word now comes from them, because
+  the panel and the filter naming one number differently is a wrong answer rather than a
+  wording problem - a test walks the scale and asserts the two agree. Bands with no songs are
+  not offered, which is what keeps the top of the scale honest on a library that has nothing
+  brutal in it.
 
   **The song list has ends.** It used to wrap, so the last song sat above the first, holding a
   direction never arrived anywhere, and a library smaller than the view drew the same song

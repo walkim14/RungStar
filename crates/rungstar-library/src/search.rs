@@ -10,7 +10,7 @@
 use rusqlite::{params_from_iter, Row, ToSql};
 
 use crate::db::{Database, DbError};
-use crate::model::{SearchField, SongEntry, SortKey};
+use crate::model::{DifficultyBand, SearchField, SongEntry, SortKey};
 
 /// Columns selected for a [`SongEntry`], in the order [`row_to_entry`] reads them.
 const SELECT: &str = "song.id, song.path, song.folder, song.artist, song.title, song.edition, \
@@ -39,8 +39,8 @@ pub struct Filters {
     pub has_video: Option<bool>,
     /// Only songs whose audio file is actually present.
     pub playable: Option<bool>,
-    /// Inclusive difficulty band.
-    pub difficulty: Option<(f64, f64)>,
+    /// Bands to accept. Any of them will do, like every other list here.
+    pub difficulty: Vec<DifficultyBand>,
 }
 
 impl Filters {
@@ -327,10 +327,15 @@ fn filter_clauses(filters: &Filters) -> (Vec<String>, Vec<Box<dyn ToSql>>) {
             .to_owned(),
         );
     }
-    if let Some((low, high)) = filters.difficulty {
-        clauses.push("song.difficulty BETWEEN ? AND ?".to_owned());
-        values.push(Box::new(low));
-        values.push(Box::new(high));
+    if !filters.difficulty.is_empty() {
+        let spans =
+            vec!["(song.difficulty >= ? AND song.difficulty < ?)"; filters.difficulty.len()];
+        clauses.push(format!("({})", spans.join(" OR ")));
+        for band in &filters.difficulty {
+            let (low, high) = band.range();
+            values.push(Box::new(low));
+            values.push(Box::new(high));
+        }
     }
     (clauses, values)
 }
@@ -479,6 +484,33 @@ impl Database {
                  WHERE year IS NOT NULL AND year > 0
                  GROUP BY year - (year % 10) ORDER BY year - (year % 10) DESC",
             )?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            return Ok(rows.collect::<Result<Vec<_>, _>>()?);
+        }
+        // Difficulty is one number in the row, and the bands are cut out of it here rather
+        // than stored, for the same reason a decade is: the cut is a browsing decision and
+        // rescanning eight thousand songs to move it would be absurd. The edges come from
+        // `DifficultyBand` itself so this cannot drift from the filter it has to agree with.
+        if column == "difficulty" {
+            let arms: String = DifficultyBand::ALL
+                .iter()
+                .filter(|band| band.range().1.is_finite())
+                .map(|band| {
+                    format!(
+                        " WHEN song.difficulty < {} THEN '{}'",
+                        band.range().1,
+                        band.key()
+                    )
+                })
+                .collect();
+            let hardest = DifficultyBand::ALL[DifficultyBand::ALL.len() - 1].key();
+            // Ordered by the scale, not by count: the bands tile the difficulty range in
+            // order, so their minima are in that order too.
+            let sql = format!(
+                "SELECT CASE{arms} ELSE '{hardest}' END AS band, COUNT(*) FROM song
+                 GROUP BY band ORDER BY MIN(song.difficulty)"
+            );
+            let mut statement = self.connection().prepare(&sql)?;
             let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
             return Ok(rows.collect::<Result<Vec<_>, _>>()?);
         }
