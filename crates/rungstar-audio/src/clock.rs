@@ -188,8 +188,19 @@ impl MasterClock {
         Beats {
             visual: self.timing.beats(lyric_time),
             click: self.timing.beats(lyric_time),
-            detection: -0.5 + self.timing.beats(lyric_time - self.timing.mic_delay),
+            detection: self.detection_beat(self.timing.mic_delay),
         }
+    }
+
+    /// The detection beat for a microphone lagging by `mic_delay` seconds.
+    ///
+    /// Asked for rather than held, because singers do not share a microphone. A USB mic and a
+    /// Bluetooth headset are hundreds of milliseconds apart, and one delay applied to both
+    /// puts every hit of one singer in the wrong place — which looks to them like the game
+    /// not hearing them rather than like a setting.
+    pub fn detection_beat(&self, mic_delay: f64) -> f64 {
+        let lyric_time = self.position - self.timing.gap;
+        -0.5 + self.timing.beats(lyric_time - mic_delay)
     }
 
     /// Whole beats crossed since `previous`, for driving per-beat scoring.

@@ -510,13 +510,17 @@ impl Page {
                 ),
                 number_item!(
                     sound.mic_delay_ms as u32, "Microphone delay",
-                    "How far your microphone lags the music. The scoring clock is shifted by \
-                     this, so getting it wrong shifts every hit.",
+                    "How far a microphone lags the music. The scoring clock is shifted \
+                     by this, so getting it wrong shifts every hit. A microphone that \
+                     has been measured uses its own figure; this covers the rest.",
                     0.0, 500.0, 10.0, milliseconds
                 ),
                 Item {
                     label: "Measure it",
-                    help: "Plays a short sweep through the speakers five times and listens for                            it coming back. Needs speakers rather than headphones, and a quiet                            few seconds.",
+                    help: "Plays a short sweep through the speakers five times and \
+                           listens for it coming back, one microphone at a time, each \
+                           keeping its own answer. Needs speakers rather than \
+                           headphones, and a quiet few seconds.",
                     control: Control::Button(Action::MeasureMicDelay),
                 },
                 number_item!(

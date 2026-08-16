@@ -138,10 +138,19 @@ fixture output.
 8. **A freestyle-only line earns no line bonus.** UltraStar Deluxe excludes such lines from
    the bonus divisor but still pays them a full bonus, so a song containing one can score
    over 10,000. Ours cannot.
-9. **Hovering does not move the browser cursor.** In the list and the roulette the cursor is
+9. **Hovering never moves a cursor a scrolling list follows.** In the browser the cursor is
    centred and the songs scroll past it, so selecting on hover drags the list out from under
    the pointer and you click a different song than you aimed at. Click selects, a second
    click sings — so a stray click never starts a song either.
+
+   The rule holds wherever the view follows the cursor, and it started as one screen's
+   quirk before the rest were found to need it: the options page, the filter panel, the
+   challenge picker and the USDB catalog all scroll to keep their cursor visible, so hover
+   put a different row under the pointer, which moved the cursor again, and sweeping the
+   mouse down any of them made it bolt. The filter panel had a second, worse version of it —
+   its category column decides what the value column *contains*, so a sweep across it on the
+   way to a value replaced the list being reached for, and a category the library has no
+   values for emptied it outright. Only the wheel and the keys scroll now.
 10. **A text search ranks by relevance, and a phrase beats scattered words.** UltraStar sorts
    alphabetically always, so searching only works if you already know the title. Two parts:
    an unsorted search ranks by bm25 rather than by artist, and — because bm25 scores term
@@ -273,9 +282,35 @@ headset nobody sings into: it measured the wrong hardware and said nothing about
 passes across two microphones is fifteen seconds, and a game frozen that long with no meter and
 no pass count cannot be told from one that has crashed. `Calibrator::tick` does one drain and
 returns, so the screen names the microphone, counts the passes, and shows a live level — which
-is the one thing that makes a dead device obvious while it happens rather than afterwards. One
-value covers every microphone, so the median of the ones that answered is what gets set, and the
-screen says so.
+is the one thing that makes a dead device obvious while it happens rather than afterwards.
+
+**Every microphone keeps its own delay.** The sweep always measured them one at a time and then
+threw all but one answer away, because there was one setting to put it in. A USB microphone and
+a Bluetooth headset are hundreds of milliseconds apart - two whole beats at an ordinary tempo -
+so one figure applied to both is wrong for at least one singer by the whole difference, and what
+that looks like from the floor is a microphone the game is not listening to. `MicDelay` records
+`(name, occurrence, millis)`, keyed exactly as an assignment is, so a pair of identical karaoke
+microphones keep separate answers.
+
+Four things fall out of it:
+
+- **`mic_delay_ms` is now the fallback, not the value.** A microphone nobody has swept still
+  needs a number, and it becomes the median of the round rather than the factory 140 - never
+  another microphone's answer, because being wrong by an unknown amount beats being wrong by a
+  known amount that came from somebody else's hardware.
+- **Singers no longer share a scoring clock.** `MasterClock::detection_beat(delay)` is asked
+  for a delay rather than holding one, and `Progress` keeps one "scored up to here" mark per
+  singer. One shared mark was the hazard: it belongs to whoever is furthest ahead, and everybody
+  behind them has their beats marked done without ever being scored. A test runs two clocks a
+  beat apart and asserts their beat lists stay exactly a beat apart, which is what neither
+  losing nor repeating a beat looks like from outside.
+- **The challenge rules still run on one clock** - the first singer's, the same singer whose
+  lines already drive them. A rule comparing people to each other only means anything at a
+  shared moment.
+- **A delay you cannot look up is one you cannot tell is wrong**, and that is this setting's
+  entire failure mode. The microphone list shows each device's own figure beside its meter, and
+  says "not measured" rather than printing the shared one, because a guess displayed like an
+  answer cannot be told from one.
 
 ## Song loudness
 
@@ -448,6 +483,14 @@ direction at the end of a list is *silent*, which is the failure worth catching.
 `Browser` emit for themselves, so a screen added later gets sounds for free; hovering and a
 list re-sorting under the cursor deliberately do not.
 
+**Leaving the game is asked about.** Backing out of a screen and pressing the same key once
+more landed on the main menu and ended the game — two presses of one key, the second aimed at a
+screen that had already closed, and it takes the party with it. Both ways out ask now, because a
+stray Enter on the Quit row is the same accident as a stray Esc and one rule for both is easier
+to rely on. What differs is only which answer starts chosen: Cancel when Esc asked, Quit when the
+menu row did, so the deliberate path is still two presses and the accidental one cannot be
+completed by repeating the key that caused it.
+
 **Nothing chimes during a song.** A golden note landing and a line sung well both had one, and
 both were distracting: an interface sound is heard *instead of* whatever else is happening,
 which is right in a menu and wrong over the thing somebody came to listen to. The screen says
@@ -523,6 +566,13 @@ singing.
   **The scan runs off the main thread**, reporting progress the browser shows. Eight thousand
   songs is fourteen seconds on a cold file cache, and a frozen window is indistinguishable
   from a crash. The index is in WAL mode, so the browser reads while the scan writes.
+
+  **An overlay has to list every region it owns**, or that overlay is unreachable with a
+  pointer. The guard that makes an overlay modal — so a click aimed just past a search box
+  cannot start a song behind it — treats anything not on its list as a click outside, and
+  closes the panel that was aimed at. The filter panel and the challenge picker were both
+  missing from it, which made them keyboard-and-controller only with nothing on screen to say
+  so. Adding a screen means adding its regions there.
 
   Still to come here: playlists in the browser, controller rebinding, a microphone setup
   screen, and the medley start point for "sing from the chorus".

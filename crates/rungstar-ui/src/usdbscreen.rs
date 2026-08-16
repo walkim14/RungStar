@@ -709,6 +709,11 @@ impl UsdbScreen {
         (Transition::None, UsdbOutcome::None)
     }
 
+    /// Which catalog row the cursor is on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     fn handle_pointer(&mut self, point: Point, clicked: bool) -> (Transition, UsdbOutcome) {
         let hit = self
             .regions
@@ -717,9 +722,13 @@ impl UsdbScreen {
             .find(|(rect, _)| rect.contains(point))
             .map(|(_, region)| *region);
         match hit {
+            // Hovering does not move the cursor. The list scrolls to keep the cursor on
+            // screen, so moving it on hover slides the list under the pointer, which puts a
+            // different row where the pointer is and sends the selection bolting down the
+            // page. The wheel is what scrolls; a click chooses.
             Some(Region::Song(index)) => {
-                self.cursor = index;
                 if clicked {
+                    self.cursor = index;
                     return self.handle_browsing(Input::Confirm);
                 }
             }
@@ -731,21 +740,25 @@ impl UsdbScreen {
             }
             Some(Region::Reveal) if clicked => self.reveal = !self.reveal,
             Some(Region::Reveal) => {}
+            // Same rule in the filter panel, and here the category column decides what the
+            // value column contains, so a sweep across it on the way to a value replaces the
+            // list being reached for.
             Some(Region::Category(index)) => {
-                if index != self.facet_cursor {
-                    self.facet_cursor = index;
-                    self.value_cursor = 0;
+                if clicked {
+                    if index != self.facet_cursor {
+                        self.facet_cursor = index;
+                        self.value_cursor = 0;
+                    }
+                    self.on_values = true;
                 }
-                self.on_values = clicked;
             }
-            Some(Region::Value(index)) => {
+            Some(Region::Value(index)) if clicked => {
                 self.value_cursor = index;
                 self.on_values = true;
-                if clicked {
-                    let facet = self.facet();
-                    self.toggle_value(facet, index);
-                }
+                let facet = self.facet();
+                self.toggle_value(facet, index);
             }
+            Some(Region::Value(_)) => {}
             None => {}
         }
         (Transition::None, UsdbOutcome::None)

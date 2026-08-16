@@ -397,3 +397,140 @@ fn every_action_that_cannot_be_undone_asks_first() {
         );
     }
 }
+
+#[test]
+fn a_microphone_keeps_its_own_measured_delay() {
+    // One delay for the whole game is wrong the moment two people sing into different
+    // hardware: a USB microphone and a Bluetooth headset are hundreds of milliseconds apart,
+    // and the delay shifts the whole scoring clock, so whichever singer is on the wrong one
+    // sings perfectly and scores badly with nothing on screen to say why.
+    let mut sound = Settings::default().sound;
+    assert_eq!(
+        sound.mic_delay_for("Anything", 0),
+        sound.mic_delay_ms,
+        "an unmeasured microphone should fall back to the shared value"
+    );
+
+    sound.set_mic_delay("Blue Yeti", 0, 120);
+    sound.set_mic_delay("Jabra Speak", 0, 310);
+    assert_eq!(sound.mic_delay_for("Blue Yeti", 0), 120);
+    assert_eq!(sound.mic_delay_for("Jabra Speak", 0), 310);
+    // A microphone nobody measured is still on the shared value rather than on somebody
+    // else's, which would be worse than the guess it replaced.
+    assert_eq!(sound.mic_delay_for("Webcam", 0), sound.mic_delay_ms);
+
+    // Measuring again replaces the answer instead of leaving two.
+    sound.set_mic_delay("Blue Yeti", 0, 135);
+    assert_eq!(sound.mic_delay_for("Blue Yeti", 0), 135);
+    assert_eq!(sound.mic_delays.len(), 2);
+}
+
+#[test]
+fn two_microphones_of_the_same_model_are_measured_separately() {
+    // A pair of identical USB karaoke microphones report identical names, which is the
+    // ordinary way somebody ends up with two. Keyed on the name alone, the second one would
+    // silently overwrite the first's measurement.
+    let mut sound = Settings::default().sound;
+    sound.set_mic_delay("USB Microphone", 0, 100);
+    sound.set_mic_delay("USB Microphone", 1, 250);
+    assert_eq!(sound.mic_delay_for("USB Microphone", 0), 100);
+    assert_eq!(sound.mic_delay_for("USB Microphone", 1), 250);
+}
+
+#[test]
+fn measuring_gives_each_microphone_its_own_delay() {
+    // The sweep already measures every microphone separately and then threw all but one
+    // answer away, because there was only one place to put it. Keeping them is the whole
+    // point of having measured them.
+    let mut sound = Settings::default().sound;
+    let applied = sound.record_measurements(&[
+        ("Blue Yeti".to_owned(), 0, 118.6),
+        ("Jabra Speak".to_owned(), 0, 305.2),
+        ("USB Mic".to_owned(), 1, 141.0),
+    ]);
+
+    assert_eq!(sound.mic_delay_for("Blue Yeti", 0), 119);
+    assert_eq!(sound.mic_delay_for("Jabra Speak", 0), 305);
+    assert_eq!(sound.mic_delay_for("USB Mic", 1), 141);
+
+    // The shared value stays the fallback and becomes the median of what was heard: the best
+    // guess for a microphone that was not in the round. Never the largest, which would make a
+    // fast microphone late, nor the smallest, which would make a slow one early.
+    assert_eq!(applied, Some(141));
+    assert_eq!(sound.mic_delay_ms, 141);
+    assert_eq!(sound.mic_delay_for("Never Measured", 0), 141);
+}
+
+#[test]
+fn a_round_that_heard_nothing_changes_nothing() {
+    // Speakers pointing the wrong way, or a dead device. Overwriting a delay somebody has
+    // already calibrated with a number nothing supports is worse than leaving it alone.
+    let mut sound = Settings::default().sound;
+    sound.set_mic_delay("Blue Yeti", 0, 118);
+    let before = sound.mic_delay_ms;
+
+    assert_eq!(sound.record_measurements(&[]), None);
+    assert_eq!(sound.mic_delay_ms, before);
+    assert_eq!(
+        sound.mic_delay_for("Blue Yeti", 0),
+        118,
+        "an earlier answer was lost"
+    );
+}
+
+#[test]
+fn the_measurement_screen_says_each_microphone_keeps_its_own_delay() {
+    // The screen used to promise "one value covers every microphone", which was true and is
+    // now the opposite of what happened. A screen that reports the old behaviour after the
+    // new one has run is worse than one that says nothing: somebody reads it, believes their
+    // headset and their USB mic are on the same figure, and stops looking.
+    use rungstar_ui::calibratescreen::{CalibrateScreen, Report};
+    use rungstar_ui::draw::DrawList;
+    use rungstar_ui::geom::Rect;
+    use rungstar_ui::theme::Theme;
+
+    let mut screen = CalibrateScreen::new();
+    screen.applied = Some(141);
+    screen.reports = vec![
+        Report {
+            name: "Blue Yeti".to_owned(),
+            occurrence: 0,
+            delay: Ok(119.0),
+            passes: Vec::new(),
+        },
+        Report {
+            name: "Jabra Speak".to_owned(),
+            occurrence: 0,
+            delay: Ok(305.0),
+            passes: Vec::new(),
+        },
+    ];
+
+    let theme = Theme::builtin();
+    let mut list = DrawList::new();
+    screen.draw(
+        &mut list,
+        Rect::new(0.0, 0.0, 1600.0, 1000.0),
+        &theme.resolve_default(),
+    );
+    let text: String = list
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            rungstar_ui::draw::Command::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(
+        !text.contains("One value covers every microphone"),
+        "the screen still promises one shared value: {text}"
+    );
+    assert!(
+        text.contains("its own"),
+        "the screen did not say each microphone keeps its own delay: {text}"
+    );
+    // And the shared figure is still named, because it is what anything unmeasured uses.
+    assert!(text.contains("141"), "the fallback was not named: {text}");
+}

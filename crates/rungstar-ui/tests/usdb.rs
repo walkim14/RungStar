@@ -647,3 +647,30 @@ fn a_signed_out_visitor_is_told_where_to_get_an_account() {
     let text = strings(&draw(&mut screen)).join(" ");
     assert!(!text.contains("usdb.animux.de"), "still nagging: {text}");
 }
+
+#[test]
+fn pointing_down_the_catalog_does_not_drag_it() {
+    // The same rule the song list and the options page follow: this list scrolls to keep its
+    // cursor on screen, so moving the cursor on hover slides the list under the pointer and
+    // the selection bolts down the page. Only the wheel scrolls; a click chooses.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = area();
+    let mut screen = loaded();
+    screen.handle(Input::Down);
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style);
+    let before = screen.cursor();
+    for step in 0..120 {
+        screen.handle(Input::Hover(rungstar_ui::geom::Point::new(
+            area.w * 0.5,
+            step as f32 * 8.0,
+        )));
+    }
+    assert_eq!(
+        screen.cursor(),
+        before,
+        "sweeping the pointer moved the catalog cursor"
+    );
+}

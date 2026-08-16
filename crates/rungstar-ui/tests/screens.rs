@@ -349,7 +349,13 @@ fn the_main_menu_routes_to_every_screen_it_offers() {
     for step in 0..16 {
         match menu.handle(Input::Confirm) {
             Transition::Push(route) => seen.push(route),
-            Transition::Quit => seen.push(Route::Main),
+            // The quit row asks before it acts, so leaving is a question rather than a
+            // transition. Still a row that leads somewhere — dismissed here so the walk
+            // carries on to the rest of the menu.
+            Transition::None if menu.confirming() => {
+                seen.push(Route::Main);
+                menu.handle(Input::Back);
+            }
             other => panic!("a menu row produced {other:?}"),
         }
         menu.handle(Input::Down);
@@ -1498,6 +1504,7 @@ fn a_long_microphone_name_is_cut_off_before_its_value() {
             assignment: vec![1, 2],
             levels: vec![0.4, 0.2],
             heard: vec![true, false],
+            delay_ms: None,
         };
         3
     ];
@@ -1537,6 +1544,7 @@ mod many_microphones {
                 assignment: vec![0, 0],
                 levels: vec![0.2, 0.1],
                 heard: vec![true, false],
+                delay_ms: None,
             })
             .collect();
         screen
@@ -1639,6 +1647,7 @@ mod many_microphones {
             assignment: vec![1, 0],
             levels: vec![0.3, 0.0],
             heard: vec![true, false],
+            delay_ms: None,
         }];
         let list = drawn(&mut screen);
         let text: Vec<String> = list
@@ -1819,5 +1828,279 @@ fn a_difficulty_band_is_named_the_way_the_song_panel_names_it() {
     assert!(
         !text.iter().any(|t| t == "gentle"),
         "the stored key reached the screen: {text:?}"
+    );
+}
+
+#[test]
+fn the_microphone_list_says_what_each_one_is_scored_at() {
+    // Every microphone now has its own delay, and until this there was nowhere to see one:
+    // the measurement screen showed them once and then closed. A number nobody can look up
+    // is a number nobody can tell is wrong, which for this setting is the whole failure —
+    // a bad delay sings perfectly and scores badly with nothing on screen to say why.
+    use rungstar_ui::micscreen::{Device, MicScreen};
+
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut screen = MicScreen::new();
+    screen.devices = vec![
+        Device {
+            name: "Blue Yeti".to_owned(),
+            assignment: vec![1],
+            levels: vec![0.4],
+            heard: vec![true],
+            delay_ms: Some(119),
+        },
+        Device {
+            name: "Never Measured".to_owned(),
+            assignment: vec![2],
+            levels: vec![0.4],
+            heard: vec![true],
+            delay_ms: None,
+        },
+    ];
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, Rect::new(0.0, 0.0, 1600.0, 1000.0), &style);
+    assert!(list.is_balanced());
+    let text = strings(&list).join(" ");
+    assert!(
+        text.contains("119 ms"),
+        "a measured microphone did not show its delay: {text}"
+    );
+    // One that has never been swept says so rather than showing the shared figure as though
+    // it had been measured, which would make the guess indistinguishable from an answer.
+    assert!(
+        text.contains("not measured"),
+        "an unmeasured microphone did not say so: {text}"
+    );
+}
+
+#[test]
+fn leaving_the_main_menu_asks_before_it_quits() {
+    // Esc out of the options and Esc again lands on the main menu and ends the game. That is
+    // two presses of the same key, one of which was aimed at a screen that had already
+    // closed, and it takes a party down with it. The menu's own comment has always claimed
+    // this was confirmed somewhere; it was not.
+    let mut menu = MainMenu::new();
+
+    assert!(matches!(menu.handle(Input::Back), Transition::None));
+    assert!(menu.confirming(), "Esc did not open a confirmation");
+
+    // Esc again is the answer somebody who did not mean it will give, so it cancels rather
+    // than confirming — the accidental second press must not do what the first one nearly did.
+    assert!(matches!(menu.handle(Input::Back), Transition::None));
+    assert!(
+        !menu.confirming(),
+        "a second Esc did not dismiss the question"
+    );
+
+    // Confirming outright does not leave either: Esc opens the question on Cancel, because
+    // the press that got here was most likely aimed at a screen that had already closed.
+    menu.handle(Input::Back);
+    assert!(matches!(menu.handle(Input::Confirm), Transition::None));
+
+    // Steering to the other answer is what leaves, and it still works.
+    menu.handle(Input::Back);
+    menu.handle(Input::Right);
+    assert!(matches!(menu.handle(Input::Confirm), Transition::Quit));
+}
+
+#[test]
+fn the_quit_entry_asks_too() {
+    // Choosing Quit is deliberate, but a stray Enter in a room of six people is the same
+    // accident as a stray Esc, and one rule for both is easier to rely on than two.
+    let mut menu = MainMenu::new();
+    for _ in 0..16 {
+        if menu.entry_quits(menu.cursor()) {
+            break;
+        }
+        menu.handle(Input::Down);
+    }
+    assert!(menu.entry_quits(menu.cursor()), "no Quit entry in the menu");
+
+    assert!(matches!(menu.handle(Input::Confirm), Transition::None));
+    assert!(menu.confirming(), "choosing Quit did not ask");
+    assert!(matches!(menu.handle(Input::Confirm), Transition::Quit));
+}
+
+#[test]
+fn the_quit_question_is_on_screen_and_clickable() {
+    // A state with no picture is worse than no state: the keys change meaning and nothing
+    // says so, which reads as the menu having locked up.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let mut menu = MainMenu::new();
+    menu.handle(Input::Back);
+
+    let mut list = DrawList::new();
+    menu.draw(&mut list, area(), &style, "");
+    assert!(list.is_balanced());
+    let text = strings(&list);
+    assert!(
+        text.iter().any(|t| t.contains("Quit RungStar")),
+        "the question was not drawn: {text:?}"
+    );
+    for button in ["Cancel", "Quit"] {
+        assert!(
+            text.iter().any(|t| t == button),
+            "no {button:?} button: {text:?}"
+        );
+    }
+
+    // Clicking Cancel dismisses it rather than leaving.
+    let cancel = menu
+        .quit_button(false)
+        .expect("the Cancel button was not recorded");
+    // A button laid out to a negative height still draws and can never be hit, and a click
+    // that misses it dismisses the question anyway — so the pointer half of this test would
+    // pass on a dialog nobody could actually press Cancel on.
+    for (label, rect) in [
+        ("Cancel", cancel),
+        ("Quit", menu.quit_button(true).unwrap()),
+    ] {
+        assert!(
+            rect.w > 0.0 && rect.h > 0.0,
+            "the {label} button was laid out to nothing: {rect:?}"
+        );
+    }
+    assert!(matches!(
+        menu.handle(Input::Click(cancel.center())),
+        Transition::None
+    ));
+    assert!(!menu.confirming());
+
+    // And clicking Quit leaves.
+    menu.handle(Input::Back);
+    let mut list = DrawList::new();
+    menu.draw(&mut list, area(), &style, "");
+    let quit = menu.quit_button(true).expect("no Quit button recorded");
+    assert!(matches!(
+        menu.handle(Input::Click(quit.center())),
+        Transition::Quit
+    ));
+}
+
+#[test]
+fn the_filter_panel_can_be_worked_with_the_mouse() {
+    // Every pointer event over the panel was treated as a click outside it, because the guard
+    // that makes an overlay modal only knew about the keyboard, the sort picker and the song
+    // menu. So the panel closed the instant it was clicked and there was no way to use it
+    // without a controller.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = area();
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+
+    // The second value of the open category — German, from the fixture.
+    let row = screen
+        .filter_row(false, 1)
+        .expect("no filter value row was recorded");
+    assert!(
+        row.w > 0.0 && row.h > 0.0,
+        "the row was laid out to nothing"
+    );
+
+    screen.handle(Input::Click(row.center()), area);
+    assert_eq!(
+        screen.mode(),
+        Mode::Filtering,
+        "clicking a filter value closed the panel"
+    );
+    assert_eq!(
+        screen.filters().languages,
+        vec!["German"],
+        "clicking a filter value did not toggle it"
+    );
+
+    // And clicking it again turns it off, as the keyboard does.
+    screen.handle(Input::Click(row.center()), area);
+    assert!(screen.filters().languages.is_empty());
+    assert_eq!(screen.mode(), Mode::Filtering);
+}
+
+#[test]
+fn a_filter_category_is_opened_by_clicking_it() {
+    // The other half of working the panel with a pointer: reaching a different category at
+    // all. Hovering deliberately does not, so a click has to.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = area();
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let wanted = Facet::ALL
+        .iter()
+        .position(|facet| facet.title() == "Genre")
+        .expect("no Genre category");
+    let row = screen
+        .filter_row(true, wanted)
+        .expect("no filter category row was recorded");
+
+    screen.handle(Input::Click(row.center()), area);
+    assert_eq!(screen.facet_title(), "Genre");
+    assert_eq!(screen.mode(), Mode::Filtering, "the panel closed");
+}
+
+#[test]
+fn pointing_at_a_scrolling_list_does_not_move_it() {
+    // Both of these lists scroll to keep their cursor on screen. Move the cursor on hover and
+    // the list slides under the pointer, which puts a different row where the pointer is, which
+    // moves the cursor again: sweeping the mouse across the options makes the page bolt. The
+    // song list settled this long ago — the cursor is centred and the songs scroll past it, so
+    // hovering never moves it — and this is the same rule everywhere else it applies.
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+    let area = area();
+
+    // The options page: hovering an item must leave the cursor where the keyboard put it.
+    let mut settings = Settings::default();
+    let mut options = OptionsScreen::new();
+    options.handle(Input::Right, &mut settings);
+    let mut list = DrawList::new();
+    options.draw(&mut list, area, &style, &settings);
+    let before = options.item_cursor();
+    for step in 0..120 {
+        let point = rungstar_ui::geom::Point::new(area.w * 0.75, step as f32 * 8.0);
+        options.handle(Input::Hover(point), &mut settings);
+    }
+    assert_eq!(
+        options.item_cursor(),
+        before,
+        "sweeping the pointer down the options moved the cursor"
+    );
+
+    // The filter panel: same rule, and here the category column decides what the value column
+    // even contains, so a sweep across it empties the list somebody was reaching for.
+    let mut screen = loaded(20);
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Language");
+    screen.handle(Input::Right, area);
+    let mut list = DrawList::new();
+    screen.draw(&mut list, area, &style, &|_| None);
+    let facet = screen.facet_title();
+    let value = screen.value_cursor();
+    for step in 0..120 {
+        for column in [0.25, 0.6, 0.9] {
+            let point = rungstar_ui::geom::Point::new(area.w * column, step as f32 * 8.0);
+            screen.handle(Input::Hover(point), area);
+        }
+    }
+    assert_eq!(
+        screen.facet_title(),
+        facet,
+        "sweeping the pointer changed which filter category was open"
+    );
+    assert_eq!(
+        screen.value_cursor(),
+        value,
+        "sweeping the pointer moved the filter value cursor"
     );
 }

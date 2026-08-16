@@ -102,7 +102,9 @@ pub struct Session {
     part_names: Vec<String>,
     /// Next line whose bonus has not been awarded, per singer.
     next_line: Vec<usize>,
-    scored_through: f64,
+    scored: Progress,
+    /// Each singer's own microphone delay, in seconds.
+    delays: Vec<f64>,
     last_frame: Instant,
     last_analysis: Instant,
     sung: Vec<Vec<Sung>>,
@@ -153,6 +155,7 @@ impl Session {
         threshold: f32,
         mic_delay_ms: f64,
         saved_microphones: &[rungstar_ui::settings::MicAssignment],
+        measured_delays: &[rungstar_ui::settings::MicDelay],
         video_path: Option<&Path>,
         mut capture: SdlCapture,
         plan: &Plan,
@@ -170,6 +173,9 @@ impl Session {
         let mut devices = choose_devices(&capture, players);
         // Whatever the setup screen was told wins over the automatic assignment.
         apply_saved(&mut devices, saved_microphones);
+        // Each singer is scored against the microphone they are actually singing into, which
+        // is only knowable once the routing above has been settled.
+        let delays = player_delays(&devices, measured_delays, mic_delay_ms, players);
         let has_microphone = devices
             .iter()
             .any(|d| d.channel_to_player.iter().any(|p| *p != 0));
@@ -272,7 +278,8 @@ impl Session {
             singer_part,
             part_names,
             next_line: vec![0; players],
-            scored_through: f64::NEG_INFINITY,
+            scored: Progress::new(players),
+            delays: delays.iter().map(|ms| ms / 1000.0).collect(),
             last_frame: Instant::now(),
             last_analysis: Instant::now(),
             sung: vec![Vec::new(); players],
@@ -389,12 +396,14 @@ impl Session {
             }
         }
 
-        let beats = self.clock.beats();
         if self.clock.is_paused() {
             // A paused clock must not keep scoring silence.
-            self.scored_through = beats.detection;
+            for player in 0..self.scorers.len() {
+                let beat = self.clock.detection_beat(self.delays[player]);
+                self.scored.hold(player, beat);
+            }
         } else {
-            self.score_elapsed(beats.detection);
+            self.score_elapsed();
         }
 
         // Deaf cuts the backing track in and out. Muting rather than pausing on purpose: the
@@ -422,13 +431,11 @@ impl Session {
         Ok(())
     }
 
-    /// Score every whole detection beat that has passed, for every singer.
-    fn score_elapsed(&mut self, detection_beat: f64) {
-        if self.scored_through.is_infinite() {
-            self.scored_through = detection_beat - 1.0;
-        }
-        for beat in MasterClock::beats_crossed(self.scored_through, detection_beat) {
-            for player in 0..self.scorers.len() {
+    /// Score every whole detection beat that has passed, each singer on their own clock.
+    fn score_elapsed(&mut self) {
+        for player in 0..self.scorers.len() {
+            let detection_beat = self.clock.detection_beat(self.delays[player]);
+            for beat in self.scored.crossed(player, detection_beat) {
                 let sung = self.pitches[player].filter(|_| self.levels[player] >= self.gate);
                 let result = self.scorers[player].sing_beat(beat, sung);
                 if let Some(target) = result.target {
@@ -453,16 +460,22 @@ impl Session {
                 }
             }
         }
-        self.scored_through = detection_beat;
-        self.watch_lines(detection_beat);
+        // The challenge rules and the on-screen history are about the song rather than about
+        // one singer, and there is no longer a clock they all share — so they run on the first
+        // singer's, the same singer whose lines already drive the rules.
+        let shared = self.delays.first().map_or_else(
+            || self.clock.beats().detection,
+            |delay| self.clock.detection_beat(*delay),
+        );
+        self.watch_lines(shared);
 
         // Forget what is behind the line being sung, so a long song does not grow without
         // bound, but never anything still on screen.
         let cutoff = self
-            .line_at(0, detection_beat)
+            .line_at(0, shared)
             .and_then(|index| self.parts[0].get(index))
             .map(|line| line.start() as f64 - SUNG_KEEP_BEFORE_LINE)
-            .unwrap_or(detection_beat - 64.0);
+            .unwrap_or(shared - 64.0);
         for history in &mut self.sung {
             history.retain(|s| s.start + s.duration >= cutoff);
         }
@@ -753,6 +766,86 @@ pub fn apply_saved(devices: &mut [DeviceConfig], saved: &[rungstar_ui::settings:
     }
 }
 
+/// How far each singer has been scored, in their own detection beats.
+///
+/// One mark per singer rather than one for everybody. Once singers are on their own clocks the
+/// shared mark belongs to whoever is furthest ahead, and everybody behind them has their beats
+/// marked done without ever being scored — which on screen is a microphone that appears not to
+/// work, not a bookkeeping fault anybody would think to look for.
+#[derive(Debug)]
+struct Progress {
+    through: Vec<f64>,
+}
+
+impl Progress {
+    fn new(players: usize) -> Self {
+        Self {
+            through: vec![f64::NEG_INFINITY; players],
+        }
+    }
+
+    /// The whole beats this singer has crossed since they were last asked.
+    fn crossed(&mut self, player: usize, beat: f64) -> std::ops::RangeInclusive<i32> {
+        let Some(through) = self.through.get_mut(player) else {
+            // No such singer, so nothing to score. Asked of the same function rather than
+            // written out, so "empty" cannot come to mean something different here.
+            return MasterClock::beats_crossed(beat, beat);
+        };
+        if through.is_infinite() {
+            *through = beat - 1.0;
+        }
+        let crossed = MasterClock::beats_crossed(*through, beat);
+        *through = beat;
+        crossed
+    }
+
+    /// Move a singer's mark without scoring what it passed, for a clock that is paused.
+    fn hold(&mut self, player: usize, beat: f64) {
+        if let Some(through) = self.through.get_mut(player) {
+            *through = beat;
+        }
+    }
+}
+
+/// The scoring delay for each singer, in milliseconds.
+///
+/// A singer is scored against their own microphone rather than against the game's. The delay
+/// shifts the whole scoring clock, so applying one figure to two people puts every hit of at
+/// least one of them in the wrong place — and a Bluetooth headset sits a third of a second
+/// behind a USB microphone, which is two whole beats at an ordinary tempo.
+///
+/// A device nobody has measured falls back to the shared value. That is a guess, but it is
+/// the best one available, and it is never another microphone's answer: being wrong by an
+/// unknown amount beats being wrong by a known one somebody else's hardware supplied.
+pub fn player_delays(
+    devices: &[DeviceConfig],
+    measured: &[rungstar_ui::settings::MicDelay],
+    default_ms: f64,
+    players: usize,
+) -> Vec<f64> {
+    let mut delays = vec![default_ms; players];
+    for device in devices {
+        let Some(found) = measured
+            .iter()
+            .find(|d| d.name == device.name && d.occurrence == device.occurrence)
+        else {
+            continue;
+        };
+        // Every channel of a device shares its delay: the lag is the box and the link, not
+        // which side of a stereo pair a voice arrived on.
+        for player in &device.channel_to_player {
+            // Zero is "channel off", so singers are one-based here.
+            if let Some(slot) = player
+                .checked_sub(1)
+                .and_then(|p| delays.get_mut(p as usize))
+            {
+                *slot = f64::from(found.millis);
+            }
+        }
+    }
+    delays
+}
+
 /// Choose which channel each singer sings into.
 ///
 /// One singer per *device* first, and only then a second channel of a device that has one.
@@ -955,7 +1048,14 @@ impl Monitor {
     }
 
     /// What the screen should show.
-    pub fn devices(&self) -> Vec<rungstar_ui::micscreen::Device> {
+    ///
+    /// `measured` is what the sweep has found for each microphone, so a row can say what it is
+    /// scored at. Left as `None` when this one has never been measured, because the shared
+    /// figure shown in that column would be indistinguishable from an answer.
+    pub fn devices(
+        &self,
+        measured: &[rungstar_ui::settings::MicDelay],
+    ) -> Vec<rungstar_ui::micscreen::Device> {
         self.devices
             .iter()
             .enumerate()
@@ -964,6 +1064,10 @@ impl Monitor {
                 assignment: device.channel_to_player.clone(),
                 levels: self.levels.get(index).cloned().unwrap_or_default(),
                 heard: self.heard.get(index).cloned().unwrap_or_default(),
+                delay_ms: measured
+                    .iter()
+                    .find(|d| d.name == device.name && d.occurrence == device.occurrence)
+                    .map(|d| d.millis),
             })
             .collect()
     }
@@ -1137,5 +1241,79 @@ mod tests {
         assert!(song_over(false, 200.0, end));
         // And the audio running out still ends it, even before `#END`.
         assert!(song_over(true, 10.0, end));
+    }
+
+    fn measured(name: &str, occurrence: u32, millis: u32) -> rungstar_ui::settings::MicDelay {
+        rungstar_ui::settings::MicDelay {
+            name: name.to_owned(),
+            occurrence,
+            millis,
+        }
+    }
+
+    #[test]
+    fn every_singer_scores_every_beat_exactly_once_on_their_own_clock() {
+        // The hazard in giving singers their own delays: one shared "scored up to here" mark
+        // for everybody. Whoever is furthest behind then has their beats marked done by
+        // somebody else's clock and never scores them at all — which reads as a microphone
+        // that is not working rather than as a bookkeeping fault.
+        let mut progress = Progress::new(2);
+        let mut counted = [Vec::new(), Vec::new()];
+
+        // Two clocks a whole beat apart, advanced together as the frame loop would.
+        for step in 1..=8 {
+            let ahead = f64::from(step) * 0.5;
+            let behind = ahead - 1.0;
+            for beat in progress.crossed(0, ahead) {
+                counted[0].push(beat);
+            }
+            for beat in progress.crossed(1, behind) {
+                counted[1].push(beat);
+            }
+        }
+
+        // Clocks exactly a beat apart must produce beat lists exactly a beat apart. Stated
+        // that way it does not depend on where either singer's first beat lands, only on
+        // neither of them losing or repeating one.
+        let shifted: Vec<i32> = counted[1].iter().map(|beat| beat + 1).collect();
+        assert_eq!(
+            counted[0], shifted,
+            "the two singers did not stay a beat apart"
+        );
+        assert!(counted[0].len() >= 4, "hardly anything was scored");
+        for singer in &counted {
+            let mut once = singer.clone();
+            once.dedup();
+            assert_eq!(&once, singer, "a beat was scored twice");
+            assert!(
+                singer.windows(2).all(|w| w[0] < w[1]),
+                "beats went backwards"
+            );
+        }
+    }
+
+    #[test]
+    fn two_singers_on_different_microphones_are_each_scored_at_their_own_delay() {
+        // The delay shifts the whole scoring clock, so a wrong one shifts every hit: sing it
+        // perfectly, score badly, and nothing on screen says why. One figure for the whole
+        // game cannot be right for two singers at once — a Bluetooth headset is hundreds of
+        // milliseconds behind a USB microphone, and whichever number is set, one of them is
+        // being scored against a clock that never matched their voice.
+        let mut headset = mic("Bluetooth Headset", 0);
+        headset.channel_to_player[0] = 1;
+        let mut usb = mic("Logitech USB Mic", 0);
+        usb.channel_to_player[0] = 2;
+
+        // Only the headset has ever been measured. The other singer is not left guessing at
+        // nothing — the shared default is still the best answer available for a device
+        // nobody has run the sweep against.
+        let delays = player_delays(
+            &[headset, usb],
+            &[measured("Bluetooth Headset", 0, 310)],
+            140.0,
+            2,
+        );
+
+        assert_eq!(delays, vec![310.0, 140.0]);
     }
 }

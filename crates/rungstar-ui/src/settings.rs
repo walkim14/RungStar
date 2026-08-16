@@ -353,6 +353,21 @@ pub struct MicAssignment {
     pub channels: Vec<u8>,
 }
 
+/// What one microphone measured at, keyed the way an assignment is.
+///
+/// Kept apart from [`MicAssignment`] rather than added to it, because routing and latency are
+/// different questions about the same box: a microphone nobody is singing into can still have
+/// been measured, and an assignment carrying an all-off channel list would blank the automatic
+/// routing it was meant to sit beside.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicDelay {
+    pub name: String,
+    /// Which device of this name, counting from zero.
+    #[serde(default)]
+    pub occurrence: u32,
+    pub millis: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SoundSettings {
@@ -386,8 +401,15 @@ pub struct SoundSettings {
     pub effects_volume: u8,
     /// Seconds a preview takes to fade in. Zero cuts straight in.
     pub preview_fade: f32,
-    /// Milliseconds the microphone lags the speakers. The scoring clock is shifted by this.
+    /// Milliseconds the microphone lags the speakers, for any microphone that has not been
+    /// measured itself. The scoring clock is shifted by this.
     pub mic_delay_ms: u32,
+    /// What each microphone measured at, one entry per device that has been measured.
+    ///
+    /// A singer's own microphone decides their scoring clock. Two singers can be hundreds of
+    /// milliseconds apart — a USB microphone against a Bluetooth headset — and one number
+    /// applied to both is wrong for at least one of them by the whole difference.
+    pub mic_delays: Vec<MicDelay>,
     /// Milliseconds the audio lags the picture, for a display with its own processing lag.
     pub av_delay_ms: i32,
     /// Which singer each microphone channel feeds. Empty means "work it out".
@@ -398,6 +420,65 @@ pub struct SoundSettings {
     /// so splitting shows two rows for one microphone and invites putting two singers on it.
     /// On for the dual-USB karaoke sets where left and right really are two microphones.
     pub split_channels: Switch,
+}
+
+impl SoundSettings {
+    /// What a named microphone is scored at, in milliseconds.
+    ///
+    /// Its own measurement when it has one, and the shared value otherwise — never another
+    /// microphone's, which would be worse than the guess it replaced.
+    pub fn mic_delay_for(&self, name: &str, occurrence: u32) -> u32 {
+        self.mic_delays
+            .iter()
+            .find(|delay| delay.name == name && delay.occurrence == occurrence)
+            .map_or(self.mic_delay_ms, |delay| delay.millis)
+    }
+
+    /// Take a round of measurements: `(name, occurrence, milliseconds)` per microphone heard.
+    ///
+    /// Each microphone keeps its own answer, and the shared value becomes the median of the
+    /// round — which is now only the fallback for a microphone that was not in it. The median
+    /// rather than any single answer because it is the honest guess for hardware nobody has
+    /// swept: the largest would make a fast microphone late and the smallest would make a slow
+    /// one early.
+    ///
+    /// A round that heard nothing changes nothing. Speakers pointing the wrong way and a dead
+    /// device both come back empty, and overwriting a delay somebody already calibrated with a
+    /// number nothing supports is worse than leaving it where it was.
+    pub fn record_measurements(&mut self, measured: &[(String, u32, f32)]) -> Option<u32> {
+        if measured.is_empty() {
+            return None;
+        }
+        for (name, occurrence, millis) in measured {
+            self.set_mic_delay(name, *occurrence, clamp_delay(*millis));
+        }
+        let mut answers: Vec<f32> = measured.iter().map(|(_, _, millis)| *millis).collect();
+        answers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = clamp_delay(answers[answers.len() / 2]);
+        self.mic_delay_ms = median;
+        Some(median)
+    }
+
+    /// Record what a microphone measured at, replacing any earlier answer for it.
+    pub fn set_mic_delay(&mut self, name: &str, occurrence: u32, millis: u32) {
+        match self
+            .mic_delays
+            .iter_mut()
+            .find(|delay| delay.name == name && delay.occurrence == occurrence)
+        {
+            Some(existing) => existing.millis = millis,
+            None => self.mic_delays.push(MicDelay {
+                name: name.to_owned(),
+                occurrence,
+                millis,
+            }),
+        }
+    }
+}
+
+/// A measured delay as a setting: whole milliseconds, and inside what a room can produce.
+fn clamp_delay(millis: f32) -> u32 {
+    millis.round().clamp(0.0, 500.0) as u32
 }
 
 impl Default for SoundSettings {
@@ -418,6 +499,7 @@ impl Default for SoundSettings {
             // UltraStar's own default, and close to what a USB microphone plus a desktop
             // audio stack actually costs.
             mic_delay_ms: 140,
+            mic_delays: Vec::new(),
             av_delay_ms: 0,
             microphones: Vec::new(),
             split_channels: Switch::Off,
@@ -582,6 +664,9 @@ impl Settings {
         self.sound.preview_volume = self.sound.preview_volume.min(100);
         self.sound.preview_fade = self.sound.preview_fade.clamp(0.0, 5.0);
         self.sound.mic_delay_ms = self.sound.mic_delay_ms.min(1000);
+        for delay in &mut self.sound.mic_delays {
+            delay.millis = delay.millis.min(1000);
+        }
         self.sound.av_delay_ms = self.sound.av_delay_ms.clamp(-1000, 1000);
         self.appearance.text_scale = self.appearance.text_scale.clamp(0.7, 1.6);
         if self.game.language.is_empty() {

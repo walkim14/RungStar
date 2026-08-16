@@ -27,6 +27,21 @@ pub struct MainMenu {
     entries: Vec<Entry>,
     /// Clickable rows from the last frame, so hit testing cannot drift from the picture.
     regions: Vec<Rect>,
+    /// Whether the "really quit?" question is up.
+    ///
+    /// Backing out of a screen and pressing the same key once more used to land on this menu
+    /// and end the game — two presses of one key, the second aimed at a screen that had
+    /// already closed. The menu has always claimed the application confirmed this; it did not.
+    quitting: bool,
+    /// Which button of the question is chosen.
+    ///
+    /// Starts on whichever answer the request most likely meant: Cancel when Esc got here,
+    /// because that press was probably aimed at a screen that had already closed, and Quit
+    /// when the Quit entry did, because somebody who steered to it and pressed Enter should
+    /// not have to also steer inside the question.
+    quit_accept: bool,
+    /// The question's buttons from the last frame.
+    quit_regions: Vec<(Rect, bool)>,
     /// Label the hints for a gamepad rather than a keyboard.
     pub gamepad: bool,
 }
@@ -99,6 +114,9 @@ impl MainMenu {
             cursor: Cursor::new(entries.len()),
             entries,
             regions: Vec::new(),
+            quitting: false,
+            quit_accept: false,
+            quit_regions: Vec::new(),
             gamepad: false,
         }
     }
@@ -107,7 +125,93 @@ impl MainMenu {
         self.cursor.index()
     }
 
+    /// Whether the "really quit?" question is on screen, which changes what every key means.
+    pub fn confirming(&self) -> bool {
+        self.quitting
+    }
+
+    /// Where a button of the quit question was drawn, for a pointer and for tests.
+    pub fn quit_button(&self, accept: bool) -> Option<Rect> {
+        self.quit_regions
+            .iter()
+            .find(|(_, is_accept)| *is_accept == accept)
+            .map(|(rect, _)| *rect)
+    }
+
+    /// Whether the entry at `index` is the one that leaves the game.
+    pub fn entry_quits(&self, index: usize) -> bool {
+        self.entries.get(index).is_some_and(|entry| entry.quit)
+    }
+
+    /// Ask before leaving, wherever the request came from.
+    ///
+    /// Both ways out ask: a stray Enter in a room of six people is the same accident as a
+    /// stray Esc, and one rule for both is easier to rely on than two. The question costs one
+    /// keypress; the accident costs the evening. What differs is only which answer starts
+    /// chosen, and `deliberate` is what says which press this was.
+    fn ask_to_quit(&mut self, deliberate: bool) -> Transition {
+        self.quitting = true;
+        self.quit_accept = deliberate;
+        Transition::None
+    }
+
+    fn handle_quit_question(&mut self, input: Input) -> Transition {
+        match input {
+            // Esc again is what somebody who did not mean it will press, so it cancels. The
+            // accidental second press must not do what the first one nearly did.
+            Input::Back => {
+                self.quitting = false;
+                Transition::None
+            }
+            Input::Left | Input::Right | Input::Up | Input::Down => {
+                self.quit_accept = !self.quit_accept;
+                Transition::None
+            }
+            Input::Confirm | Input::Submit => {
+                self.quitting = false;
+                if self.quit_accept {
+                    Transition::Quit
+                } else {
+                    Transition::None
+                }
+            }
+            Input::Click(point) => {
+                let hit = self
+                    .quit_regions
+                    .iter()
+                    .find(|(rect, _)| rect.contains(point))
+                    .map(|(_, accept)| *accept);
+                match hit {
+                    Some(accept) => {
+                        self.quitting = false;
+                        if accept {
+                            Transition::Quit
+                        } else {
+                            Transition::None
+                        }
+                    }
+                    // Clicking away dismisses it, as it does everywhere else.
+                    None => {
+                        self.quitting = false;
+                        Transition::None
+                    }
+                }
+            }
+            Input::Hover(point) => {
+                if let Some((_, accept)) = self.quit_regions.iter().find(|(r, _)| r.contains(point))
+                {
+                    self.quit_accept = *accept;
+                }
+                Transition::None
+            }
+            _ => Transition::None,
+        }
+    }
+
     pub fn handle(&mut self, input: Input) -> Transition {
+        if self.quitting {
+            return self.handle_quit_question(input);
+        }
         if let Input::Hover(point) | Input::Click(point) = input {
             if let Some(index) = self.regions.iter().position(|r| r.contains(point)) {
                 self.cursor.set(index);
@@ -123,15 +227,15 @@ impl MainMenu {
             Input::Confirm => {
                 let entry = &self.entries[self.cursor.index()];
                 if entry.quit {
-                    return Transition::Quit;
+                    return self.ask_to_quit(true);
                 }
                 if let Some(route) = &entry.route {
                     return Transition::Push(route.clone());
                 }
             }
-            // Back on the first screen is a quit request, but the application confirms it
-            // rather than acting on it — an accidental B press should not end the party.
-            Input::Back => return Transition::Quit,
+            // Back on the first screen is a quit request, and it is asked about rather than
+            // acted on — an accidental press should not end the party.
+            Input::Back => return self.ask_to_quit(false),
             _ => {}
         }
         Transition::None
@@ -139,11 +243,17 @@ impl MainMenu {
 
     pub fn draw(&mut self, list: &mut DrawList, area: Rect, style: &Style, subtitle: &str) {
         self.regions.clear();
+        self.quit_regions.clear();
         let widgets = Widgets::new(style);
-        let hints: &[(&str, &str)] = if self.gamepad {
-            &[("A", "Choose"), ("B", "Quit")]
-        } else {
-            &[("Enter", "Choose"), ("Esc", "Quit")]
+        let hints: &[(&str, &str)] = match (self.quitting, self.gamepad) {
+            (true, true) => &[("LS", "Choose"), ("A", "Confirm"), ("B", "Cancel")],
+            (true, false) => &[
+                ("\u{2190}\u{2192}", "Choose"),
+                ("Enter", "Confirm"),
+                ("Esc", "Cancel"),
+            ],
+            (false, true) => &[("A", "Choose"), ("B", "Quit")],
+            (false, false) => &[("Enter", "Choose"), ("Esc", "Quit")],
         };
         let body = widgets.footer(list, area, hints);
 
@@ -214,6 +324,81 @@ impl MainMenu {
                 TextStyle::new(detail_size, palette.muted)
                     .valign(VAlign::Top)
                     .overflow(Overflow::Ellipsis),
+            );
+        }
+
+        if self.quitting {
+            self.draw_quit_question(list, area, style);
+        }
+    }
+
+    /// The "really quit?" question, over a scrimmed menu.
+    ///
+    /// Over rather than instead of: nothing behind it can be operated -- every input goes to
+    /// the question while it is up -- so the menu underneath is context rather than a lie, and
+    /// a screen that blanks to ask one question reads as having navigated somewhere.
+    fn draw_quit_question(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
+        let widgets = Widgets::new(style);
+        widgets.scrim(list, area);
+        let card = area.anchored(
+            Anchor::Center,
+            (area.w * 0.5).min(720.0),
+            style.gap(18.0),
+            0.0,
+        );
+        widgets.card(list, card);
+        let inner = card.inset(style.gap(2.5));
+
+        let (heading, rest) = inner.cut_top(style.gap(4.0));
+        list.text(
+            heading,
+            "Quit RungStar?",
+            TextStyle::new(style.scaled_text(1.2), style.text)
+                .bold()
+                .centered(),
+        );
+        // `cut_bottom` returns the strip first and what is left second, so the buttons are
+        // the strip and the sentence sits above them.
+        let (buttons, body) = rest.cut_bottom(style.gap(5.0));
+        list.text(
+            body,
+            "Anything half-sung is not recorded.",
+            TextStyle::new(style.text_size(), style.muted).centered(),
+        );
+
+        // Cancel on the left, the one that ends things on the right, the order every other
+        // dialog here and on both target platforms uses.
+        let gap = style.gap(1.5);
+        let width = (buttons.w - gap) / 2.0;
+        for (index, (label, accept)) in [("Cancel", false), ("Quit", true)].iter().enumerate() {
+            let rect = Rect::new(
+                buttons.x + (width + gap) * index as f32,
+                buttons.y + gap,
+                width,
+                buttons.h - gap * 2.0,
+            );
+            self.quit_regions.push((rect, *accept));
+            let selected = self.quit_accept == *accept;
+            let fill = match (selected, accept) {
+                (true, true) => style.danger,
+                (true, false) => style.accent,
+                (false, _) => style.surface,
+            };
+            list.panel(rect, fill, style.metrics.radius);
+            list.text(
+                rect,
+                *label,
+                TextStyle::new(
+                    style.text_size(),
+                    if selected {
+                        style.on_accent
+                    } else {
+                        style.text
+                    },
+                )
+                .centered()
+                .valign(VAlign::Middle)
+                .bold(),
             );
         }
     }
@@ -318,6 +503,11 @@ impl OptionsScreen {
         }
     }
 
+    /// Which item row of the current page the cursor is on.
+    pub fn item_cursor(&self) -> usize {
+        self.item_cursor.index()
+    }
+
     /// Whether a confirmation is on screen, which changes what every key means.
     pub fn confirming(&self) -> bool {
         self.pending.is_some()
@@ -338,10 +528,13 @@ impl OptionsScreen {
                 return OptionsOutcome::None;
             }
             if let Some((_, index)) = self.item_regions.iter().find(|(r, _)| r.contains(point)) {
-                let index = *index;
-                self.item_cursor.set(index);
-                self.on_page_list = false;
+                // Only a click moves the cursor. The list scrolls to keep the cursor on
+                // screen, so moving it on hover slides the list under the pointer, which puts
+                // a different row where the pointer is, which moves the cursor again —
+                // sweeping the mouse down the page makes it bolt. The wheel is what scrolls.
                 if clicked {
+                    self.item_cursor.set(*index);
+                    self.on_page_list = false;
                     return self.handle(Input::Confirm, settings);
                 }
             }

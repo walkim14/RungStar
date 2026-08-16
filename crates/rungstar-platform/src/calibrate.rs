@@ -43,6 +43,9 @@ const SETTLE: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub name: String,
+    /// Which device of this name, so a pair of identical microphones keep separate answers
+    /// rather than the second one overwriting the first.
+    pub occurrence: u32,
     /// The delay in milliseconds, or why there is not one.
     pub settled: Result<f32, String>,
     /// Every pass, kept whether or not they added up to an answer: "it did not work" and "it
@@ -237,6 +240,7 @@ impl Calibrator {
         if let Err(error) = capture.start(std::slice::from_ref(&listening), RATE) {
             self.done.push(Outcome {
                 name: device.name.clone(),
+                occurrence: device.occurrence,
                 settled: Err(format!("would not open: {error}")),
                 passes: Vec::new(),
             });
@@ -262,6 +266,7 @@ impl Calibrator {
             running.capture.stop();
             self.done.push(Outcome {
                 name: running.device.name.clone(),
+                occurrence: running.device.occurrence,
                 settled,
                 passes: running.heard,
             });

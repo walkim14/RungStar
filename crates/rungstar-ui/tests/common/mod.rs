@@ -168,6 +168,7 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
         });
         screen.reports = vec![Report {
             name: "USB Microphone".to_owned(),
+            occurrence: 0,
             delay: Ok(96.0),
             passes: vec![heard(95.0), heard(96.0), heard(97.0)],
         }];
@@ -181,6 +182,7 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
         screen.applied = Some(96);
         screen.reports.push(Report {
             name: "Headset Microphone (a very long device name indeed)".to_owned(),
+            occurrence: 0,
             delay: Err("the microphone did not hear the sound".to_owned()),
             passes: vec![Pass {
                 millis: 210.0,
@@ -191,6 +193,7 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
         });
         screen.reports.push(Report {
             name: "Silent Device".to_owned(),
+            occurrence: 0,
             delay: Err("the microphone recorded silence".to_owned()),
             passes: vec![Pass {
                 millis: 0.0,
@@ -234,6 +237,7 @@ pub fn every_screen(area: Rect, style: &Style) -> Vec<(String, DrawList)> {
             assignment: vec![1, 2],
             levels: vec![0.4, 0.1],
             heard: vec![true, false],
+            delay_ms: None,
         };
         4
     ];

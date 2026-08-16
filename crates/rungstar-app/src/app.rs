@@ -1361,7 +1361,7 @@ impl App {
                     MicOutcome::Changed => monitor.reassign(&screen.devices),
                     MicOutcome::Refresh => {
                         monitor.rescan();
-                        screen.devices = monitor.devices();
+                        screen.devices = monitor.devices(&self.settings.sound.mic_delays);
                     }
                     MicOutcome::None => {}
                 }
@@ -1601,6 +1601,7 @@ impl App {
             .iter()
             .map(|outcome| Report {
                 name: outcome.name.clone(),
+                occurrence: outcome.occurrence,
                 delay: outcome.settled.clone(),
                 passes: outcome
                     .passes
@@ -1623,20 +1624,19 @@ impl App {
             return;
         }
 
-        // Finished. One value covers every microphone, so the median of the ones that answered
-        // is the honest choice — the largest would make a fast microphone late, and the
-        // smallest would make a slow one early.
+        // Finished. Every microphone keeps its own answer — they were all measured separately
+        // and throwing all but one away was only ever forced by there being one place to put
+        // it. The shared value stays behind as the fallback for hardware that was not in the
+        // round, and becomes the median of the round rather than the factory guess.
         self.calibrator = None;
-        let mut answers: Vec<f32> = reports
+        let measured: Vec<(String, u32, f32)> = reports
             .iter()
-            .filter_map(|r| r.delay.as_ref().ok().copied())
+            .filter_map(|report| {
+                let millis = *report.delay.as_ref().ok()?;
+                Some((report.name.clone(), report.occurrence, millis))
+            })
             .collect();
-        answers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let applied = answers.get(answers.len() / 2).map(|millis| {
-            let millis = millis.round().clamp(0.0, 500.0) as u32;
-            self.settings.sound.mic_delay_ms = millis;
-            millis
-        });
+        let applied = self.settings.sound.record_measurements(&measured);
         if applied.is_some() {
             self.save_settings();
         }
@@ -2448,6 +2448,7 @@ impl App {
             self.settings.threshold(),
             self.settings.sound.mic_delay_ms as f64,
             &self.settings.sound.microphones,
+            &self.settings.sound.mic_delays,
             video.as_deref(),
             capture,
             &self.next_plan,
@@ -3119,7 +3120,7 @@ fn main() -> Result<()> {
             let mut screen = MicScreen::new();
             screen.split_channels = app.settings.sound.split_channels == Switch::On;
             screen.gate = app.settings.threshold();
-            screen.devices = monitor.devices();
+            screen.devices = monitor.devices(&app.settings.sound.mic_delays);
             monitor.tick();
             app.stack
                 .push(Screen::Mics(Box::new(screen), Box::new(monitor)));
@@ -3194,7 +3195,7 @@ fn main() -> Result<()> {
             }
             Some(Screen::Mics(screen, monitor)) => {
                 monitor.tick();
-                screen.devices = monitor.devices();
+                screen.devices = monitor.devices(&app.settings.sound.mic_delays);
             }
             Some(Screen::Sing(screen, session)) => {
                 // The video frame for this moment, uploaded into one texture that is reused
@@ -3767,6 +3768,7 @@ fn self_check(
             assignment: vec![1, 2],
             levels: vec![0.3, 0.0],
             heard: vec![true, false],
+            delay_ms: None,
         }];
         list.clear();
         screen.draw(list, area, &app.style);

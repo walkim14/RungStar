@@ -159,3 +159,25 @@ fn crossed_beats_are_empty_when_time_stands_still() {
         vec![5]
     );
 }
+
+#[test]
+fn a_detection_beat_can_be_asked_for_at_any_microphone_delay() {
+    // One delay for the whole game cannot serve a USB microphone and a Bluetooth headset at
+    // the same time: they are hundreds of milliseconds apart, and that difference is every
+    // hit either singer makes. So the clock answers for a delay rather than holding one.
+    let mut clock = clock(60.0, 0.0);
+    clock.seek(1.0);
+
+    // The grid runs at four beats a second here, so 140 ms is 0.56 of a beat.
+    let immediate = clock.detection_beat(0.0);
+    let lagging = clock.detection_beat(0.14);
+    assert!(
+        (immediate - lagging - 0.56).abs() < 1e-9,
+        "{immediate} against {lagging}"
+    );
+
+    // And the stream the clock has always reported is that same function asked at the shared
+    // delay, so there are not two answers to one question.
+    let shared = clock.timing().mic_delay;
+    assert!((clock.detection_beat(shared) - clock.beats().detection).abs() < 1e-9);
+}

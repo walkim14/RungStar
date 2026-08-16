@@ -31,6 +31,8 @@ pub struct Pass {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub name: String,
+    /// Which device of this name. Two identical microphones are two microphones.
+    pub occurrence: u32,
     /// The delay in milliseconds, or why there is not one.
     pub delay: Result<f32, String>,
     pub passes: Vec<Pass>,
@@ -215,10 +217,18 @@ impl CalibrateScreen {
     fn draw_results(&mut self, list: &mut DrawList, area: Rect, style: &Style) {
         let small = style.scaled_text(0.8);
         let (summary, rest) = area.cut_top(style.row_height(&[small]) * 2.0);
+        // Each microphone below carries its own figure, so what the summary is for is the
+        // one number not shown beside a device: the fallback anything unmeasured runs at.
+        let measured = self
+            .reports
+            .iter()
+            .filter(|report| report.delay.is_ok())
+            .count();
         let said = match self.applied {
-            Some(millis) => {
-                format!("Microphone delay set to {millis} ms. One value covers every microphone.")
-            }
+            Some(millis) if measured > 1 => format!(
+                "Each microphone keeps its own delay. {millis} ms covers anything not measured."
+            ),
+            Some(millis) => format!("Microphone delay set to {millis} ms, and kept as its own."),
             None => "Nothing was measured, so the delay is unchanged.".to_owned(),
         };
         list.text(

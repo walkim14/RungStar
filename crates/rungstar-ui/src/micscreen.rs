@@ -34,6 +34,11 @@ pub struct Device {
     pub levels: Vec<f32>,
     /// Whether a sample has ever arrived on each channel.
     pub heard: Vec<bool>,
+    /// What this microphone is scored at, when it has been measured itself.
+    ///
+    /// `None` means it runs on the shared value, and the row says so rather than printing
+    /// that figure: a guess shown the same way as an answer cannot be told from one.
+    pub delay_ms: Option<u32>,
 }
 
 impl Device {
@@ -494,6 +499,12 @@ impl MicScreen {
             style.warning,
         );
 
+        // The delay sits on the note line beside the meter, which is where somebody already
+        // looks to find out whether this microphone is working.
+        let delay = match device.delay_ms {
+            Some(millis) => format!("{millis} ms"),
+            None => "not measured".to_owned(),
+        };
         let (note, tint) = if !heard {
             // Distinguishes a device that has never produced a sample — unplugged, or an
             // input the machine lists but nothing is connected to — from one that is simply
@@ -508,7 +519,7 @@ impl MicScreen {
         };
         list.text(
             label,
-            note,
+            format!("{note}  ·  {delay}"),
             TextStyle::new(note_size, tint)
                 .align(Align::End)
                 .valign(VAlign::Top),

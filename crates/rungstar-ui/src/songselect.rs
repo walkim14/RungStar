@@ -666,6 +666,26 @@ impl SongSelect {
         self.stale = true;
     }
 
+    /// Which value row of the current category the cursor is on.
+    pub fn value_cursor(&self) -> usize {
+        self.value_cursor
+    }
+
+    /// Where a filter panel row was drawn, for a pointer and for tests.
+    ///
+    /// Taken from the regions recorded while drawing rather than recomputed, so it cannot
+    /// disagree with the picture — which is the whole reason the regions exist.
+    pub fn filter_row(&self, category: bool, index: usize) -> Option<Rect> {
+        self.regions
+            .iter()
+            .find(|(_, region)| match region {
+                Region::Category(at) => category && *at == index,
+                Region::Value(at) => !category && *at == index,
+                _ => false,
+            })
+            .map(|(rect, _)| *rect)
+    }
+
     /// The filter category under the cursor, for tests and for the panel.
     pub fn facet_title(&self) -> &'static str {
         self.facet().title()
@@ -780,14 +800,24 @@ impl SongSelect {
     fn handle_pointer(&mut self, point: Point, clicked: bool) -> Transition {
         let region = self.region_at(point);
 
-        // An overlay is modal. While the keyboard, the sort picker or the song menu is up,
-        // the list behind it is not clickable — otherwise a click aimed just past the dialog
-        // selects a song, or starts one, which is the last thing a search box should do.
-        // Clicking away closes the overlay, as it does everywhere else.
+        // An overlay is modal. While one is up the list behind it is not clickable —
+        // otherwise a click aimed just past the dialog selects a song, or starts one, which
+        // is the last thing a search box should do. Clicking away closes the overlay, as it
+        // does everywhere else.
+        //
+        // Every region an overlay owns has to be listed here, or that overlay is unreachable
+        // with a pointer: whatever is missing gets treated as a click outside itself and shuts
+        // the panel it was aimed at. The filter panel and the challenge picker were both
+        // missing, which made them keyboard-only with nothing to say so.
         if self.mode != Mode::Browsing {
             let on_overlay = matches!(
                 region,
-                Some(Region::Key(_)) | Some(Region::Sort(_)) | Some(Region::Menu(_))
+                Some(Region::Key(_))
+                    | Some(Region::Sort(_))
+                    | Some(Region::Menu(_))
+                    | Some(Region::Category(_))
+                    | Some(Region::Value(_))
+                    | Some(Region::Challenge(_))
             );
             if !on_overlay {
                 if clicked {
@@ -835,23 +865,31 @@ impl SongSelect {
                     return self.handle_menu(Input::Confirm);
                 }
             }
+            // The picker scrolls to keep its cursor on screen, so the same rule: pointing at a
+            // challenge does not choose it, clicking does.
             Some(Region::Challenge(index)) => {
-                self.challenge = index.min(Challenge::ALL.len() - 1);
                 if clicked {
+                    self.challenge = index.min(Challenge::ALL.len() - 1);
                     self.mode = Mode::Browsing;
                 }
             }
+            // Neither column moves on hover, for the reason the song list does not: the value
+            // column scrolls to keep its cursor on screen, so hovering slides it under the
+            // pointer, and the category column decides what the value column *contains* — a
+            // sweep across it on the way to a value empties the list being reached for.
             Some(Region::Category(index)) => {
-                if index != self.facet_cursor {
-                    self.facet_cursor = index;
-                    self.value_cursor = 0;
+                if clicked {
+                    if index != self.facet_cursor {
+                        self.facet_cursor = index;
+                        self.value_cursor = 0;
+                    }
+                    self.on_values = true;
                 }
-                self.on_values = clicked;
             }
             Some(Region::Value(index)) => {
-                self.value_cursor = index;
-                self.on_values = true;
                 if clicked {
+                    self.value_cursor = index;
+                    self.on_values = true;
                     let facet = self.facet();
                     self.toggle_value(facet, index);
                 }
