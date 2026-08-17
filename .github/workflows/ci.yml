@@ -24,15 +24,51 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      # FFmpeg / ALSA / udev development headers, plus D-Bus for the Linux keyring backend.
-      # SDL3 itself is provided by the Rust crate, so no system SDL3 package is required here.
+      # Ubuntu has no libsdl3-dev before 25.04, so the sdl3 crate builds SDL from source
+      # here (see rungstar-platform's Cargo.toml). That means this runner needs SDL's *own*
+      # build dependencies and not just the game's: SDL's CMake refuses to configure at all
+      # when it can find neither X11 nor Wayland, which is what failed every Linux run.
+      #
+      # The X11 list is not padding. Once SDL_X11 is on, each of those extensions is required
+      # rather than optional -- installing libx11-dev alone gets as far as "Couldn't find
+      # dependency package for XTEST" and stops. Wayland and libdecor are here because SteamOS
+      # is the other target, GL because the renderer wants it, and PulseAudio because without
+      # it a desktop build falls back to bare ALSA.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libudev-dev libdbus-1-dev libavcodec-dev libavformat-dev \
-            libavutil-dev libswscale-dev libswresample-dev pkg-config cmake
+            libavutil-dev libswscale-dev libswresample-dev pkg-config cmake \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libpulse-dev
+
+      # `.cargo/config.toml` points FFMPEG_DIR at `vendor/ffmpeg`, which is the *Windows*
+      # build. Its `lib/` holds `.lib` import libraries a Linux linker cannot use, so the link
+      # falls through to the system `libavcodec.so` -- while bindgen has already read the
+      # vendored headers. That builds, and it pairs bindings for libavcodec 61 with a library
+      # that is 60: a green pipeline over a build that is wrong the moment a video plays.
+      #
+      # The entry is `force = false`, so an environment variable wins. Pointing it at the
+      # system's own headers and libraries makes the two agree. Explicit rather than the
+      # empty string the Flatpak manifest uses, which only works because that SDK happens to
+      # keep its headers where the compiler already looks.
+      - name: Match FFmpeg headers to the system library
+        if: runner.os == 'Linux'
+        run: |
+          arch=$(gcc -dumpmachine)
+          include=/usr/include/$arch
+          [ -d "$include/libavcodec" ] || include=/usr/include
+          lib=/usr/lib/$arch
+          [ -d "$lib" ] || lib=/usr/lib
+          prefix="$HOME/ffmpeg-prefix"
+          mkdir -p "$prefix"
+          ln -sfn "$include" "$prefix/include"
+          ln -sfn "$lib" "$prefix/lib"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
 
       - name: Format
         run: cargo fmt --all --check

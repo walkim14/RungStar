@@ -179,12 +179,34 @@ it. Generating its bindings needs **libclang** (`winget install LLVM.LLVM`). Onl
 libraries the game links are vendored; `avfilter` and `avdevice` are not, which is why the
 crate turns those features off.
 
+**That variable has no platform in it, and the tree it points at does.** `ffmpeg-sys` takes
+`FFMPEG_DIR` over pkg-config unconditionally, so on Linux it reads the *Windows* vendor tree:
+bindgen gets headers for libavcodec 61 while `vendor/ffmpeg/lib` holds `.lib` import libraries
+no Linux linker can use, and the link quietly falls through to the system `libavcodec.so`,
+which on Ubuntu 24.04 is 60. It compiles, it links, the tests pass — and the bindings describe a
+different library from the one loaded, which surfaces the first time a video plays rather than
+anywhere near the build. Nothing in the build says so.
+
+The entry is `force = false`, so an environment variable wins, and every Linux build sets one:
+the workflows point it at the system's own include and lib directories, and the Flatpak manifest
+empties it. A single `[env]` key cannot be made conditional on the target, which is the whole
+reason this has to be handled once per Linux build rather than once in the repository.
+
 SDL3 3.4.14 is vendored at `vendor/sdl3/` as the official prebuilt Windows x64 binaries.
 Building it from source needs a CMake toolchain that can find a C compiler, and the Visual
 Studio generator fails to do so with only the Build Tools installed — a very common setup.
 `crates/rungstar-platform/build.rs` points the linker at the vendored copy and puts `SDL3.dll`
-next to the built executable. On Linux SDL3 comes from the system package; nothing is
-vendored.
+next to the built executable.
+
+**On Linux SDL is built from source**, not taken from a system package: there is no
+`libsdl3-dev` in Ubuntu before 25.04, and 24.04 is what the runners and most Decks' developer
+setups have. That is a Cargo feature (`build-from-source`) rather than a vendored tree, so
+nothing extra is committed — but it moves SDL's own build dependencies onto anything that
+compiles this, CI included. SDL's CMake **refuses to configure at all** when it can find
+neither X11 nor Wayland, which is the error rather than a missing feature, and each X11
+extension is then required rather than optional: `libx11-dev` alone stops at "Couldn't find
+dependency package for XTEST". The full list is in `.github/workflows/ci.yml`, verified by
+configuring SDL 3.4.14 against it on a clean Ubuntu 24.04.
 
 The diagnostics tool draws with SDL's own renderer and built-in debug font, not wgpu. It is a
 tool rather than a screen, and it should keep working while the renderer is rewritten around
