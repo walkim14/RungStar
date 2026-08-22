@@ -619,10 +619,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.playback.as_ref())
             .is_some();
-        // The editor is silent until somebody presses play, but it is a working screen and
-        // music over a piano roll is a distraction rather than atmosphere.
-        let editing = matches!(self.stack.last(), Some(Screen::Editing(_)));
-        !previewing && !editing
+        !previewing && music_suits(self.stack.last())
     }
 
     /// Write out anything the loudness workers finished, and keep it.
@@ -1157,6 +1154,18 @@ impl App {
                 if instrumental {
                     results.retain(|song| self.instrumentals.has(&song.path));
                 }
+                // Only when there is nothing to show, which is the only case it changes what
+                // the screen says. A drive that is not plugged in makes every song unplayable
+                // at once, and "no songs" then sends somebody to add a folder they have.
+                songs.unplayable = if results.is_empty() {
+                    let missing = rungstar_library::Filters {
+                        playable: Some(false),
+                        ..Default::default()
+                    };
+                    self.library.count_matching(&missing).unwrap_or(0) as usize
+                } else {
+                    0
+                };
                 songs.set_results(results);
             }
             Err(error) => {
@@ -2240,7 +2249,14 @@ impl App {
     /// the jokers are for, and a "random" that only ever offers the same fifty songs is not
     /// a party.
     fn random_song(&mut self) -> Option<i64> {
-        let count = self.library.count().unwrap_or(0);
+        // The same set the browser shows: a round handed a song with no audio file is a round
+        // that stops dead when somebody presses A on it. Counted through the same filter it is
+        // offset into, or the offset runs off the end of a shorter list and returns nothing.
+        let playable = rungstar_library::Filters {
+            playable: Some(true),
+            ..Default::default()
+        };
+        let count = self.library.count_matching(&playable).unwrap_or(0);
         if count == 0 {
             return None;
         }
@@ -2252,7 +2268,7 @@ impl App {
         seed = (seed ^ (seed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         let offset = ((seed ^ (seed >> 31)) % count.max(1) as u64) as usize;
 
-        let mut query = SearchQuery::all().limit(1);
+        let mut query = SearchQuery::all().limit(1).filters(playable);
         query.offset = offset;
         self.library
             .search(&query)
@@ -4022,9 +4038,39 @@ E
 #[allow(dead_code)]
 const _: Option<Color> = None;
 
+/// Whether the menu music belongs over this screen at all, before anything actually audible
+/// is considered.
+///
+/// The editor is silent until somebody presses play, but it is a working screen and music over
+/// a piano roll is a distraction rather than atmosphere. The song browser is the same kind of
+/// screen and worse for it: it previews whatever is under the cursor, so music there is either
+/// playing against a preview or filling the moment between two of them, cutting in and out on
+/// every move of the cursor. Fading out for each preview and back in between them is more
+/// distracting than either silence or music.
+fn music_suits(screen: Option<&Screen>) -> bool {
+    !matches!(
+        screen,
+        Some(Screen::Editing(_)) | Some(Screen::Songs(_)) | Some(Screen::Sing(..))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_menu_music_stays_out_of_the_song_browser() {
+        // The browser previews whatever is under the cursor. Music there spends its time
+        // fading out for a preview and back in between two of them, so moving the cursor down
+        // a list makes it stutter -- which is worse than either silence or music.
+        assert!(!music_suits(Some(&Screen::Songs(Box::new(
+            rungstar_ui::songselect::SongSelect::new()
+        )))));
+
+        // The menu it was written for still has it.
+        assert!(music_suits(Some(&Screen::Main(MainMenu::new()))));
+        assert!(music_suits(Some(&Screen::About)));
+    }
 
     /// A song folder with an audio file in it, and the entry the index would have made.
     fn a_song(root: &std::path::Path, folder: &str, audio: &str) -> SongEntry {

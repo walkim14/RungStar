@@ -105,17 +105,14 @@ pub enum Narrow {
     Solos,
     /// Songs with a video, which is what most people mean by "the good ones".
     WithVideo,
-    /// Songs whose audio file is actually there.
-    Playable,
 }
 
 impl Narrow {
-    pub const ALL: [Narrow; 5] = [
+    pub const ALL: [Narrow; 4] = [
         Narrow::Everything,
         Narrow::Duets,
         Narrow::Solos,
         Narrow::WithVideo,
-        Narrow::Playable,
     ];
 
     pub fn label(self) -> &'static str {
@@ -124,7 +121,6 @@ impl Narrow {
             Self::Duets => "Duets only",
             Self::Solos => "Solos only",
             Self::WithVideo => "With a video",
-            Self::Playable => "Playable only",
         }
     }
 
@@ -141,7 +137,6 @@ impl Narrow {
             Self::Duets => filters.duet = Some(true),
             Self::Solos => filters.duet = Some(false),
             Self::WithVideo => filters.has_video = Some(true),
-            Self::Playable => filters.playable = Some(true),
         }
         filters
     }
@@ -367,6 +362,13 @@ pub struct SongSelect {
     /// What a scan is doing, when one is running. Shown instead of "no songs", because a
     /// first run reaches this screen before the library exists.
     pub scanning: Option<String>,
+    /// How many songs the library holds that are hidden for being unplayable.
+    ///
+    /// Only read when the list has come back empty, which is the only case it changes what to
+    /// say: a drive that is not plugged in makes every song unplayable at once, and a library
+    /// of eight thousand then looks like a library of none. The application fills it in only
+    /// then, because counting rows nobody will be told about is work for nothing.
+    pub unplayable: usize,
     /// Whether songs are sung to their backing track rather than to the record.
     ///
     /// Set by the application from the saved setting, never by the screen. The same mode is
@@ -417,6 +419,7 @@ impl SongSelect {
             gamepad: false,
             highscores: Vec::new(),
             scanning: None,
+            unplayable: 0,
             instrumental: false,
             instrumental_toggled: false,
             instrumental_available: false,
@@ -525,6 +528,13 @@ impl SongSelect {
     /// what the checkboxes look like they do: German *or* Swedish, and from the eighties.
     pub fn filters(&self) -> rungstar_library::Filters {
         let mut filters = self.narrow.filters();
+        // A song with no audio file, or with no notes, cannot be sung: choosing one is
+        // refused, and until now it still took a place in the list and a turn under the
+        // cursor. Measured on a real library that is 294 songs of 8,159. This is not a
+        // narrowing anybody chose, so nothing that narrows can turn it off -- it used to be
+        // one row of the Kind filter, which meant the browser's own default was to offer
+        // songs it would then refuse.
+        filters.playable = Some(true);
         for (index, facet) in Facet::ALL.iter().enumerate() {
             let chosen = &self.picked[index];
             if chosen.is_empty() {
@@ -1230,7 +1240,20 @@ impl SongSelect {
             widgets.empty_state(list, area, "Finding your songs", progress);
             return;
         }
-        if self.keyboard.is_empty() {
+        if self.unplayable > 0 && self.keyboard.is_empty() {
+            // Everything the library holds is hidden, so the useful thing to say is why,
+            // and the first guess worth offering: songs on a drive nobody has plugged in.
+            widgets.empty_state(
+                list,
+                area,
+                "Nothing here can be played",
+                &format!(
+                    "{} songs are indexed and not one of them has an audio file the game \
+                     can find. If they live on another drive, it may not be connected.",
+                    self.unplayable
+                ),
+            );
+        } else if self.keyboard.is_empty() {
             widgets.empty_state(
                 list,
                 area,

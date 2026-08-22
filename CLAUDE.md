@@ -495,7 +495,11 @@ as long as the music wants rather than as long as a repository tolerates. It is 
 because the constraints of one are what make it bearable under an interface — two pulse
 channels, a stepped triangle and noise, the NES's arrangement, which forces the music to stay
 thin and leaves the middle of the mix free. A minor, matching the sounds. It fades out whenever
-anything else is making noise, because music under a song preview is two pieces of music at once.
+anything else is making noise, because music under a song preview is two pieces of music at
+once -- and on the song browser and in the editor it does not play at all. Fading is enough for
+a screen that occasionally makes a sound; the browser previews whatever is under the cursor, so
+the music there spends its time fading out for a preview and back in between two of them, and
+moving down a list makes it stutter. `music_suits` is where a screen says it wants none.
 `cargo run --release --example menu_music -p rungstar-platform` writes it out to listen to.
 
 Both are played from a `Chime`, which is an event and not a sound, emitted by `rungstar-ui` and
@@ -539,6 +543,31 @@ singing.
   the pitch scale is the whole song's. Both were reported as bugs and both came from the same
   mistake: a window that scrolls recomputes its scale from whatever is inside it, so a note
   changes height as the view moves and you cannot tell whether you are above or below it.
+
+  **A width estimate that is an average is a collision.** `approx_text_width` was a flat
+  0.55 em per character, documented as a slight over-estimate and measured across seven faces
+  as nothing of the sort: the median advance is 0.70 em, `'W'` is 1.13 and `'m'` is 1.06. Most
+  callers only size a box, where being narrow is invisible - but the lyric line lays a line's
+  syllables edge to edge from those numbers and centres each one in the box it was given, so a
+  syllable wider than its estimate spills half the difference into the syllable on either side
+  and the words are drawn through each other. Fast lines showed it first because they hold the
+  most syllables. It is now a measured per-character bound in three buckets, and
+  `rungstar-platform/tests/text_width.rs` checks it against every real face on the machine,
+  because this is the one thing the font-free UI crate cannot check for itself.
+
+  Correcting it made the footer overflow a 1333-wide window, which was a second bug the first
+  one had been hiding: the hint row walked left to right with no bound at all and simply drew
+  past the edge. It stops when the next hint will not fit, and the hints are written most
+  useful first so what is dropped is what is least missed.
+
+  **A missed note is the singer who missed it, in a quieter shade.** Every miss was one shared
+  red, which is fine for one singer and useless for six - a row of identical marks says a note
+  was missed and not by whom, when identifying the singer is the whole reason the mark sits at
+  the pitch they actually sang rather than on the note. The *shape* already says it was a miss:
+  a thin bar off the note against a full bubble on it. That leaves the colour free to say who.
+  A mark several singers share still belongs to none of them and takes a colour of the
+  interface's own - the accent when they all hit, a muted grey when they all missed - because
+  picking one singer's colour there names the wrong person.
 
   **What the display shows has to agree with what scored.** Matching is octave-agnostic and
   the tolerance is up to two semitones, so a sung pitch is drawn folded into the target's
@@ -643,6 +672,22 @@ singing.
   wording problem - a test walks the scale and asserts the two agree. Bands with no songs are
   not offered, which is what keeps the top of the scale honest on a library that has nothing
   brutal in it.
+
+  **A song that cannot be sung is not in the list.** Measured on the real library, 294 songs
+  of 8,159 have no audio file beside them - a download that stopped after the note file, most
+  often - and they indexed, sorted and took their turn under the cursor like any other, right
+  up to being refused when chosen. It was already a filter, one row of Kind called "Playable
+  only", which is the wrong shape for it: that made offering songs the game would then refuse
+  the browser's own default. It is now unconditional and the row is gone, because a filter that
+  can never be turned off is not a filter. The party's random pick goes through the same rule -
+  and through `count_matching`, because a random offset has to be taken into the same set it
+  indexes, or a narrowed query hands back nothing.
+
+  **And when hiding them empties the library, the screen says so.** Songs on a drive that is
+  not plugged in are all unplayable at once, so a library of eight thousand reads as a library
+  of none - and the message for that case sends somebody to add a folder they already have. The
+  count is only taken when the list came back empty, because that is the only time it changes
+  what to say.
 
   **The song list has ends.** It used to wrap, so the last song sat above the first, holding a
   direction never arrived anywhere, and a library smaller than the view drew the same song

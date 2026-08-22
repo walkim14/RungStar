@@ -429,6 +429,32 @@ fn draw_countdown(list: &mut DrawList, area: Rect, style: &Style, colour: Color,
     }
 }
 
+/// What colour a mark on the staff takes: whose it is, and whether it was a hit.
+///
+/// A miss used to be one shared red whoever sang it. That is fine for one singer and useless
+/// for six: a row of identical marks says a note was missed and not by whom, when identifying
+/// the singer is the entire reason the mark sits at the pitch they actually sang rather than on
+/// the note. So a miss is the singer's own colour, darkened -- the *shape* already says it was
+/// a miss (a thin bar off the note, against a full bubble on it), which leaves the colour free
+/// to say who.
+///
+/// A mark several singers share belongs to none of them and takes a colour of the interface's
+/// own rather than one of theirs: the accent when they all hit it, and a plain muted grey when
+/// they all missed, because picking one singer's colour there would name the wrong person.
+pub fn mark_colour(style: &Style, singers: &[usize], hit: bool) -> Color {
+    let shared = singers.len() > 1;
+    match (hit, shared) {
+        (true, true) => style.accent,
+        (true, false) => style.player(singers.first().copied().unwrap_or(0)),
+        (false, true) => style.muted.darken(0.15),
+        // Dark enough to sit under the hits without going black on a dark player colour, which
+        // is why it is a darken rather than an alpha: over a song video a faded mark vanishes.
+        (false, false) => style
+            .player(singers.first().copied().unwrap_or(0))
+            .darken(0.42),
+    }
+}
+
 fn stage_pulse(beat: f64) -> f32 {
     if !beat.is_finite() {
         return 0.0;
@@ -1316,14 +1342,8 @@ impl SingScreen {
                 let x = x_of(from);
                 let w = (x_of(to) - x).max(3.0);
                 let y = y_of(pitch) + (row_h - note_h) / 2.0;
+                let colour = mark_colour(style, &singers, hit);
                 if hit {
-                    let colour = if singers.len() > 1 {
-                        // Everybody on the note at once. The theme's own accent, so it belongs
-                        // to the interface rather than looking like a third singer.
-                        style.accent
-                    } else {
-                        style.player(singers.first().copied().unwrap_or(0))
-                    };
                     let rect = Rect::new(x, y, w, note_h);
                     if from <= beat && to >= beat - 0.8 {
                         list.glow(rect, colour.alpha(0.62));
@@ -1336,11 +1356,12 @@ impl SingScreen {
                     }
                 } else {
                     // A miss stays a thin mark at the pitch actually sung: it belongs to no
-                    // bubble, and drawing it as one would claim it did.
+                    // bubble, and drawing it as one would claim it did. The shape is what says
+                    // "missed"; the colour says who missed it.
                     list.bubble(
                         Rect::new(x, y + note_h * 0.26, w, note_h * 0.48),
-                        style.danger.alpha(0.88),
-                        style.danger.lighten(0.30),
+                        colour.alpha(0.88),
+                        colour.lighten(0.30),
                     );
                 }
             }

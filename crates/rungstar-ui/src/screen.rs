@@ -209,8 +209,20 @@ impl<'a> Widgets<'a> {
         let (bar, rest) = area.cut_bottom(self.style.gap(3.5));
         let mut x = bar.x + self.style.gap(2.0);
         let size = self.style.scaled_text(0.8);
+        let edge = bar.right() - self.style.gap(1.0);
         for (button, action) in hints {
             let chip_w = crate::draw::approx_text_width(button, size) + self.style.gap(1.2);
+            // Stop rather than run off the end. The row has never had a bound and got away
+            // with it while the width estimate was too small; a hint drawn past the edge of
+            // the window is not a hint, and on a Deck there is no way to scroll to it. They
+            // are written most useful first, so what is dropped is what is least missed.
+            let needed = chip_w
+                + self.style.gap(0.5)
+                + crate::draw::approx_text_width(action, size)
+                + self.style.gap(0.5);
+            if x + needed > edge {
+                break;
+            }
             let chip = Rect::new(x, bar.center().y - size * 0.9, chip_w, size * 1.8);
             list.panel(
                 chip,

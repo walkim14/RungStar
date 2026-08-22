@@ -174,13 +174,34 @@ fn an_unbalanced_clip_is_detectable() {
 
 #[test]
 fn estimated_text_width_errs_wide() {
-    // A box a little too wide looks fine; one a little too narrow clips the title. The
-    // estimate is only used where a size is needed before the glyphs exist.
+    // A box a little too wide looks fine; one a little too narrow clips the title -- and where
+    // the sing screen lays syllables edge to edge, it puts one word through the next.
+    //
+    // This used to cap a character at 1.1 em, which is *below* what "W" actually measures, so
+    // no honest over-estimate could have passed it. The cap is what the name always meant to
+    // rule out -- a bound so loose it stops being an estimate -- and the floor is the part
+    // that matters, measured across seven faces.
     let size = 30.0;
-    assert!(approx_text_width("", size) == 0.0);
+    assert_eq!(approx_text_width("", size), 0.0);
     assert!(approx_text_width("iiii", size) > 0.0);
-    assert!(approx_text_width("WWWW", size) < 4.0 * size * 1.1);
+    for (text, widest) in [
+        ("WWWW", 1.13),
+        ("mmmm", 1.06),
+        ("oooo", 0.85),
+        ("llll", 0.34),
+    ] {
+        let needed = text.chars().count() as f32 * size * widest;
+        assert!(
+            approx_text_width(text, size) >= needed,
+            "{text:?} is drawn {needed} wide and estimated at {}",
+            approx_text_width(text, size)
+        );
+    }
     assert!(approx_text_width("ab", size) < approx_text_width("abc", size));
+    // And still a estimate rather than a blanket doubling: an ordinary word averages under a
+    // full em per character, because only four letters are in the widest bucket.
+    let word = "Waterloo";
+    assert!(approx_text_width(word, size) < word.chars().count() as f32 * size);
 }
 
 #[test]

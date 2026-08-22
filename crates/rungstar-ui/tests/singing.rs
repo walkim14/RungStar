@@ -964,7 +964,9 @@ fn a_hit_is_drawn_on_the_note_even_when_it_was_a_semitone_off() {
             }],
             9.0,
         );
-        let wanted = if hit { style.player(0) } else { style.danger };
+        // Asked of the rule rather than spelled out: which colour a mark takes is pinned
+        // by its own test, and this one is about where the mark is drawn.
+        let wanted = rungstar_ui::singscreen::mark_colour(&style, &[0], hit);
         widest(&list, wanted).y
     };
 
@@ -1076,7 +1078,9 @@ fn a_hit_fills_the_bubble_it_landed_in() {
             }],
             9.0,
         );
-        let wanted = if hit { style.player(0) } else { style.danger };
+        // Asked of the rule rather than spelled out: which colour a mark takes is pinned
+        // by its own test, and this one is about where the mark is drawn.
+        let wanted = rungstar_ui::singscreen::mark_colour(&style, &[0], hit);
         widest(&list, wanted)
     };
 
@@ -2150,4 +2154,40 @@ fn a_restart_counts_the_same_wait_in_again() {
         again, first_time,
         "the count after a restart was not the same count"
     );
+}
+
+#[test]
+fn a_missed_note_is_the_singer_who_missed_it_in_a_quieter_shade() {
+    // Every miss was the same red, whoever sang it. With six people on stage that is a row of
+    // identical marks saying a note was missed and not by whom -- and identifying the singer
+    // is the only reason the mark is at the pitch they actually sang rather than on the note.
+    use rungstar_ui::singscreen::mark_colour;
+    let theme = Theme::builtin();
+    let style = theme.resolve_default();
+
+    let first = mark_colour(&style, &[0], false);
+    let second = mark_colour(&style, &[1], false);
+    assert_ne!(first, second, "two singers' misses are the same colour");
+
+    for singer in 0..6 {
+        let miss = mark_colour(&style, &[singer], false);
+        let hit = mark_colour(&style, &[singer], true);
+        assert_ne!(miss, hit, "singer {singer}'s miss looks like their hit");
+        assert_ne!(
+            miss, style.danger,
+            "singer {singer}'s miss is still the one shared red"
+        );
+        // Quieter than the hit, which is what keeps a miss reading as a miss once it is no
+        // longer red: the shape says what happened, the colour says who.
+        assert!(
+            miss.luminance() < hit.luminance(),
+            "singer {singer}'s miss is not muted against their hit"
+        );
+    }
+
+    // Two singers missing the same pitch at the same moment belong to neither of them, so the
+    // mark says nothing about who rather than picking one and being wrong.
+    let shared = mark_colour(&style, &[0, 1], false);
+    assert_ne!(shared, mark_colour(&style, &[0], false));
+    assert_ne!(shared, mark_colour(&style, &[1], false));
 }

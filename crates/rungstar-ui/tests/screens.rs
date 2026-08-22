@@ -1146,7 +1146,10 @@ fn the_list_can_be_narrowed_to_duets() {
     screen.set_results(vec![]);
     screen.handle(Input::Confirm, area);
     assert_eq!(screen.narrow(), Narrow::Everything);
-    assert!(screen.filters().is_empty());
+    assert_eq!(screen.filters().duet, None);
+    // Not `filters().is_empty()`: the query is never empty, because a song that cannot be
+    // sung is always excluded. What "off" means is that nothing the player chose is left.
+    assert_eq!(screen.active_filters(), 0);
 }
 
 #[test]
@@ -1193,7 +1196,10 @@ fn every_filter_can_be_cleared_at_once() {
 
     screen.handle(Input::Search, area);
     assert_eq!(screen.active_filters(), 0);
-    assert!(screen.filters().is_empty());
+    let cleared = screen.filters();
+    assert!(cleared.genres.is_empty() && cleared.languages.is_empty());
+    // The unplayable rule survives clearing, because it is not something that was chosen.
+    assert_eq!(cleared.playable, Some(true));
     assert!(screen.needs_query(), "clearing did not ask for a new query");
 }
 
@@ -2103,4 +2109,74 @@ fn pointing_at_a_scrolling_list_does_not_move_it() {
         value,
         "sweeping the pointer moved the filter value cursor"
     );
+}
+
+#[test]
+fn a_song_that_cannot_be_played_is_never_in_the_list() {
+    // 294 songs of a real 8,159 have no audio file beside them. They index and sort like any
+    // other, so they take a place in the list, take the cursor, and are refused when chosen.
+    // Hiding them is not a filter somebody should have to find: a song that cannot be sung is
+    // not one the browser has any business offering.
+    use rungstar_ui::songselect::Narrow;
+    let area = area();
+    let mut screen = loaded(20);
+    assert_eq!(
+        screen.filters().playable,
+        Some(true),
+        "the browser asked for unplayable songs too"
+    );
+
+    // It is not a narrowing, so nothing narrowing can turn it off — including the one row
+    // that used to say the same thing.
+    screen.set_facets(facets());
+    open_filters(&mut screen, area, "Kind");
+    screen.handle(Input::Right, area);
+    for _ in 0..Narrow::ALL.len() + 1 {
+        assert_eq!(
+            screen.filters().playable,
+            Some(true),
+            "a Kind row turned off the playable rule"
+        );
+        screen.handle(Input::Confirm, area);
+        screen.handle(Input::Down, area);
+    }
+
+    // Nor does clearing every filter, which is the other way back to "everything".
+    screen.clear_filters();
+    assert_eq!(screen.filters().playable, Some(true));
+    assert!(
+        !screen.filters().is_empty(),
+        "an always-on rule cannot report itself as no filter at all"
+    );
+}
+
+#[test]
+fn a_library_hidden_for_being_unplayable_says_so_rather_than_looking_empty() {
+    // Songs on an external drive that is not plugged in are all unplayable at once. Hidden
+    // with no explanation, eight thousand of them read as "No songs yet -- add a folder",
+    // which is the one thing that is certainly not the problem, and the advice sends somebody
+    // to add a folder they already have.
+    let mut screen = SongSelect::new();
+    screen.set_results(Vec::new());
+    screen.unplayable = 8159;
+
+    let text = strings(&draw(&mut screen)).join(" ");
+    assert!(
+        !text.contains("No songs yet"),
+        "a full library was reported as an empty one: {text}"
+    );
+    assert!(
+        text.contains("8159"),
+        "the screen did not say how many were hidden: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("audio"),
+        "the screen did not say why they are hidden: {text}"
+    );
+
+    // With nothing hidden it is a genuinely empty library again, and says the useful thing.
+    let mut fresh = SongSelect::new();
+    fresh.set_results(Vec::new());
+    let text = strings(&draw(&mut fresh)).join(" ");
+    assert!(text.contains("No songs yet"), "{text}");
 }

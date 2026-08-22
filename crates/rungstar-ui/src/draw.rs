@@ -380,10 +380,37 @@ impl DrawList {
 ///
 /// The backend measures exactly when it draws; this is for the handful of places that need a
 /// size *before* the string exists as pixels — a chip that hugs its label, a column that sizes
-/// to its longest entry. Deliberately a slight over-estimate, because a box a little too wide
-/// looks fine and one a little too narrow clips.
+/// to its longest entry, and the sing screen laying a line of syllables side by side.
+///
+/// **An upper bound, not an average.** It was a flat 0.55 em per character, described as a
+/// slight over-estimate and measured across seven faces as nothing of the sort: the median
+/// advance is 0.70 em and `'W'` is 1.13, so "Wo" was handed 0.73 of the room it needed. Where
+/// the number only sizes a box that is harmless, but the sing screen lays syllables edge to
+/// edge from it and centres each one in its box — so a syllable wider than its estimate spills
+/// half the difference into the syllable on either side, and the words are drawn through each
+/// other. Over-estimating leaves a gap; under-estimating is a collision.
 pub fn approx_text_width(text: &str, size: f32) -> f32 {
-    // Average advance across Latin text at this size. Wide scripts overshoot, which is the
-    // safe direction.
-    text.chars().count() as f32 * size * 0.55
+    text.chars().map(|c| advance_of(c) * size).sum()
+}
+
+/// The widest this character is across the faces the game is likely to draw with, as a
+/// fraction of the em size.
+///
+/// Measured rather than guessed, over Segoe UI, Arial, Verdana and Tahoma in regular and bold:
+/// `'W'` 1.13, `'m'` 1.06, `'w'` 0.98, `'M'` 0.96, nothing else in Latin above 0.85, and the
+/// thin letters down at 0.33. Three buckets is enough — the point is a bound, and a table with
+/// an entry per glyph would still be wrong for the next font somebody installs.
+fn advance_of(c: char) -> f32 {
+    match c {
+        // The four that broke it. Nothing else in Latin text comes close.
+        'W' | 'M' | 'm' | 'w' => 1.15,
+        // Punctuation, spaces and the thin letters. Without these the wide bucket would nearly
+        // double an ordinary line and shrink it to fit a box it was already inside.
+        ' ' | 'i' | 'l' | 'j' | 'I' | 'f' | 't' | 'r' | '!' | '.' | ',' | ';' | ':' | '\''
+        | '\u{2019}' | '|' | '(' | ')' | '[' | ']' => 0.55,
+        c if c.is_ascii() => 0.90,
+        // Anything unmeasured — CJK is a full em by construction, and an accented Latin letter
+        // is no wider than the letter under it.
+        _ => 1.15,
+    }
 }

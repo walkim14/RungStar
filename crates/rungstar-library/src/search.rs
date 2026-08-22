@@ -471,6 +471,24 @@ impl Database {
         Ok(held)
     }
 
+    /// How many songs a narrowing matches, without fetching any of them.
+    ///
+    /// The party takes a random offset into the library and needs the size of the same set it
+    /// is offsetting into: counted against everything while the query is narrowed, the offset
+    /// runs off the end and the round is handed nothing. Free text is not part of it — this
+    /// answers "how big is this shelf", not "how many match what is typed".
+    pub fn count_matching(&self, filters: &Filters) -> Result<i64, DbError> {
+        let (clauses, values) = filter_clauses(filters);
+        let mut sql = "SELECT COUNT(*) FROM song".to_owned();
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        let mut statement = self.connection().prepare(&sql)?;
+        let count = statement.query_row(params_from_iter(values.iter()), |row| row.get(0))?;
+        Ok(count)
+    }
+
     /// Distinct values of a column with their counts, for the filter tree.
     ///
     /// Only columns the tree offers are accepted, so this cannot become an injection point.

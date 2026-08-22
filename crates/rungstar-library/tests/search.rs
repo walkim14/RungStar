@@ -139,3 +139,89 @@ fn the_words_divide_the_library_rather_than_the_scale() {
         "the hardest songs there are"
     );
 }
+
+#[test]
+fn asking_for_playable_songs_skips_the_ones_that_cannot_be_sung() {
+    // Measured on a real library: 294 of 8,159 songs have no audio file beside them, most
+    // often a download that stopped after the note file. They index and they sort like any
+    // other song, so they sit in the list, take the cursor, and are refused when chosen.
+    let mut database = Database::in_memory().expect("open index");
+    database
+        .upsert_songs(&[
+            ParsedSong {
+                path: "C:/songs/whole/whole.txt".to_owned(),
+                artist: "Whole".to_owned(),
+                audio_file: Some("whole.ogg".to_owned()),
+                note_count: 40,
+                ..Default::default()
+            },
+            ParsedSong {
+                path: "C:/songs/silent/silent.txt".to_owned(),
+                artist: "Silent".to_owned(),
+                audio_file: None,
+                note_count: 40,
+                ..Default::default()
+            },
+            // Nothing to sing along to it either, and just as unplayable.
+            ParsedSong {
+                path: "C:/songs/wordless/wordless.txt".to_owned(),
+                artist: "Wordless".to_owned(),
+                audio_file: Some("wordless.ogg".to_owned()),
+                note_count: 0,
+                ..Default::default()
+            },
+        ])
+        .expect("write songs");
+
+    let filters = Filters {
+        playable: Some(true),
+        ..Default::default()
+    };
+    let hits = database
+        .search(&SearchQuery::all().filters(filters))
+        .expect("search");
+    let artists: Vec<&str> = hits.iter().map(|song| song.artist.as_str()).collect();
+    assert_eq!(artists, vec!["Whole"]);
+}
+
+#[test]
+fn a_narrowed_library_can_be_counted_without_fetching_it() {
+    // The party picks a song by taking a random offset into the library, which needs the size
+    // of the *same* set it is offsetting into. Counted against everything while the query is
+    // narrowed, the offset runs off the end and the round is handed nothing at all.
+    let mut database = Database::in_memory().expect("open index");
+    database
+        .upsert_songs(&[
+            ParsedSong {
+                path: "C:/songs/a/a.txt".to_owned(),
+                audio_file: Some("a.ogg".to_owned()),
+                note_count: 12,
+                ..Default::default()
+            },
+            ParsedSong {
+                path: "C:/songs/b/b.txt".to_owned(),
+                audio_file: None,
+                note_count: 12,
+                ..Default::default()
+            },
+            ParsedSong {
+                path: "C:/songs/c/c.txt".to_owned(),
+                audio_file: None,
+                note_count: 12,
+                ..Default::default()
+            },
+        ])
+        .expect("write songs");
+
+    assert_eq!(database.count_matching(&Filters::default()).unwrap(), 3);
+    let playable = Filters {
+        playable: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(database.count_matching(&playable).unwrap(), 1);
+    let unplayable = Filters {
+        playable: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(database.count_matching(&unplayable).unwrap(), 2);
+}
